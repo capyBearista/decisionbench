@@ -1,6 +1,11 @@
 # decisionbench
 
-**Status: design/specification phase.** There is no Rust implementation or runnable binary in this repository yet.
+**Status: early implementation.** The Rust CLI can validate and summarize the bundled source dataset offline; benchmarking is not implemented yet.
+
+```sh
+cargo run -- dataset inspect            # bundled effortless dataset
+cargo run -- dataset inspect FILE.json  # another source fixture
+```
 
 **decisionbench** is a planned standalone, terminal-first benchmark for **Decisions models**: specialized models asked to choose an appropriate reasoning-effort level for a target assistant. Its first benchmark evaluates effort-selection quality for **Claude Sonnet** and **Claude Opus** separately, not task-execution success.
 
@@ -8,7 +13,7 @@
 
 - **Rust** benchmark engine shared by a **headless CLI** and **Ratatui TUI**.
 - Initial provider routes: **OpenCode Zen** and **OpenRouter Decisions API**; the same underlying model exposed through different routes is compared as a distinct candidate.
-- Versioned dataset starting from the original 75 [effortless labelled cases](https://github.com/capyBearista/effortless/blob/main/bench/judge-cases.json), preserving 20 holdouts and source provenance.
+- Versioned dataset starting from the original 75 [effortless labelled cases](https://github.com/capyBearista/effortless/blob/99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c/bench/judge-cases.json), preserving 20 holdouts and source provenance.
 - Independent, human-reviewed acceptable effort levels for Sonnet and Opus. Missing counterparts remain **unscored**. Each evaluation is a separate API request, with three logical trials per combination by default.
 - Accuracy and under/over-selection, reliability, latency, consistency, history and manually configured per-route cost reported **separately**. No composite leaderboard score.
 - Raw predictions and confidence retained separately from any future production fallback/retention policy. **Current effort is not supplied as a judging anchor.**
@@ -25,7 +30,7 @@ The later [Valbench integration](https://github.com/capyBearista/decisionbench/i
 
 ## Source attribution
 
-The initial dataset will be derived from the MIT-licensed [effortless project](https://github.com/capyBearista/effortless) by HeyCubit. Preserve the original fixture and copyright/license notice when importing it. The source dataset has **75 cases, 20 holdouts**, and includes labelled Sonnet/Opus examples.
+The initial dataset is derived from the MIT-licensed [effortless project](https://github.com/capyBearista/effortless) by HeyCubit. The original fixture is bundled unmodified with its license and pinned source commit in [datasets/effortless](datasets/effortless/SOURCE.md). The source dataset has **75 cases, 20 holdouts**, and includes labelled Sonnet/Opus examples.
 
 ## Project license
 
