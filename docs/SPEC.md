@@ -59,7 +59,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 2. Benchmark scope and provider identity
 
-- Initially score only **effort selection** for the target model families **Claude Sonnet** and **Claude Opus**. Valid effort names are the explicit ordered set supported by the benchmark revision (initially \`low\`, \`medium\`, \`high\`, \`xhigh\`); verify route-specific supported options during protocol research.
+- Initially score only **effort selection** for the target model families **Claude Sonnet** and **Claude Opus**. Valid effort names are the explicit ordered set supported by the benchmark revision (initially `low`, `medium`, `high`, `xhigh`); verify route-specific supported options during protocol research.
 - A **Decision Model** selects effort; a **Target Model** is Sonnet or Opus. These are different roles.
 - A **Candidate** includes the underlying Decision Model identity when known and its **Provider Route**. Jev via Zen, Jev via OpenRouter, and Jev via TypeSafe direct are different candidates, even if the model name matches.
 - Initial provider transports: OpenCode Zen Decisions endpoint and OpenRouter Decisions API endpoint. Future transports such as SubQ and TypeSafe direct must be possible without changing the domain-level evaluation data; neither is implemented now.
@@ -69,8 +69,8 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 ### 3. Dataset and ground truth
 
 - Import the original **75 effortless cases** as a **byte-for-byte unchanged, versioned source fixture**, subject to source attribution and its license; do not silently repair the original fixture.
-- The original has **20 holdout cases**, **67 Sonnet-labelled cases**, and **8 Opus-labelled cases**. Source records may include \`current.effort\`, \`context\`, \`kind\`, \`holdout\`, and a source ID. These remain provenance, not instructions to a Decisions model.
-- Define a distinct **derived paired dataset revision** representing a prompt/context with independent \`sonnet\` and \`opus\` acceptable-effort labels. Only merge identical prompt-and-context source records with compatible split provenance; retain every original ID and target-specific source metadata.
+- The original has **20 holdout cases**, **67 Sonnet-labelled cases**, and **8 Opus-labelled cases**. Source records may include `current.effort`, `context`, `kind`, `holdout`, and a source ID. These remain provenance, not instructions to a Decisions model.
+- Define a distinct **derived paired dataset revision** representing a prompt/context with independent `sonnet` and `opus` acceptable-effort labels. Only merge identical prompt-and-context source records with compatible split provenance; retain every original ID and target-specific source metadata.
 - Four exact prompt/context pairs in the original dataset already have Sonnet and Opus labels. Do not synthesize the other labels. Unreviewed counterparts are absent/unscored.
 - Preserve dataset revision, source record provenance, kind/category and tuned/holdout split. Do not tune decision prompts or select models using the holdout set and then present that same holdout as untouched.
 - A label is a **set of acceptable efforts**, not a ranked prediction; its first listed value is not an enforced scoring preference.
@@ -79,7 +79,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 - Each **Trial** is one **Candidate × Case × Target Model × repetition**; send an **independent Decisions API request** for each trial, never the full dataset as one request.
 - For an exact Sonnet-versus-Opus paired comparison, use the same task, relevant conversation context, question wording, and evaluation settings; change the target Claude model identifier. Preserve any known provider-envelope differences as evidence.
-- **Do not send the previous/current reasoning effort as a judging input**. The original \`current.effort\` field is source provenance only. Before implementing, establish whether each provider accepts omission or requires an explicit null; never substitute a meaningful effort that can anchor the judge.
+- **Do not send the previous/current reasoning effort as a judging input**. The original `current.effort` field is source provenance only. Before implementing, establish whether each provider accepts omission or requires an explicit null; never substitute a meaningful effort that can anchor the judge.
 - Relevant recent conversation context **does** matter, especially for follow-up/answer cases. Preserve and send it as defined by the dataset revision.
 - No effortless-style short-follow-up shortcut, confidence fallback, bias, floor/ceiling, save mode, or automatic keep-current rule is applied in the **raw model-quality** benchmark.
 - Parse and preserve the **raw effort prediction** separately from the normalized effort and any future **effective decision** produced by a selected policy. The initial accuracy score uses the raw normalized model prediction, not a post-policy decision.
@@ -87,7 +87,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 5. Execution, failures, and evidence
 
-- Default to **three independent successful logical trials requested per combination**, with configurable repetitions, timeouts and concurrency. Retries are bounded and configurable, not unlimited. Retry policy should identify retryable transport/status errors and distinguish them from valid but wrong predictions.
+- Default to **three independent logical trials scheduled per combination**, with configurable repetitions, timeouts and concurrency. Retries are bounded and configurable, not unlimited. Retry policy should identify retryable transport/status errors and distinguish them from valid but wrong predictions.
 - Every logical trial can contain one or more **physical Attempts**; record each attempt and its disposition. Do not discard timeouts/errors that precede a successful retry.
 - A run may finish **complete**, **partial/cancelled**, or **failed**. Cancellation preserves completed evidence and failure details. Avoid presenting partial results as equivalent to complete runs.
 - Provider errors, missing/invalid predictions, and wrong valid predictions have different meanings. Report **response correctness**, **coverage**, and **transport reliability** separately with honest denominators.
@@ -153,7 +153,7 @@ Each implementation slice should be **independently demonstrable end to end**, n
 
 ## Outstanding verification tasks (not permission to guess)
 
-- Verify per-provider Decisions request/response schemas and how to omit or null the old \`current_effort\` state field.
+- Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field.
 - Verify effort choice options and response confidence/usage fields per route.
 - Validate the imported dataset's source partition and duplicate-pair mapping before deriving a paired dataset revision.
 - Settle exact CLI flags, TUI keybindings, transport error taxonomy, and evidence schema field names during the relevant small implementation slices, while preserving the above domain-level invariants.
