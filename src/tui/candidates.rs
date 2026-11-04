@@ -169,9 +169,27 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Follows symlinks by hand so a dangling link still resolves to its (missing) target.
+fn resolve_links(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let mut path = path.to_path_buf();
+    for _ in 0..40 {
+        let is_link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink());
+        if !is_link {
+            return Ok(path);
+        }
+        let link = std::fs::read_link(&path)
+            .map_err(|e| format!("cannot read link {}: {e}", path.display()))?;
+        path = match path.parent() {
+            Some(parent) => parent.join(link),
+            None => link,
+        };
+    }
+    Err(format!("too many symlinks at {}", path.display()))
+}
+
 fn save(app: &mut App) -> Result<(), String> {
     // A symlinked config is written through, so the link survives the rename.
-    let config = std::fs::canonicalize(&app.config).unwrap_or_else(|_| app.config.clone());
+    let config = resolve_links(&app.config)?;
     let existing = match std::fs::read_to_string(&config) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,

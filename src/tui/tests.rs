@@ -302,6 +302,42 @@ fn saving_through_a_symlinked_config_keeps_the_link() {
 }
 
 #[test]
+fn saving_through_a_dangling_symlink_creates_the_target_and_keeps_the_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_, dir) = app();
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = dir.join("config.toml");
+    std::os::unix::fs::symlink("shared/new.toml", &link).unwrap();
+    let mut app = App::new(Some(link.clone()), Some(dir.join("runs"))).unwrap();
+    add_candidate(&mut app, "beta", "n", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+    let target = dir.join("shared/new.toml");
+    assert!(std::fs::read_to_string(&target).unwrap().contains("beta"));
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn saving_through_a_two_hop_symlink_chain_keeps_both_links() {
+    let (_, dir) = app();
+    std::fs::create_dir_all(dir.join("real")).unwrap();
+    let (first, second, target) = (
+        dir.join("config.toml"),
+        dir.join("hop.toml"),
+        dir.join("real/config.toml"),
+    );
+    std::os::unix::fs::symlink("hop.toml", &first).unwrap();
+    std::os::unix::fs::symlink("real/config.toml", &second).unwrap();
+    let mut app = App::new(Some(first.clone()), Some(dir.join("runs"))).unwrap();
+    add_candidate(&mut app, "beta", "n", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    assert!(std::fs::symlink_metadata(&first).unwrap().is_symlink());
+    assert!(std::fs::symlink_metadata(&second).unwrap().is_symlink());
+    assert!(std::fs::read_to_string(&target).unwrap().contains("beta"));
+}
+
+#[test]
 fn saving_keeps_the_configs_permissions_and_creates_new_ones_private() {
     use std::os::unix::fs::PermissionsExt;
     let mode =
