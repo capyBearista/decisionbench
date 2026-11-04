@@ -53,7 +53,7 @@ A Raw Prediction mapped to a canonical effort value for grading, without applyin
 The action taken after an explicitly specified production-policy interpretation of a prediction (for example, an uncertainty fallback). It is separate from Raw Prediction and is not the initial benchmark's scoring target.
 
 **Run**  
-One configured benchmark execution, identifying the selected Candidates, Dataset Revision, Judge Instructions, targets, repetitions and execution settings. Contains Trials and associated evidence.
+One configured benchmark execution, identifying the selected Candidates, Dataset Revision, Judge Instructions, targets, repetitions and execution settings. Contains Trials and associated evidence. A Run ends **complete** (every planned Trial recorded), **partial** (cancelled or interrupted) or **failed** (stopped by an internal error).
 
 **Trial**  
 One logical evaluation of one Candidate × Judge Instructions × Case × Target Model × repetition. A Trial can require multiple Attempts when a retry policy is enabled.
@@ -68,7 +68,7 @@ A derived classification of a valid Normalized Prediction against the Label for 
 Immutable records of the Run configuration, Attempts, Raw Responses and provenance used to compute Grades and aggregate results.
 
 **Pricing Snapshot**  
-Manually entered per-Provider-Route rates captured with a Run so estimated costs can be reproduced without fetching current prices.
+Manually entered rates for each Candidate's Provider Route, captured with a Run so estimated costs can be reproduced without fetching current prices.
 
 ## Relationships
 
