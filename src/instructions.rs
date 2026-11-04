@@ -149,6 +149,14 @@ mod tests {
     }
 
     #[test]
+    fn the_effortless_file_parses_with_all_four_targets() {
+        let text = include_str!("../prompts/effortless.md");
+        let set = parse_instructions("effortless", text).unwrap();
+        let order: Vec<Target> = set.targets.iter().map(|(t, _)| *t).collect();
+        assert_eq!(order, Target::ALL);
+    }
+
+    #[test]
     fn bundled_set_parses() {
         let set = parse_instructions(BUNDLED_NAME, BUNDLED_TEXT).unwrap();
         assert_eq!(set.name, "neutral");

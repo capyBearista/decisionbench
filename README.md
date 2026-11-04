@@ -67,7 +67,7 @@ A reply that arrives is never retried, even when its effort is invalid. A Trial'
 ### Reading results
 
 - `show FILE` prints the full report of one run: accuracy (hit, under, over, invalid and unscored counts per Candidate × Judge Instructions × target, with the denominator), cross-model metrics, consistency, coverage and validity, reliability, latency (median and p95), cost and warnings. A ratio with nothing to divide by prints as `n/a`, not 0%.
-- `compare FILE…` (two or more) prints accuracy per run side by side, after a list of everything that makes the runs not directly comparable: dataset, grading revision, schema, targets, instructions content, provider route, or a run that is not complete.
+- `compare FILE…` (two or more) prints accuracy per run side by side, after a list of everything that makes the runs not directly comparable: dataset, grading revision, schema, targets, instructions content, provider route, case selection, repetitions, unscored inclusion, candidates, or a run that is not complete.
 - `history [DIR]` lists saved runs by creation time (default: the evidence folder above) with state, recorded and planned Trials, Candidates and dataset hash. Unreadable files are listed as such.
 
 The two cross-model metrics sit next to the per-target numbers and never replace them. **Joint hit** is the share of Trials, among those with at least two labelled targets that all gave a valid effort, where every labelled target hit. **Gap agreement** is the share of eligible target pairs that keep the expected order: when two labels do not overlap, the target with the higher range must get a strictly higher effort.
@@ -82,10 +82,10 @@ The two cross-model metrics sit next to the per-target numbers and never replace
 
 ### Judge Instructions
 
-The task text, per-model instructions and per-effort descriptions sent with every request live in a Markdown file. Two sets are bundled:
+The task text, per-model instructions and per-effort descriptions sent with every request live in a Markdown file. Two sets ship with the repository; only `neutral` is built into the binary:
 
 - [`prompts/neutral.md`](prompts/neutral.md), the default, uses the same neutral criteria for every model and has no effortless policy rules.
-- [`prompts/effortless.md`](prompts/effortless.md) mirrors effortless's text for Haiku, Sonnet and Opus, plus a **drafted Fable section** that has not been measured.
+- [`prompts/effortless.md`](prompts/effortless.md), selected with `--instructions prompts/effortless.md`, mirrors effortless's text for Haiku, Sonnet and Opus, plus a **drafted Fable section** that has not been measured.
 
 Pass another file with `--instructions PATH`; the file name without `.md` is the set's name. The format is an intro (sent as `state.task`), then one `## <target>` section per model in the order `haiku`, `sonnet`, `opus`, `fable`. Each section is an instructions paragraph followed by exactly five lines in the order `low`, `medium`, `high`, `xhigh`, `max`, none empty:
 

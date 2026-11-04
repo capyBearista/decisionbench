@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{App, block, cut, list_lines, nav, step, theme};
+use super::{App, Nav, block, cut, list_lines, nav, step, theme};
 use crate::batch::{load_run, read_runs};
 use crate::evidence::{RunFile, RunState};
 use crate::report;
@@ -27,6 +27,35 @@ struct View {
     title: String,
     text: String,
     scroll: usize,
+    /// Columns cut off the left of every line, so wide lines can be read to their end.
+    hscroll: usize,
+}
+
+const HSTEP: usize = 8;
+
+impl View {
+    fn new(title: String, text: String) -> Self {
+        Self {
+            title,
+            text,
+            scroll: 0,
+            hscroll: 0,
+        }
+    }
+
+    /// Moves the view: vertical keys scroll lines, Left/Right shift by `HSTEP` columns, kept
+    /// between 0 and the widest line.
+    fn scroll(&mut self, nav: Nav) {
+        let lines = self.text.lines().count();
+        let widest = self.text.lines().map(|l| l.chars().count()).max();
+        match nav {
+            Nav::Left => self.hscroll = self.hscroll.saturating_sub(HSTEP),
+            Nav::Right => {
+                self.hscroll = (self.hscroll + HSTEP).min(widest.unwrap_or(0).saturating_sub(1));
+            }
+            _ => self.scroll = step(self.scroll, lines, nav),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -73,18 +102,10 @@ impl State {
         };
         // Read again so the text is what `show` prints for the file as it is now.
         let text = load_run(&dir.join(&entry.name)).map(|run| report::report(&run).to_string());
-        self.view = Some(match text {
-            Ok(text) => View {
-                title: format!("report {}", entry.name),
-                text,
-                scroll: 0,
-            },
-            Err(e) => View {
-                title: format!("report {}", entry.name),
-                text: e,
-                scroll: 0,
-            },
-        });
+        self.view = Some(View::new(
+            format!("report {}", entry.name),
+            text.unwrap_or_else(|e| e),
+        ));
     }
 
     fn compare_marked(&mut self, dir: &Path) -> Result<(), String> {
@@ -97,11 +118,10 @@ impl State {
         if runs.len() < 2 {
             return Err("mark two or more readable runs with Space to compare".into());
         }
-        self.view = Some(View {
-            title: format!("compare {} runs", runs.len()),
-            text: report::Comparison(&runs).to_string(),
-            scroll: 0,
-        });
+        self.view = Some(View::new(
+            format!("compare {} runs", runs.len()),
+            report::Comparison(&runs).to_string(),
+        ));
         Ok(())
     }
 }
@@ -113,8 +133,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             state.view = None;
         } else if let Some(n) = nav(key) {
-            let last = view.text.lines().count().saturating_sub(1);
-            view.scroll = step(view.scroll, last + 1, n);
+            view.scroll(n);
         }
         return;
     }
@@ -166,7 +185,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .text
             .lines()
             .skip(view.scroll)
-            .map(Line::from)
+            .map(|l| Line::from(l.chars().skip(view.hscroll).collect::<String>()))
             .collect();
         frame.render_widget(Paragraph::new(lines).block(block(&view.title)), area);
         return;
@@ -223,4 +242,30 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .block(block(&format!("runs · {}", app.out.display()))),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sideways_scroll_steps_by_columns_and_stays_inside_the_widest_line() {
+        let mut view = View::new("t".into(), format!("short\n{}", "x".repeat(20)));
+        view.scroll(Nav::Left);
+        assert_eq!(view.hscroll, 0);
+        view.scroll(Nav::Right);
+        assert_eq!(view.hscroll, HSTEP);
+        for _ in 0..5 {
+            view.scroll(Nav::Right);
+        }
+        assert_eq!(view.hscroll, 19); // the widest line is 20 columns
+        view.scroll(Nav::Left);
+        assert_eq!(view.hscroll, 11);
+        view.scroll(Nav::Down);
+        assert_eq!((view.scroll, view.hscroll), (1, 11));
+        // An empty text has nothing to scroll to.
+        let mut empty = View::new("t".into(), String::new());
+        empty.scroll(Nav::Right);
+        assert_eq!(empty.hscroll, 0);
+    }
 }

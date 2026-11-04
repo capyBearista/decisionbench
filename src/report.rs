@@ -7,7 +7,7 @@ use std::fmt;
 
 use crate::cost::{CostTally, attempt_cost};
 use crate::dataset::Effort;
-use crate::evidence::{CandidateRecord, RunFile, RunState, TrialRecord};
+use crate::evidence::{CandidateRecord, Manifest, RunFile, RunState, TrialRecord};
 use crate::grade::{Grade, Tally, Target};
 use crate::provider::{Disposition, normalize};
 
@@ -496,6 +496,22 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
                 .join(", ")
         };
         differ("target set", names(&m.targets), names(&first.targets));
+        let set = |cases: &[String]| {
+            let mut ids = cases.to_vec();
+            ids.sort();
+            ids.join(", ")
+        };
+        differ("case selection", set(&m.cases), set(&first.cases));
+        differ(
+            "repetitions",
+            m.settings.repetitions.to_string(),
+            first.settings.repetitions.to_string(),
+        );
+        differ(
+            "unscored inclusion",
+            m.settings.include_unscored.to_string(),
+            first.settings.include_unscored.to_string(),
+        );
         for i in &m.instructions {
             if let Some(j) = first.instructions.iter().find(|j| j.name == i.name)
                 && j.sha256 != i.sha256
@@ -509,6 +525,25 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
                 ));
             }
         }
+        let missing = |from: &Manifest, other: &Manifest| {
+            from.candidates
+                .iter()
+                .filter(|c| {
+                    !other
+                        .candidates
+                        .iter()
+                        .any(|d| d.candidate.name == c.candidate.name)
+                })
+                .map(|c| {
+                    format!(
+                        "{}: candidate `{}` is not in {}",
+                        from.id, c.candidate.name, other.id
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        found.extend(missing(m, first));
+        found.extend(missing(first, m));
         for c in &m.candidates {
             let route = |c: &CandidateRecord| {
                 format!(
@@ -546,7 +581,7 @@ impl fmt::Display for Comparison<'_> {
         if found.is_empty() {
             writeln!(
                 f,
-                "comparable: same dataset, grading, instructions and routes"
+                "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, instructions, candidates and routes"
             )?;
         } else {
             writeln!(f, "Not directly comparable:")?;

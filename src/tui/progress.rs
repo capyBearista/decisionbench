@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -132,33 +132,44 @@ impl State {
     /// Applies what the engine thread sent. Returns a message when the Run ended.
     pub fn pump(&mut self) -> Option<String> {
         let mut finished = None;
-        while let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            match msg {
-                Msg::Trial {
+        while let Some(rx) = &self.rx {
+            match rx.try_recv() {
+                Ok(Msg::Trial {
                     line,
                     answered,
                     retries,
-                } => {
+                }) => {
                     self.done += 1;
                     self.errors += usize::from(!answered);
                     self.retries += retries;
                     self.lines.push(line);
                 }
-                Msg::Done { state, error } => {
+                Ok(Msg::Done { state, error }) => {
                     self.phase = match (state, error) {
                         (RunState::Complete, _) => Phase::Complete,
                         (RunState::Partial, _) => Phase::Cancelled,
                         (RunState::Failed, e) => Phase::Failed(e.unwrap_or_default()),
                     };
                     self.rx = None;
-                    finished = Some(format!(
-                        "run ended: {}; Enter on the Run screen opens its report",
-                        self.phase_label().1
-                    ));
+                    finished = Some(self.ended());
+                }
+                Err(TryRecvError::Empty) => break,
+                // The sender is gone without a Done: the thread died (panic) mid-run.
+                Err(TryRecvError::Disconnected) => {
+                    self.phase = Phase::Failed("engine thread stopped".into());
+                    self.rx = None;
+                    finished = Some(self.ended());
                 }
             }
         }
         finished
+    }
+
+    fn ended(&self) -> String {
+        format!(
+            "run ended: {}; Enter on the Run screen opens its report",
+            self.phase_label().1
+        )
     }
 
     fn phase_label(&self) -> (theme::Status, String) {
@@ -322,5 +333,19 @@ mod tests {
             assert_eq!(view.phase, phase);
             assert_eq!((view.done, view.errors, view.retries), (1, 1, 2));
         }
+    }
+
+    #[test]
+    fn an_engine_thread_that_vanishes_fails_the_run() {
+        let (tx, rx) = channel();
+        let mut view = State {
+            phase: Phase::Running,
+            rx: Some(rx),
+            ..State::default()
+        };
+        drop(tx);
+        assert!(view.pump().is_some());
+        assert_eq!(view.phase, Phase::Failed("engine thread stopped".into()));
+        assert!(view.rx.is_none() && !view.active());
     }
 }

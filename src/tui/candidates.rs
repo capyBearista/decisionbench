@@ -175,7 +175,11 @@ fn save(app: &mut App) -> Result<(), String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    std::fs::write(&app.config, text)
+    // Write beside the config, then rename: a failed write never leaves a half-written config.
+    let mut temp = app.config.clone().into_os_string();
+    temp.push(".tmp");
+    std::fs::write(&temp, text)
+        .and_then(|()| std::fs::rename(&temp, &app.config))
         .map_err(|e| format!("cannot write {}: {e}", app.config.display()))?;
     app.candidates.dirty = false;
     Ok(())

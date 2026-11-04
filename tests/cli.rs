@@ -3121,7 +3121,7 @@ fn compare_lines_up_matching_runs_one_column_each() {
     let out = stdout_of_success(run(&["compare", x.to_str().unwrap(), y.to_str().unwrap()]));
     assert_has_line(
         &out,
-        "comparable: same dataset, grading, instructions and routes",
+        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, instructions, candidates and routes",
     );
     assert!(!out.contains("Not directly comparable"), "{out}");
     assert_has_line(&out, "candidate instructions target X1 Y1");
@@ -3289,4 +3289,66 @@ fn history_defaults_to_the_evidence_directory() {
             .any(|l| squash(l) == "D1 7 complete 2/2 c1 0123456789ab"),
         "{out}"
     );
+}
+
+fn variant_of(base: &Path, file: &str, edit: impl FnOnce(&mut Vec<Value>)) -> PathBuf {
+    let mut lines = jsonl(base);
+    lines[0]["id"] = json!("V2");
+    edit(&mut lines);
+    write_run(file, &lines)
+}
+
+fn compare_pair(a: &Path, b: &Path) -> String {
+    stdout_of_success(run(&["compare", a.to_str().unwrap(), b.to_str().unwrap()]))
+}
+
+fn compare_base(file: &str) -> PathBuf {
+    compare_run(
+        file,
+        "X1",
+        1,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "low"],
+        Some("complete"),
+    )
+}
+
+#[test]
+fn compare_flags_different_case_selection() {
+    let x = compare_base("cmp-cases-x.jsonl");
+    let y = variant_of(&x, "cmp-cases-y.jsonl", |l| {
+        l[0]["cases"] = json!(["c1", "c2"]);
+    });
+    let out = compare_pair(&x, &y);
+    assert_has_line(&out, "- V2: case selection differs from X1 (c1, c2 vs c1)");
+    assert!(!out.contains("no differences found"), "{out}");
+}
+
+#[test]
+fn compare_flags_different_repetitions_and_unscored_inclusion() {
+    let x = compare_base("cmp-reps-x.jsonl");
+    let y = variant_of(&x, "cmp-reps-y.jsonl", |l| {
+        l[0]["settings"]["repetitions"] = json!(3);
+        l[0]["settings"]["include_unscored"] = json!(true);
+    });
+    let out = compare_pair(&x, &y);
+    assert_has_line(&out, "- V2: repetitions differs from X1 (3 vs 1)");
+    assert_has_line(
+        &out,
+        "- V2: unscored inclusion differs from X1 (true vs false)",
+    );
+}
+
+#[test]
+fn compare_flags_candidates_missing_from_either_run() {
+    let x = compare_base("cmp-cand-x.jsonl");
+    let y = variant_of(&x, "cmp-cand-y.jsonl", |l| {
+        l[0]["candidates"].as_array_mut().unwrap().push(json!(
+            {"name": "c2", "provider": "zen", "model": "m2", "url": "http://stub"}
+        ));
+    });
+    assert_has_line(&compare_pair(&x, &y), "- V2: candidate `c2` is not in X1");
+    assert_has_line(&compare_pair(&y, &x), "- V2: candidate `c2` is not in X1");
 }

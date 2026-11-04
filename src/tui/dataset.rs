@@ -51,7 +51,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let counts: Vec<String> = Target::ALL
         .iter()
         .zip(state.summary.labels)
-        .map(|(t, n)| format!("{t} {n}"))
+        .map(|(t, n)| format!("{}{n}", t.to_string().chars().next().unwrap()))
         .collect();
     let rows: Vec<Line> = state
         .cases
@@ -75,11 +75,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             ))
         })
         .collect();
-    let title = format!(
-        "{} cases · labelled: {}",
-        state.summary.cases,
-        counts.join(" ")
-    );
+    // Initials, as in the row marks: the full names would be cut off in a narrow list pane.
+    let title = format!("{} cases · {}", state.summary.cases, counts.join(" "));
     let height = list.height.saturating_sub(2) as usize;
     frame.render_widget(
         Paragraph::new(list_lines(rows, state.selected, height)).block(block(&title)),

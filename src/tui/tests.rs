@@ -199,3 +199,41 @@ fn start_refuses_incomplete_setups_without_leaving_the_screen() {
     assert_eq!(app.screen, Screen::Setup);
     assert!(!dir.join("runs").exists());
 }
+
+#[test]
+fn quitting_with_unsaved_candidate_edits_needs_a_second_press() {
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    let (mut app, _) = app();
+    add_candidate(&mut app, "alpha", "m", ["", "", ""]);
+    assert_eq!(press(&mut app, KeyCode::Char('q')), Effect::None);
+    assert_eq!(
+        app.message,
+        "unsaved candidate edits: press q again to quit without saving, or s to save"
+    );
+    assert_eq!(press(&mut app, KeyCode::Char('q')), Effect::Quit);
+    // Any other key in between disarms it; Ctrl-C counts like q.
+    assert_eq!(handle_key(&mut app, ctrl_c), Effect::None);
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(handle_key(&mut app, ctrl_c), Effect::None);
+    assert_eq!(handle_key(&mut app, ctrl_c), Effect::Quit);
+    // Saved edits quit at once.
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(press(&mut app, KeyCode::Char('q')), Effect::Quit);
+}
+
+#[test]
+fn saving_writes_a_temp_file_then_renames_it_over_the_config() {
+    let (mut app, dir) = app();
+    add_candidate(&mut app, "alpha", "m", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    let config = dir.join("config.toml");
+    let first = std::fs::read_to_string(&config).unwrap();
+    assert!(!dir.join("config.toml.tmp").exists());
+    // A blocked temp path makes the save fail and leaves the existing config untouched.
+    std::fs::create_dir(dir.join("config.toml.tmp")).unwrap();
+    add_candidate(&mut app, "beta", "m", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    assert!(app.message.contains("cannot write"), "{}", app.message);
+    assert!(app.candidates.dirty);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), first);
+}

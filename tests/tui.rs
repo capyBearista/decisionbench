@@ -146,6 +146,27 @@ fn dataset_lists_each_target_with_its_label_status() {
 }
 
 #[test]
+fn dataset_title_with_label_counts_fits_in_the_list_pane() {
+    let (mut app, _) = app_with_fixture("tui-dataset-title");
+    app.screen = Screen::Dataset;
+    for width in [60, 80, 100] {
+        let rows = draw(&app, width, 30);
+        let title = rows
+            .iter()
+            .find(|r| r.contains(" cases · "))
+            .unwrap_or_else(|| panic!("no title at {width}:\n{}", rows.join("\n")));
+        let counts = title.split(" cases · ").nth(1).unwrap();
+        let words: Vec<&str> = counts.split_whitespace().collect();
+        for (word, initial) in words.iter().zip(['h', 's', 'o', 'f']) {
+            assert!(
+                word.starts_with(initial) && word[1..].parse::<usize>().is_ok(),
+                "title cut at {width}: {title:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_too_small_terminal_gets_a_message_not_a_panic() {
     let (app, _) = app_with_fixture("tui-small");
     for (w, h) in [(59, 16), (60, 15), (10, 3), (1, 1)] {
@@ -187,6 +208,28 @@ fn the_results_pane_shows_exactly_what_show_prints() {
             rows.join("\n")
         );
     }
+}
+
+#[test]
+fn right_and_left_scroll_the_report_sideways_without_changing_its_text() {
+    let (mut app, _) = app_with_fixture("tui-hscroll");
+    app.screen = Screen::Results;
+    press(&mut app, KeyCode::Enter);
+    let before = draw(&app, 100, 40);
+    let line = before
+        .iter()
+        .map(|r| r.trim_matches(|c: char| !c.is_alphanumeric()))
+        .find(|r| r.starts_with("state: "))
+        .expect("report has a state line")
+        .to_string();
+    press(&mut app, KeyCode::Right);
+    let shifted = draw(&app, 100, 40);
+    assert!(
+        contains(&shifted, &line[8..]) && !contains(&shifted, &line),
+        "{line}"
+    );
+    press(&mut app, KeyCode::Char('h'));
+    assert_eq!(draw(&app, 100, 40), before);
 }
 
 #[test]

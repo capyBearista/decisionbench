@@ -71,6 +71,8 @@ pub struct App {
     pub results: results::State,
     /// One line shown above the key hints: the last result or error.
     pub message: String,
+    /// The last key asked to quit while Candidate edits were unsaved; a second one confirms.
+    quit_armed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +99,7 @@ impl App {
             run: progress::State::default(),
             results: results::State::default(),
             message: String::new(),
+            quit_armed: false,
             config,
             out,
         };
@@ -128,22 +131,30 @@ impl App {
     }
 }
 
-/// Quitting during a Run first cancels it; a second request leaves without waiting.
-fn request_quit(app: &mut App) -> Effect {
+/// Quitting during a Run first cancels it; a second request leaves without waiting. Unsaved
+/// Candidate edits also need a second request, made right after the first.
+fn request_quit(app: &mut App, confirmed: bool) -> Effect {
     if app.run.cancel() {
         app.message = "cancelling: finishing in-flight trials; quit again to leave now".into();
+        return Effect::None;
+    }
+    if app.candidates.dirty && !confirmed {
+        app.quit_armed = true;
+        app.message =
+            "unsaved candidate edits: press q again to quit without saving, or s to save".into();
         return Effect::None;
     }
     Effect::Quit
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Effect {
+    let confirmed = std::mem::take(&mut app.quit_armed);
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return request_quit(app);
+        return request_quit(app, confirmed);
     }
     if !app.editing() {
         let screen = match key.code {
-            KeyCode::Char('q') => return request_quit(app),
+            KeyCode::Char('q') => return request_quit(app, confirmed),
             KeyCode::Char(c @ '1'..='5') => Some(Screen::ALL[c as usize - '1' as usize]),
             KeyCode::Tab => Some(app.screen.shifted(1)),
             KeyCode::BackTab => Some(app.screen.shifted(-1)),
@@ -301,11 +312,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(keys).style(theme::dim()), hints);
 }
 
-/// Runs the TUI until the user quits. The terminal is restored on every way out; `ratatui::init`
+/// Runs the TUI until the user quits. The terminal is restored on every way out; `ratatui::try_init`
 /// also installs a panic hook that restores it before the panic message prints.
 pub fn run(config: Option<PathBuf>, out: Option<PathBuf>) -> Result<(), String> {
     let mut app = App::new(config, out)?;
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init().map_err(|e| format!("cannot open the terminal: {e}"))?;
     let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
     result.map_err(|e| format!("terminal error: {e}"))
