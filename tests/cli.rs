@@ -23,6 +23,7 @@ fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
     for name in [
         "OPENROUTER_API_KEY",
         "OPENCODE_API_KEY",
+        "DECISIONBENCH_TEST_BASE_URL",
         "HTTP_PROXY",
         "http_proxy",
         "HTTPS_PROXY",
@@ -487,9 +488,9 @@ fn stub(status: u16, body: &str) -> Stub {
     Stub { url, requests }
 }
 
-fn candidate_toml(name: &str, provider: &str, model: &str, url: &str) -> String {
+fn candidate_toml(name: &str, provider: &str, model: &str) -> String {
     format!(
-        "[[candidate]]\nname = \"{name}\"\ndecision_model = \"jev-1.13\"\nprovider = \"{provider}\"\nmodel = \"{model}\"\nurl = \"{url}\"\n"
+        "[[candidate]]\nname = \"{name}\"\ndecision_model = \"jev-1.13\"\nprovider = \"{provider}\"\nmodel = \"{model}\"\n"
     )
 }
 
@@ -507,16 +508,19 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// One `evaluate` run with its own config file and output directory, both named after `test`.
+/// Requests go to `url` through the test hook.
 struct Eval {
     out_dir: PathBuf,
     config: PathBuf,
+    url: String,
 }
 
 impl Eval {
-    fn new(test: &str, config_toml: &str) -> Self {
+    fn new(test: &str, config_toml: &str, url: &str) -> Self {
         Self {
             out_dir: fresh_dir(&format!("{test}-out")),
             config: temp_file(&format!("{test}-config.toml"), config_toml),
+            url: url.to_string(),
         }
     }
 
@@ -524,7 +528,9 @@ impl Eval {
         let mut args = vec!["evaluate", "--config", self.config.to_str().unwrap()];
         args.extend(["--out", self.out_dir.to_str().unwrap()]);
         args.extend(extra);
-        run_with_env(&args, envs)
+        let mut envs = envs.to_vec();
+        envs.push(("DECISIONBENCH_TEST_BASE_URL", &self.url));
+        run_with_env(&args, &envs)
     }
 
     /// The only evidence file written so far, parsed.
@@ -555,12 +561,8 @@ fn summary(out: &Output) -> String {
 fn openrouter_eval(test: &str, stub: &Stub) -> Eval {
     Eval::new(
         test,
-        &candidate_toml(
-            "jev-openrouter",
-            "openrouter",
-            "typesafe/jev-1.13",
-            &stub.url,
-        ),
+        &candidate_toml("jev-openrouter", "openrouter", "typesafe/jev-1.13"),
+        &stub.url,
     )
 }
 
@@ -644,7 +646,7 @@ fn answered_hit_prints_summary_and_saves_evidence() {
     assert_eq!(evidence["case_id"], "c002");
     assert_eq!(evidence["target"], "opus");
     assert_eq!(evidence["label"], "low");
-    assert_eq!(evidence["candidate"]["url"], stub.url);
+    assert_eq!(evidence["url"], stub.url);
     assert_eq!(evidence["candidate"]["provider"], "openrouter");
     assert_eq!(evidence["dataset"]["name"], "bundled cases");
     assert_eq!(evidence["attempt"]["disposition"], "answered");
@@ -674,7 +676,8 @@ fn zen_without_a_key_sends_no_authorization_header() {
     let stub = stub(200, OPENROUTER_REPLY);
     let eval = Eval::new(
         "zen-nokey",
-        &candidate_toml("jev-zen", "zen", "jev-1.13-free", &stub.url),
+        &candidate_toml("jev-zen", "zen", "jev-1.13-free"),
+        &stub.url,
     );
     let out = eval.run(
         &[
@@ -699,7 +702,8 @@ fn zen_with_a_key_sends_it_and_an_empty_key_counts_as_unset() {
     let stub = stub(200, OPENROUTER_REPLY);
     let eval = Eval::new(
         "zen-key",
-        &candidate_toml("jev-zen", "zen", "jev-1.13", &stub.url),
+        &candidate_toml("jev-zen", "zen", "jev-1.13"),
+        &stub.url,
     );
     let args = [
         "--candidate",
@@ -789,7 +793,8 @@ fn provider_failure_exits_3_and_keeps_the_raw_body() {
     let stub = stub(429, ZEN_429);
     let eval = Eval::new(
         "zen-429",
-        &candidate_toml("jev-zen", "zen", "jev-1.13-free", &stub.url),
+        &candidate_toml("jev-zen", "zen", "jev-1.13-free"),
+        &stub.url,
     );
     let out = eval.run(
         &[
@@ -824,7 +829,8 @@ fn provider_failure_exits_3_and_keeps_the_raw_body() {
 fn transport_failure_exits_3_and_saves_evidence() {
     let eval = Eval::new(
         "transport",
-        &candidate_toml("jev-openrouter", "openrouter", "m", "http://127.0.0.1:1"),
+        &candidate_toml("jev-openrouter", "openrouter", "m"),
+        "http://127.0.0.1:1",
     );
     let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
@@ -864,14 +870,13 @@ fn input_errors_exit_1_before_any_request() {
     let eval = openrouter_eval("inputs", &stub);
     let unknown_field = Eval::new(
         "inputs-field",
-        &format!(
-            "{}colour = \"red\"\n",
-            candidate_toml("c", "zen", "m", &stub.url)
-        ),
+        &format!("{}colour = \"red\"\n", candidate_toml("c", "zen", "m")),
+        &stub.url,
     );
     let unknown_provider = Eval::new(
         "inputs-provider",
-        &candidate_toml("c", "bing", "m", &stub.url),
+        &candidate_toml("c", "bing", "m"),
+        &stub.url,
     );
     for (eval, args, fragment) in [
         (
@@ -1109,7 +1114,8 @@ fn a_truncated_body_keeps_the_http_status() {
     });
     let eval = Eval::new(
         "truncated",
-        &candidate_toml("jev-openrouter", "openrouter", "m", &url),
+        &candidate_toml("jev-openrouter", "openrouter", "m"),
+        &url,
     );
     let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
@@ -1143,7 +1149,8 @@ fn a_non_utf8_error_body_is_kept_as_a_provider_error() {
     });
     let eval = Eval::new(
         "non-utf8",
-        &candidate_toml("jev-openrouter", "openrouter", "m", &url),
+        &candidate_toml("jev-openrouter", "openrouter", "m"),
+        &url,
     );
     let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
@@ -1229,7 +1236,8 @@ fn zen_auth_error_exits_3_with_the_provider_message() {
     );
     let eval = Eval::new(
         "zen-401",
-        &candidate_toml("jev-zen", "zen", "jev-1.13", &stub.url),
+        &candidate_toml("jev-zen", "zen", "jev-1.13"),
+        &stub.url,
     );
     let out = eval.run(
         &[
@@ -1289,4 +1297,119 @@ fn same_named_instruction_files_are_told_apart_by_hash() {
         recorded.push(evidence["instructions"]["sha256"].clone());
     }
     assert_ne!(recorded[0], recorded[1]);
+}
+
+// ---- default paths and the removed url field ----
+
+const ZEN_C002_OPUS: [&str; 6] = [
+    "--candidate",
+    "jev-zen",
+    "--case",
+    "c002",
+    "--target",
+    "opus",
+];
+
+/// Runs `evaluate` with no `--config`/`--out`; only the listed path variables reach the child.
+fn run_default_paths(url: &str, vars: &[(&str, &Path)], empty: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_decisionbench"));
+    for name in [
+        "OPENCODE_API_KEY",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "HOME",
+    ] {
+        command.env_remove(name);
+    }
+    command.env("DECISIONBENCH_TEST_BASE_URL", url);
+    for name in empty {
+        command.env(name, "");
+    }
+    for (name, value) in vars {
+        command.env(name, value);
+    }
+    command
+        .arg("evaluate")
+        .args(ZEN_C002_OPUS)
+        .output()
+        .expect("binary runs")
+}
+
+fn zen_config() -> String {
+    candidate_toml("jev-zen", "zen", "jev-1.13")
+}
+
+fn write_config(dir: &Path, toml: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("config.toml"), toml).unwrap();
+}
+
+#[test]
+fn default_paths_follow_the_xdg_variables() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let root = fresh_dir("xdg-paths");
+    write_config(&root.join("xdgc/decisionbench"), &zen_config());
+    let out = run_default_paths(
+        &stub.url,
+        &[
+            ("XDG_CONFIG_HOME", &root.join("xdgc")),
+            ("XDG_DATA_HOME", &root.join("xdgd")),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(files_in(&root.join("xdgd/decisionbench/runs")).len(), 1);
+}
+
+#[test]
+fn empty_xdg_variables_fall_back_to_home() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let root = fresh_dir("home-paths");
+    write_config(&root.join("home/.config/decisionbench"), &zen_config());
+    let out = run_default_paths(
+        &stub.url,
+        &[("HOME", &root.join("home"))],
+        &["XDG_CONFIG_HOME", "XDG_DATA_HOME"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let runs = root.join("home/.local/share/decisionbench/runs");
+    assert_eq!(files_in(&runs).len(), 1);
+}
+
+#[test]
+fn no_xdg_and_no_home_exits_1_without_a_request() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let out = run_default_paths(&stub.url, &[], &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("pass the path explicitly"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stub.requests
+            .recv_timeout(Duration::from_millis(500))
+            .is_err(),
+        "no request was sent"
+    );
+}
+
+#[test]
+fn a_url_field_in_the_config_is_rejected() {
+    let eval = Eval::new(
+        "url-field",
+        &format!(
+            "{}url = \"http://127.0.0.1:1\"\n",
+            candidate_toml("jev-zen", "zen", "m")
+        ),
+        "http://127.0.0.1:1",
+    );
+    let out = eval.run(&ZEN_C002_OPUS, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("unknown field `url`"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(files_in(&eval.out_dir).is_empty());
 }

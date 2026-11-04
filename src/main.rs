@@ -10,7 +10,7 @@ use decisionbench::instructions::{
 };
 use decisionbench::provider::{
     Candidate, Disposition, env_nonempty, normalize, now_unix_ms, parse_candidates, request_body,
-    send,
+    request_url, send,
 };
 use decisionbench::sha256_hex;
 
@@ -190,7 +190,7 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
     };
     let text = String::from_utf8(read(&config)?)
         .map_err(|_| format!("invalid config {}: not UTF-8", config.display()))?;
-    let mut candidate: Candidate = parse_candidates(&text)
+    let candidate: Candidate = parse_candidates(&text)
         .map_err(|e| format!("invalid config {}: {e}", config.display()))?
         .into_iter()
         .find(|c| c.name == args.candidate)
@@ -201,7 +201,6 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
                 config.display()
             )
         })?;
-    candidate.url = Some(candidate.effective_url().to_string());
     let instructions = load_instructions(args.instructions.as_deref())?;
     let (dataset_name, dataset_sha256, cases) = load_dataset(args.dataset.as_deref())?;
     let case = cases
@@ -213,7 +212,8 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
     let id = format!("{}-{}", now_unix_ms(), std::process::id());
     let (file, path) = evidence::create(&out, &id)?;
     let request = request_body(&candidate.model, &instructions, case, args.target);
-    let attempt = send(candidate.effective_url(), key.as_deref(), &request);
+    let url = request_url(candidate.provider);
+    let attempt = send(&url, key.as_deref(), &request);
     let created_unix_ms = now_unix_ms();
     let prediction = (attempt.disposition == Disposition::Answered)
         .then(|| normalize(attempt.raw_response.as_deref().unwrap_or_default()));
@@ -232,6 +232,7 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
         },
         grading_revision: GRADING_REVISION,
         candidate,
+        url,
         case_id: case.id.clone(),
         target: args.target,
         label: match args.target {
