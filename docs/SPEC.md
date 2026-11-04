@@ -101,7 +101,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 - A valid predicted effort is a **hit** if it falls within that target's acceptable range.
 - Otherwise **under** means the predicted effort is below the range, and **over** means above it. Ranges are contiguous, so there is no other kind of miss.
-- **Unscored** means there is no reviewed label. **Invalid** means a response did not yield a valid choice. **Provider failure** means the request failed. All are distinct from valid scored misses.
+- **Unscored** means there is no reviewed label. **Invalid** means a response did not yield a valid choice. **Provider failure** means the request failed. All are distinct from valid scored misses. A target with no label is unscored whatever the response; invalid applies only to labelled targets.
 - Report accuracy among **valid, scored predictions**, alongside eligible-case counts, invalid/unanswered counts, coverage, failure counts and run completion. Do not hide failures through denominator selection.
 - Always break out performance by **Sonnet vs Opus** (with each target's sample size; the initial labels are heavily Sonnet-weighted) and by **candidate/provider route**. Overall micro-average is optional and must not replace those splits.
 - Report **median and p95 latency** with clear definitions (per successful attempt vs full logical-trial elapsed time); include reliability, under/over counts, and repeat-to-repeat consistency. No arbitrary quality/latency/cost composite score.

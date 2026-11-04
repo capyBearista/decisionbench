@@ -35,7 +35,7 @@ An immutable snapshot of dataset content and label decisions used by a Run. Chan
 A human-reviewed contiguous range of effort levels considered acceptable for one Case and one Target Model, written as one level (`max`) or `from-to` (`low-high`). Every effort in the range is equally acceptable.
 
 **Unscored**  
-A Case–Target Model combination with no reviewed label. Predictions may still be recorded, but they cannot contribute to accuracy.
+A Case–Target Model combination with no reviewed label. Predictions may still be recorded, but they cannot contribute to accuracy. A response for an unlabelled target is unscored even if it is invalid.
 
 **Raw Response**  
 The original observable reply from the provider, subject to secrets-safe retention policy, before normalization or interpretation.
