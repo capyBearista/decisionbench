@@ -1,18 +1,23 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 
 use clap::{Parser, Subcommand};
 use decisionbench::dataset::{BUNDLED_CASES, Case, parse_cases, summarize};
-use decisionbench::evidence::{self, Evidence, GRADING_REVISION, Hashed, InstructionsRecord};
+use decisionbench::evidence::{
+    self, CandidateRecord, EndRecord, GRADING_REVISION, Hashed, InstructionsRecord, Line, Manifest,
+    RunFile, RunState,
+};
 use decisionbench::grade::{Tally, Target, grade_all, parse_predictions};
 use decisionbench::instructions::{
     BUNDLED_NAME, BUNDLED_TEXT, JudgeInstructions, parse_instructions,
 };
 use decisionbench::provider::{
-    Candidate, Disposition, agent, env_nonempty, normalize, now_unix_ms, parse_candidates,
-    request_body, request_url, send,
+    Candidate, env_nonempty, now_unix_ms, parse_candidates, request_url,
 };
+use decisionbench::run::{self, Job, Settings};
 use decisionbench::sha256_hex;
 
 #[derive(Parser)]
@@ -35,21 +40,38 @@ enum Command {
         #[arg(long)]
         dataset: Option<PathBuf>,
     },
-    /// Send one Decisions request for a Case and Target Model, save the evidence and grade it.
+    /// Run a batch of Trials (Candidate × instructions × Case × Target × repetition), save the
+    /// evidence and print a summary.
     ///
-    /// Exits 3 when the provider or transport failed (evidence is still saved).
-    Evaluate {
-        /// Candidate name from the config file.
-        #[arg(long)]
-        candidate: String,
-        /// Case id in the dataset.
+    /// Exits 3 when some Trial ended in a provider or transport failure (evidence is still saved).
+    Run {
+        /// Candidate name from the config file; repeatable.
+        #[arg(long = "candidate", required = true)]
+        candidates: Vec<String>,
+        /// Judge Instructions file; repeatable. Defaults to the bundled `neutral`.
+        #[arg(long = "instructions")]
+        instructions: Vec<PathBuf>,
+        /// Case id in the dataset; repeatable. Defaults to every Case.
         #[arg(long = "case")]
-        case_id: String,
-        #[arg(long, value_enum)]
-        target: Target,
-        /// Judge Instructions file; defaults to the bundled `neutral`.
+        cases: Vec<String>,
+        /// Target Model; repeatable. Defaults to both.
+        #[arg(long = "target", value_enum)]
+        targets: Vec<Target>,
+        /// Repetitions of every combination.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..))]
+        repetitions: u32,
+        /// Trials in flight at once.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        concurrency: u32,
+        /// Seconds before one request gives up.
+        #[arg(long = "timeout", default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout_secs: u64,
+        /// Extra attempts after a transport error or a transient HTTP status.
+        #[arg(long, default_value_t = 1)]
+        retries: u32,
+        /// Also run Case × Target pairs that have no label.
         #[arg(long)]
-        instructions: Option<PathBuf>,
+        include_unscored: bool,
         /// Config file; defaults to $XDG_CONFIG_HOME/decisionbench/config.toml.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -60,7 +82,7 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Print the summary and grade of a saved evidence file (offline).
+    /// Print the summary of a saved run file (offline).
     Show { file: PathBuf },
 }
 
@@ -85,19 +107,31 @@ fn main() -> ExitCode {
             predictions,
             dataset,
         } => grade(&predictions, dataset.as_deref()).map(|()| ExitCode::SUCCESS),
-        Command::Evaluate {
-            candidate,
-            case_id,
-            target,
+        Command::Run {
+            candidates,
             instructions,
+            cases,
+            targets,
+            repetitions,
+            concurrency,
+            timeout_secs,
+            retries,
+            include_unscored,
             config,
             dataset,
             out,
-        } => evaluate(&Evaluation {
-            candidate,
-            case_id,
-            target,
+        } => run_batch(&RunArgs {
+            candidates,
             instructions,
+            cases,
+            targets,
+            settings: Settings {
+                repetitions,
+                concurrency,
+                timeout_secs,
+                retries,
+                include_unscored,
+            },
             config,
             dataset,
             out,
@@ -168,19 +202,29 @@ fn load_instructions(path: Option<&Path>) -> Result<JudgeInstructions, String> {
         .map_err(|e| format!("invalid instructions {}: {e}", path.display()))
 }
 
-struct Evaluation {
-    candidate: String,
-    case_id: String,
-    target: Target,
-    instructions: Option<PathBuf>,
+struct RunArgs {
+    candidates: Vec<String>,
+    instructions: Vec<PathBuf>,
+    cases: Vec<String>,
+    targets: Vec<Target>,
+    settings: Settings,
     config: Option<PathBuf>,
     dataset: Option<PathBuf>,
     out: Option<PathBuf>,
 }
 
-/// Every input is checked, and the evidence file is created, before the request, so an input or
-/// output error sends nothing. If the final write fails the evidence JSON goes to stderr instead.
-fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
+fn reject_duplicates(kind: &str, items: impl IntoIterator<Item = String>) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    match items.into_iter().find(|item| !seen.insert(item.clone())) {
+        Some(item) => Err(format!("duplicate {kind} `{item}`")),
+        None => Ok(()),
+    }
+}
+
+/// Every input is checked, and the evidence file is created, before the first request, so an input
+/// or output error sends nothing. The main thread is the only writer: workers send finished
+/// Trials over a channel and each becomes one line.
+fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
     let config = match &args.config {
         Some(path) => path.clone(),
         None => default_path("XDG_CONFIG_HOME", ".config", "config.toml")?,
@@ -191,77 +235,187 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
     };
     let text = String::from_utf8(read(&config)?)
         .map_err(|_| format!("invalid config {}: not UTF-8", config.display()))?;
-    let candidate: Candidate = parse_candidates(&text)
-        .map_err(|e| format!("invalid config {}: {e}", config.display()))?
-        .into_iter()
-        .find(|c| c.name == args.candidate)
-        .ok_or_else(|| {
-            format!(
-                "unknown candidate `{}` in {}",
-                args.candidate,
-                config.display()
-            )
-        })?;
-    let instructions = load_instructions(args.instructions.as_deref())?;
-    let (dataset_name, dataset_sha256, cases) = load_dataset(args.dataset.as_deref())?;
-    let case = cases
+    let configured =
+        parse_candidates(&text).map_err(|e| format!("invalid config {}: {e}", config.display()))?;
+    reject_duplicates("candidate", args.candidates.iter().cloned())?;
+    let candidates: Vec<Candidate> = args
+        .candidates
         .iter()
-        .find(|c| c.id == args.case_id)
-        .ok_or_else(|| format!("unknown case {} in {dataset_name}", args.case_id))?;
-    let key = candidate.provider.key()?;
+        .map(|name| {
+            configured
+                .iter()
+                .find(|c| &c.name == name)
+                .cloned()
+                .ok_or_else(|| format!("unknown candidate `{name}` in {}", config.display()))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let instructions = if args.instructions.is_empty() {
+        vec![load_instructions(None)?]
+    } else {
+        args.instructions
+            .iter()
+            .map(|path| load_instructions(Some(path)))
+            .collect::<Result<_, _>>()?
+    };
+    reject_duplicates(
+        "instructions name",
+        instructions.iter().map(|i| i.name.clone()),
+    )?;
+
+    let (dataset_name, dataset_sha256, mut cases) = load_dataset(args.dataset.as_deref())?;
+    reject_duplicates("case", args.cases.iter().cloned())?;
+    if let Some(id) = args
+        .cases
+        .iter()
+        .find(|id| !cases.iter().any(|c| &c.id == *id))
+    {
+        return Err(format!("unknown case {id} in {dataset_name}"));
+    }
+    if !args.cases.is_empty() {
+        cases.retain(|c| args.cases.contains(&c.id));
+    }
+    reject_duplicates("target", args.targets.iter().map(Target::to_string))?;
+    let targets = if args.targets.is_empty() {
+        vec![Target::Sonnet, Target::Opus]
+    } else {
+        args.targets.clone()
+    };
+
+    let keys: Vec<Option<String>> = candidates
+        .iter()
+        .map(|c| c.provider.key())
+        .collect::<Result<_, _>>()?;
+    let plan = run::plan(
+        candidates.len(),
+        instructions.len(),
+        &cases,
+        &targets,
+        &args.settings,
+    );
+    if plan.trials.is_empty() {
+        return Err(
+            "no trials: every selected Case × Target pair is unlabelled; pass --include-unscored to run them anyway"
+                .to_string(),
+        );
+    }
 
     let id = format!("{}-{}", now_unix_ms(), std::process::id());
-    let (file, path) = evidence::create(&out, &id)?;
-    let request = request_body(&candidate.model, &instructions, case, args.target);
-    let url = request_url(candidate.provider);
-    let attempt = send(
-        &agent(Duration::from_secs(60)),
-        &url,
-        key.as_deref(),
-        &request,
-    );
-    let created_unix_ms = now_unix_ms();
-    let prediction = (attempt.disposition == Disposition::Answered)
-        .then(|| normalize(attempt.raw_response.as_deref().unwrap_or_default()));
-    let evidence = Evidence {
+    let (mut file, path) = evidence::create(&out, &id)?;
+    let urls: Vec<String> = candidates.iter().map(|c| request_url(c.provider)).collect();
+    let planned = plan.trials.len();
+    let manifest = Manifest {
         schema_version: evidence::SCHEMA_VERSION,
         id,
-        created_unix_ms,
+        created_unix_ms: now_unix_ms(),
         dataset: Hashed {
             name: dataset_name,
             sha256: dataset_sha256,
         },
-        instructions: InstructionsRecord {
-            name: instructions.name,
-            sha256: instructions.sha256,
-            text: instructions.text,
-        },
+        instructions: instructions
+            .iter()
+            .map(|i| InstructionsRecord {
+                name: i.name.clone(),
+                sha256: i.sha256.clone(),
+                text: i.text.clone(),
+            })
+            .collect(),
         grading_revision: GRADING_REVISION,
-        candidate,
-        url,
-        case_id: case.id.clone(),
-        target: args.target,
-        label: match args.target {
-            Target::Sonnet => case.ok.sonnet,
-            Target::Opus => case.ok.opus,
-        },
-        request,
-        attempt,
-        prediction,
+        candidates: candidates
+            .iter()
+            .zip(&urls)
+            .map(|(candidate, url)| CandidateRecord {
+                candidate: candidate.clone(),
+                url: url.clone(),
+            })
+            .collect(),
+        cases: cases.iter().map(|c| c.id.clone()).collect(),
+        targets,
+        settings: args.settings.clone(),
+        planned_trials: planned,
     };
-    evidence::save(file, &path, &evidence)?;
-    print!("{evidence}");
-    println!("evidence: {}", path.display());
-    Ok(if evidence.prediction.is_some() {
-        ExitCode::SUCCESS
+    evidence::append(&mut file, &path, &Line::Run(manifest.clone()))?;
+    eprintln!(
+        "planned: {} candidates × {} instructions × {} pairs ({} unlabelled skipped) × {} repetitions = {planned} trials, up to {} requests",
+        candidates.len(),
+        instructions.len(),
+        plan.pairs,
+        plan.skipped,
+        args.settings.repetitions,
+        planned * (1 + args.settings.retries as usize),
+    );
+
+    let job = Job {
+        candidates: &candidates,
+        urls: &urls,
+        keys: &keys,
+        instructions: &instructions,
+        cases: &cases,
+    };
+    let cancel = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel();
+    let mut trials = Vec::new();
+    let mut write_error: Option<String> = None;
+    std::thread::scope(|scope| {
+        let (job, specs, settings, cancel) = (&job, &plan.trials, &args.settings, &cancel);
+        scope.spawn(move || run::execute(job, specs, settings, cancel, tx));
+        for trial in rx {
+            eprintln!("{}", trial.progress(trials.len() + 1, planned));
+            let line = Line::Trial(trial.clone());
+            if write_error.is_some() {
+                // The file is no longer trustworthy, but the reply is paid for.
+                eprint!("{}", evidence::encode(&line));
+            } else if let Err(e) = evidence::append(&mut file, &path, &line) {
+                write_error = Some(e);
+                cancel.store(true, Ordering::Relaxed);
+            }
+            trials.push(trial);
+        }
+    });
+
+    let mut state = if write_error.is_some() {
+        RunState::Failed
+    } else if trials.len() < planned {
+        RunState::Partial
     } else {
-        ExitCode::from(3)
+        RunState::Complete
+    };
+    let mut end = EndRecord {
+        state,
+        finished_unix_ms: now_unix_ms(),
+    };
+    if let Err(e) = evidence::append(&mut file, &path, &Line::End(end.clone())) {
+        write_error.get_or_insert(e);
+        state = RunState::Failed;
+        end.state = state;
+    }
+    trials.sort_by_key(|t| t.seq);
+    let all_answered = trials.iter().all(|t| t.answered());
+    let summary = RunFile {
+        manifest,
+        trials,
+        end: Some(end),
+        warnings: Vec::new(),
+    };
+    print!("{summary}");
+    println!("evidence: {}", path.display());
+    if let Some(e) = write_error {
+        return Err(e);
+    }
+    Ok(match state {
+        RunState::Complete if all_answered => ExitCode::SUCCESS,
+        RunState::Complete => ExitCode::from(3),
+        RunState::Partial => ExitCode::from(130),
+        RunState::Failed => ExitCode::FAILURE,
     })
 }
 
 fn show(path: &Path) -> Result<(), String> {
-    let evidence = evidence::read(&read(path)?)
+    let run = evidence::read_run(&read(path)?)
         .map_err(|e| format!("invalid evidence {}: {e}", path.display()))?;
-    print!("{evidence}");
+    for warning in &run.warnings {
+        eprintln!("warning: {warning}");
+    }
+    print!("{run}");
     Ok(())
 }

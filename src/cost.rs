@@ -80,12 +80,13 @@ pub fn attempt_cost(price: Option<&Price>, attempt: &Attempt) -> AttemptCost {
     }
 }
 
-/// Prints an amount with at least three significant digits and no trailing zeros; exact 0 prints `0`.
+/// Prints an amount with at least four decimals and three significant digits, so money never loses
+/// cents; trailing zeros are trimmed and exact 0 prints `0`.
 pub fn fmt_usd(x: f64) -> String {
     if x == 0.0 {
         return "0".to_string();
     }
-    let decimals = (2 - x.abs().log10().floor() as i32).max(0) as usize;
+    let decimals = (2 - x.abs().log10().floor() as i32).max(4) as usize;
     let text = format!("{x:.decimals$}");
     if text.contains('.') {
         text.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -311,7 +312,8 @@ mod tests {
             (2.0496e-5, "0.0000205"),
             (0.0, "0"),
             (1.5, "1.5"),
-            (12.345678, "12.3"),
+            (12.345678, "12.3457"),
+            (1234.5, "1234.5"),
             (0.5, "0.5"),
             (100.0, "100"),
         ] {

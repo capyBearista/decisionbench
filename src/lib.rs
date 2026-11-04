@@ -4,6 +4,7 @@ pub mod evidence;
 pub mod grade;
 pub mod instructions;
 pub mod provider;
+pub mod run;
 
 /// Lowercase hex SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
