@@ -100,6 +100,21 @@ pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, String> {
     Ok(config.candidate)
 }
 
+/// The config file text for `candidates`; it parses back through `parse_candidates`, which also
+/// rejects what the loader would (duplicate names, bad prices). Comments are not kept.
+pub fn candidates_toml(candidates: &[Candidate]) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Out<'a> {
+        candidate: &'a [Candidate],
+    }
+    let text = toml::to_string(&Out {
+        candidate: candidates,
+    })
+    .map_err(|e| e.to_string())?;
+    parse_candidates(&text)?;
+    Ok(text)
+}
+
 /// The Decisions request body: one `effort_<target>` question per selected Target Model, in
 /// `Target::ALL` order. `current_effort` and `current_model` are omitted, not nulled (ADR-0002).
 /// Every selected target must have a section in `instructions`; `run` checks that first.
@@ -293,6 +308,19 @@ mod tests {
     use crate::instructions::parse_instructions;
 
     const OPENROUTER_200: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort_sonnet":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79},"effort_opus":{"type":"choice","choice":"high"}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"id":"gen-dec-1793762009-oxb0hWCuUBlv6AKzC6ON","provider":"TypeSafe"}"#;
+
+    #[test]
+    fn candidates_round_trip_through_the_config_text() {
+        let text = "[[candidate]]\nname = \"a\"\ndecision_model = \"jev\"\nprovider = \"zen\"\nmodel = \"m\"\n\n[candidate.price]\ninput_per_million = 1.5\n\n[[candidate]]\nname = \"b\"\nprovider = \"openrouter\"\nmodel = \"n\"\n";
+        let candidates = parse_candidates(text).unwrap();
+        let saved = candidates_toml(&candidates).unwrap();
+        assert_eq!(parse_candidates(&saved).unwrap(), candidates);
+        assert!(candidates_toml(&[candidates[0].clone(), candidates[0].clone()]).is_err());
+        assert_eq!(
+            parse_candidates(&candidates_toml(&[]).unwrap()).unwrap(),
+            []
+        );
+    }
 
     #[test]
     fn normalizes_an_openrouter_reply() {
