@@ -245,6 +245,11 @@ fn saving_keeps_the_configs_permissions_and_creates_new_ones_private() {
         |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     let (mut app, dir) = app();
     let config = dir.join("config.toml");
+    // A stale, world-readable temp file from an earlier failed save must not lend its mode.
+    let stale = dir.join("config.toml.tmp");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&stale, "").unwrap();
+    std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
     add_candidate(&mut app, "alpha", "m", ["", "", ""]);
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(mode(&config), 0o600);

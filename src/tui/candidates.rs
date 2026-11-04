@@ -1,7 +1,7 @@
 //! Candidate management: the config's `[[candidate]]` tables, with their manual prices.
 
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -181,8 +181,10 @@ fn save(app: &mut App) -> Result<(), String> {
     // Write beside the config, then rename: a failed write never leaves a half-written config.
     let mut temp = app.config.clone().into_os_string();
     temp.push(".tmp");
-    // The config may hold API keys: new files are private, an existing config keeps its mode.
-    let permissions = std::fs::metadata(&app.config).map(|m| m.permissions());
+    // An existing config keeps its mode; a new one is private. Set it explicitly: a stale temp file keeps its own mode.
+    let permissions = std::fs::metadata(&app.config)
+        .map(|m| m.permissions())
+        .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
     std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -190,7 +192,7 @@ fn save(app: &mut App) -> Result<(), String> {
         .mode(0o600)
         .open(&temp)
         .and_then(|mut file| file.write_all(text.as_bytes()))
-        .and_then(|()| permissions.map_or(Ok(()), |p| std::fs::set_permissions(&temp, p)))
+        .and_then(|()| std::fs::set_permissions(&temp, permissions))
         .and_then(|()| std::fs::rename(&temp, &app.config))
         .map_err(|e| format!("cannot write {}: {e}", app.config.display()))?;
     app.candidates.dirty = false;
