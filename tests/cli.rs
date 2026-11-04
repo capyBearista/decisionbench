@@ -2226,7 +2226,7 @@ fn cost_uses_the_price_captured_in_the_run_and_counts_failed_attempts_as_unbille
     let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     // 488 * 0.04 / 1e6 + 54 * 0.08 / 1e6 = 0.00002384
-    let cost = "  cost: 0.0000238 USD over 1 answered attempt; 1 failed attempt counted as 0 USD (assumed unbilled)\n";
+    let cost = "  cost: 0.0000238 USD over 1 priced attempt; 1 failed attempt counted as 0 USD (assumed unbilled)\n";
     assert!(stdout(&out).contains(cost), "{}", stdout(&out));
     assert_eq!(
         eval.manifest()["candidates"][0]["price"],

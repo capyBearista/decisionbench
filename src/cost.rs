@@ -139,7 +139,7 @@ impl fmt::Display for CostTally {
             clauses.push(format!(
                 "{} USD over {}",
                 fmt_usd(self.known_usd),
-                plural(self.known, "answered attempt", "answered attempts")
+                plural(self.known, "priced attempt", "priced attempts")
             ));
         }
         if self.failed_unbilled > 0 {
@@ -368,7 +368,7 @@ mod tests {
         }
         assert_eq!(
             t.to_string(),
-            "cost: 0.0000205 USD over 1 answered attempt; 2 failed attempts counted as 0 USD (assumed unbilled); 1 attempt unknown (no usage); 3 attempts unknown (no price)"
+            "cost: 0.0000205 USD over 1 priced attempt; 2 failed attempts counted as 0 USD (assumed unbilled); 1 attempt unknown (no usage); 3 attempts unknown (no price)"
         );
     }
 
