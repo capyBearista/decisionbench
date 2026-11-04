@@ -1,13 +1,14 @@
 # decisionbench
 
-**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset, grade local effort predictions offline, and send one Decisions request per Case and Target Model to OpenRouter or OpenCode Zen, saving the raw reply as evidence. Batch runs, retries and reports are not implemented yet.
+**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset, grade local effort predictions offline, and run batches of Decisions requests (Candidate × Judge Instructions × Case × Target Model × repetition) through OpenRouter or OpenCode Zen with retries, a concurrency limit and safe cancellation, saving every Attempt as evidence with a manually priced cost estimate. Detailed reports (latency, consistency, history) are not implemented yet.
 
 ```sh
 cargo run -- dataset inspect            # bundled dataset
 cargo run -- dataset inspect FILE.json  # another dataset file
 cargo run -- grade PREDICTIONS.json     # grade against the bundled dataset (or --dataset FILE.json)
-cargo run -- evaluate --candidate jev-openrouter --case c002 --target opus
-cargo run -- show ~/.local/share/decisionbench/runs/FILE.json
+cargo run -- run --candidate jev-openrouter --case c002 --target opus --repetitions 1   # smoke test
+cargo run -- run --candidate jev-openrouter --candidate jev-zen-free                     # full run
+cargo run -- show ~/.local/share/decisionbench/runs/FILE.jsonl
 ```
 
 ## Sending a request
@@ -21,6 +22,11 @@ decision_model = "jev-1.13"        # optional: the underlying model
 provider = "openrouter"            # "openrouter" or "zen"
 model = "typesafe/jev-1.13"        # the model id sent on the wire
 
+[candidate.price]                  # optional; USD, captured with each run
+input_per_million = 0.04           # required in the table
+output_per_million = 0.0           # optional, default 0
+per_request = 0.0                  # optional fixed fee, default 0
+
 [[candidate]]
 name = "jev-zen-free"
 decision_model = "jev-1.13"
@@ -30,9 +36,32 @@ model = "jev-1.13-free"
 
 Credentials come from environment variables only and are never written to evidence: `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent when it is unset or empty). Requests always go to the provider's own URL and honour the standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` environment variables. The tests redirect every request, API key included, to a local stub with `DECISIONBENCH_TEST_BASE_URL`; never set it outside tests.
 
-`evaluate` sends the Case message, its context if any, and the Target Model (`--target sonnet` or `opus`). It never sends current effort or current model. It saves one JSON file per request under `$XDG_DATA_HOME/decisionbench/runs` (default `~/.local/share/decisionbench/runs`, or `--out DIR`) and prints a summary. Exit codes: `0` answered (the effort may still grade as invalid), `3` provider or transport failure (evidence still saved), `1` bad config, input or missing key (nothing sent or saved), `2` usage error.
+### Running a benchmark
 
-`show FILE` prints the same summary from a saved file, offline. The grade is recomputed from the stored label and raw effort, never stored.
+`run` sends one independent request per Trial. Each request carries the Case message, its context if any, and the Target Model. It never sends current effort or current model.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--candidate NAME` | required | Candidate from the config; repeatable |
+| `--instructions PATH` | bundled `neutral` | Judge Instructions file; repeatable |
+| `--case ID` | every Case | repeatable |
+| `--target sonnet\|opus` | both | repeatable |
+| `--repetitions N` | 3 | independent Trials per combination |
+| `--concurrency N` | 1 | Trials in flight at once |
+| `--timeout SECS` | 60 | per request |
+| `--retries N` | 1 | extra Attempts after a transport error or HTTP 408, 429, 500, 502, 503, 504, 524 or 529, after a 1 s pause |
+| `--include-unscored` | off | also run Case × Target pairs with no label (they can only grade as unscored) |
+| `--config`, `--dataset`, `--out` | see above | |
+
+A reply that arrives is never retried, even when its effort is invalid. A Trial's outcome is its last Attempt, and every Attempt is kept. Before sending, `run` prints the planned Trial count and the maximum number of requests, then one progress line per finished Trial on stderr, and a summary on stdout.
+
+**Cancelling:** press Ctrl-C (or send SIGTERM or SIGHUP) once to stop starting new Trials; Trials already in flight finish, retries included, and the run is saved as `partial`. If every planned Trial had already started, nothing is dropped and the run still ends `complete`. Press Ctrl-C again to stop at once; the file then has no end record and reads back as partial (interrupted).
+
+**Exit codes:** `0` complete and every Trial answered (an effort may still grade as invalid); `3` complete, but some Trial ended in a provider or transport failure; `130` cancelled (partial); `1` bad config, input or missing key (nothing sent or saved), or the run failed on an internal error such as an evidence write; `2` usage error.
+
+**Evidence:** one append-only JSONL file per run under `$XDG_DATA_HOME/decisionbench/runs` (default `~/.local/share/decisionbench/runs`, or `--out DIR`), private to your user. The first line is the run manifest (settings, Candidates with their price snapshot, Judge Instructions, dataset revision); then one line per finished Trial with all its Attempts; then an end line with the state `complete`, `partial` or `failed`. `show FILE` prints the same summary offline. Grades and costs are recomputed when reading, never stored.
+
+**Cost:** each answered Attempt costs `input_tokens × input rate + output_tokens × output rate + per-request fee`, using the price captured in the run, not the current config. A failed Attempt (error reply or transport failure before a success status) is counted as costing nothing, on the assumption that providers do not bill failed requests; the summary says how many were counted this way. A Candidate without a price, or an answer without the needed usage counters, shows as unknown, never as zero. OpenRouter's own `usage.cost` is kept in the raw reply but not used.
 
 **Evidence files contain the full prompt text, the Case message and context, and the raw provider reply.** Review them before sharing.
 
