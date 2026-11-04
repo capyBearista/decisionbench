@@ -238,3 +238,135 @@ fn rejects_empty_id() {
     let bad = VALID.replace(r#""id":"c001""#, r#""id":"""#);
     assert_rejected("empty-id.json", &dataset(&bad), "case with empty id");
 }
+
+#[test]
+fn rejects_null_target_label() {
+    assert_rejected(
+        "null_label.json",
+        &dataset(r#"{"id":"c001","message":"m","ok":{"sonnet":"low","opus":null}}"#),
+        "null",
+    );
+}
+
+/// `name` keeps temp files unique per test, since tests run in parallel.
+fn grade_files(name: &str, predictions: &str, dataset: Option<&str>) -> Output {
+    let predictions = temp_file(&format!("{name}-predictions.json"), predictions);
+    let mut args = vec!["grade".to_string(), predictions.display().to_string()];
+    if let Some(cases) = dataset {
+        let path = temp_file(&format!("{name}-dataset.json"), cases);
+        args.extend(["--dataset".to_string(), path.display().to_string()]);
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    run(&args)
+}
+
+fn assert_grade_rejected(predictions: &str, expected_fragment: &str) {
+    let out = grade_files("bad", predictions, None);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(out.stdout.is_empty(), "no grades on failure");
+    assert!(
+        stderr.contains(expected_fragment),
+        "expected {expected_fragment:?} in stderr: {stderr}"
+    );
+}
+
+#[test]
+fn grades_predictions_with_per_target_denominators() {
+    let cases = dataset(
+        r#"{"id":"c001","message":"m","ok":{"sonnet":"medium-high"}},
+           {"id":"c002","message":"n","ok":{"opus":"max"}}"#,
+    );
+    let predictions = r#"[
+        {"case":"c001","target":"sonnet","effort":"high"},
+        {"case":"c001","target":"sonnet","effort":"low"},
+        {"case":"c001","target":"sonnet","effort":"max"},
+        {"case":"c001","target":"sonnet","effort":"High"},
+        {"case":"c001","target":"opus","effort":"medium"},
+        {"case":"c002","target":"opus","effort":"max"},
+        {"case":"c002","target":"opus"}
+    ]"#;
+    let stdout = stdout_of_success(grade_files("denominators", predictions, Some(&cases)));
+    let expected = "\
+c001 sonnet \"high\" hit
+c001 sonnet \"low\" under
+c001 sonnet \"max\" over
+c001 sonnet \"High\" invalid
+c001 opus \"medium\" unscored
+c002 opus \"max\" hit
+c002 opus null invalid
+sonnet: 4 predictions: 1 hit, 1 under, 1 over, 1 invalid, 0 unscored; accuracy 1/3 valid scored
+opus: 3 predictions: 1 hit, 0 under, 0 over, 1 invalid, 1 unscored; accuracy 1/1 valid scored
+";
+    assert!(stdout.ends_with(expected), "{stdout}");
+}
+
+#[test]
+fn grades_against_bundled_dataset_by_default() {
+    let stdout = stdout_of_success(grade_files(
+        "bundled",
+        r#"[{"case":"c001","target":"sonnet","effort":"low"}]"#,
+        None,
+    ));
+    assert_eq!(
+        stdout,
+        "\
+dataset: bundled cases
+c001 sonnet \"low\" hit
+sonnet: 1 predictions: 1 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 1/1 valid scored
+opus: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/0 valid scored
+"
+    );
+}
+
+#[test]
+fn grading_leaves_the_predictions_file_unchanged() {
+    let contents = r#"[{"case":"c001","target":"sonnet","effort":" High "}]"#;
+    let path = temp_file("unchanged-predictions.json", contents);
+    stdout_of_success(run(&["grade", path.to_str().unwrap()]));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+}
+
+#[test]
+fn rejects_bad_prediction_files() {
+    for (predictions, fragment) in [
+        (
+            r#"[{"case":"c999","target":"sonnet","effort":"low"}]"#,
+            "prediction 1 names unknown case c999",
+        ),
+        (
+            r#"[{"case":"c001","target":"haiku","effort":"low"}]"#,
+            "unknown variant `haiku`",
+        ),
+        (
+            r#"[{"case":"c001","target":"sonnet","effort":"low","current_effort":"high"}]"#,
+            "unknown field `current_effort`",
+        ),
+        (
+            r#"[{"target":"sonnet","effort":"low"}]"#,
+            "missing field `case`",
+        ),
+        ("[]", "no predictions"),
+        ("[", "EOF"),
+    ] {
+        assert_grade_rejected(predictions, fragment);
+    }
+}
+
+#[test]
+fn grade_rejects_missing_predictions_file() {
+    let out = run(&["grade", "/nonexistent/predictions.json"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"));
+}
+
+#[test]
+fn grade_rejects_invalid_dataset() {
+    let out = grade_files(
+        "bad-dataset",
+        r#"[{"case":"c001","target":"sonnet","effort":"low"}]"#,
+        Some("[]"),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid dataset"));
+}

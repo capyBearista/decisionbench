@@ -20,7 +20,7 @@ pub enum Effort {
 }
 
 impl Effort {
-    fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "low" => Self::Low,
             "medium" => Self::Medium,
@@ -56,12 +56,20 @@ impl<'de> Deserialize<'de> for EffortRange {
     }
 }
 
-/// Labels per Target Model; an absent target is unscored.
+/// Labels per Target Model; an absent target is unscored. `null` is rejected, so omitting the key is
+/// the only way to leave a target unscored.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Labels {
+    #[serde(default, deserialize_with = "present")]
     pub sonnet: Option<EffortRange>,
+    #[serde(default, deserialize_with = "present")]
     pub opus: Option<EffortRange>,
+}
+
+/// Only called for keys that are present; `EffortRange` itself rejects `null`.
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<EffortRange>, D::Error> {
+    EffortRange::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]

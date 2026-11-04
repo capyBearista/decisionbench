@@ -72,7 +72,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 - The benchmark owns **one dataset file**, `datasets/cases.json` (see [ADR-0003](adr/0003-owned-per-target-effort-ranges.md)). It was converted once from the MIT-licensed effortless benchmark cases, and the effortless copyright notice and license accompany it. The upstream file is not kept or tracked, and Cases carry no source identifiers.
 - Each Case has a plain, stable **ID** (`c001`, `c002`, …) that never changes and is never reused, a task **message**, optional conversation **context**, and **labels** keyed by Target Model (`sonnet`, `opus`); every Case has at least one label.
 - A label is a **contiguous range of acceptable efforts**, written as one level (`"max"`) or as `"from-to"` (`"low-high"` means `low`, `medium` and `high`). `from` may not be above `to`. Every effort in the range is equally acceptable.
-- A Target Model may be absent from a Case; that combination is **unscored**. Do not synthesize missing labels.
+- A Target Model may be absent from a Case; that combination is **unscored**. Omitting the target's key is the only way to leave it unscored; a `null` label is rejected. Do not synthesize missing labels.
 - Cases carry **no session state** (no current model, no current effort) and no category or holdout markers.
 - The initial conversion has **71 Cases** (four identical message/context pairs were merged) with **67 Sonnet** and **8 Opus** labels.
 - Any change to Cases or labels produces a new **Dataset Revision**, identified by the file's content hash.

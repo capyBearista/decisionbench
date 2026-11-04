@@ -1,11 +1,14 @@
 # decisionbench
 
-**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset offline; benchmarking is not implemented yet.
+**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset and grade local effort predictions offline; provider requests are not implemented yet.
 
 ```sh
 cargo run -- dataset inspect            # bundled dataset
 cargo run -- dataset inspect FILE.json  # another dataset file
+cargo run -- grade PREDICTIONS.json     # grade against the bundled dataset (or --dataset FILE.json)
 ```
+
+A predictions file is a JSON array such as `[{"case":"c001","target":"sonnet","effort":"high"}]`. Only an exact effort name (`low`, `medium`, `high`, `xhigh`, `max`) is valid; anything else, or a missing `effort`, grades as invalid. A Case with no label for that target grades as unscored. Accuracy counts hits among valid, scored predictions.
 
 **decisionbench** is a planned standalone, terminal-first benchmark for **Decisions models**: specialized models asked to choose an appropriate reasoning-effort level for a target assistant. Its first benchmark evaluates effort-selection quality for **Claude Sonnet** and **Claude Opus** separately, not task-execution success.
 
