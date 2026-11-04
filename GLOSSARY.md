@@ -19,6 +19,9 @@ The specific provider-facing endpoint and model identifier used to request a Dec
 **Candidate**  
 The benchmarkable pairing of a Decision Model and a Provider Route, including the identity/configuration necessary to reproduce requests. Identically named models on different Provider Routes are distinct Candidates.
 
+**Judge Instructions**  
+A named instruction text, with a description for each effort level, sent with every Decisions request. Each set is a Markdown file identified by its name and the hash of its content, so an edited file is a new revision. Judge Instructions are selected, not part of the Candidate, so the same Candidate can be compared across instruction sets. Avoid: prompt (alone), task.
+
 **Case**  
 A task message with any relevant conversation context, identified by a stable ID that is never changed or reused. One Case can have separately reviewed labels for one or more Target Models.
 
@@ -50,10 +53,10 @@ A Raw Prediction mapped to a canonical effort value for grading, without applyin
 The action taken after an explicitly specified production-policy interpretation of a prediction (for example, an uncertainty fallback). It is separate from Raw Prediction and is not the initial benchmark's scoring target.
 
 **Run**  
-One configured benchmark execution, identifying the selected Candidates, Dataset Revision, evaluation instructions, targets, repetitions and execution settings. Contains Trials and associated evidence.
+One configured benchmark execution, identifying the selected Candidates, Dataset Revision, Judge Instructions, targets, repetitions and execution settings. Contains Trials and associated evidence.
 
 **Trial**  
-One logical evaluation of one Candidate × Case × Target Model × repetition. A Trial can require multiple Attempts when a retry policy is enabled.
+One logical evaluation of one Candidate × Judge Instructions × Case × Target Model × repetition. A Trial can require multiple Attempts when a retry policy is enabled.
 
 **Attempt**  
 One actual outbound request to a Provider Route, including timing and success/error disposition. Attempts remain visible even when a later attempt succeeds.
@@ -71,7 +74,7 @@ Manually entered per-Provider-Route rates captured with a Run so estimated costs
 
 - A **Candidate** identifies one **Decision Model** accessed through one **Provider Route**.
 - A **Dataset Revision** contains many **Cases**. A **Case** can have separate **Labels** for Sonnet and Opus.
-- A **Run** selects a **Dataset Revision** and one or more **Candidates**; each **Trial** evaluates one Case–Target Model–Candidate combination in one repetition.
+- A **Run** selects a **Dataset Revision** and one or more **Candidates**; each **Trial** evaluates one Case–Target Model–Candidate–Judge Instructions combination in one repetition.
 - A **Trial** contains one or more **Attempts**; a **Grade** derives from the valid **Normalized Prediction** and the matching **Label**.
 - A **Run** preserves **Evidence**; summaries and estimated costs are derived interpretations of that evidence.
 
