@@ -1,0 +1,12 @@
+[package]
+name = "decisionbench"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone benchmark for Decisions-model reasoning-effort selection"
+license = "MIT"
+repository = "https://github.com/capyBearista/decisionbench"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

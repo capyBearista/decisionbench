@@ -1,10 +1,10 @@
 # decisionbench: initial product and engineering specification
 
-**Status:** Proposed for review (2026-11-03)  
-**Scope:** Initial standalone release; no coding implementation authorized by this document alone  
-**Sources:** Agreed design interview; [effortless source benchmark](https://github.com/capyBearista/effortless/blob/main/bench/judge-cases.json); [effortless judge implementation](https://github.com/capyBearista/effortless/blob/main/hooks/register.tsx); [deferred Valbench integration](https://github.com/capyBearista/decisionbench/issues/1)  
+**Status:** Approved (2026-11-03)  
+**Scope:** Initial standalone release  
+**Sources:** Agreed design interview; [effortless source benchmark](https://github.com/capyBearista/effortless/blob/99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c/bench/judge-cases.json); [effortless judge implementation](https://github.com/capyBearista/effortless/blob/main/hooks/register.tsx); [deferred Valbench integration](https://github.com/capyBearista/decisionbench/issues/1)  
 **Domain terminology:** [GLOSSARY.md](../GLOSSARY.md)  
-**Architecture decisions:** [ADR-0001](adr/0001-standalone-engine.md), [ADR-0002](adr/0002-raw-model-relative-evaluation.md)
+**Architecture decisions:** [ADR-0001](adr/0001-standalone-engine.md), [ADR-0002](adr/0002-raw-model-relative-evaluation.md), [ADR-0003](adr/0003-owned-per-target-effort-ranges.md)
 
 ## Problem statement
 
@@ -12,7 +12,7 @@ Decision models can recommend the reasoning effort for an agentic assistant, but
 
 The initial question is: **given the same task and relevant conversation context, which effort level should an independent Decisions model recommend for Claude Sonnet versus Claude Opus, and how accurately, consistently, reliably, and quickly does it make that recommendation?**
 
-This is **not** a test of whether Sonnet or Opus successfully completes the underlying task. Ground truth is a human-reviewed set of acceptable effort levels, not measured task completion.
+This is **not** a test of whether Sonnet or Opus successfully completes the underlying task. Ground truth is a human-reviewed range of acceptable effort levels per target model, not measured task completion.
 
 ## Solution
 
@@ -26,9 +26,9 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 2. As a user, I can select a subset of candidates to benchmark without editing source code.
 3. As a user, I can configure provider credentials outside result files and receive actionable errors for missing credentials.
 4. As a user, I can load, inspect, and select a versioned benchmark dataset.
-5. As a user, I can retain the original effortless dataset unmodified as a traceable baseline, including its 20 holdout cases.
+5. As a user, I can maintain one dataset whose Cases each carry a separate acceptable-effort range per target model.
 6. As a user, I can evaluate the same prompt against both Sonnet and Opus in independent requests.
-7. As a user, I can supply independently reviewed acceptable effort sets for each target model, not a derived one-step equivalence.
+7. As a user, I can supply independently reviewed acceptable effort ranges for each target model, not a derived one-step equivalence.
 8. As a user, I can see that an unlabelled target/prompt is **unscored**, not silently graded right or wrong.
 9. As a user, I can run one model against one case before committing to a larger batch.
 10. As a user, I can choose repetitions per case/target/candidate, with three independent trials as the default.
@@ -36,7 +36,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 12. As a user, I can cancel a run and retain all completed and attempted evidence with an explicit incomplete status.
 13. As a user, I can inspect the raw provider answer, normalized effort prediction, confidence (when provided), provider errors, and parse failures separately.
 14. As a user, I can grade a raw effort prediction without having previous effort or production policy alter it.
-15. As a user, I can compare accuracy, under-selection, over-selection, reliability, and latency separately, including by target model and holdout partition.
+15. As a user, I can compare accuracy, under-selection, over-selection, reliability, and latency separately, including by target model.
 16. As a user, I can manually enter per-route input/output token rates and optional per-request fees, without live price fetching.
 17. As a user, I can see an observed-cost estimate only where sufficient usage and manual prices are present, with missing cost shown as unknown rather than zero.
 18. As a user, I can review earlier runs and compare them only with transparent dataset, prompt, model-route, and evaluation revisions.
@@ -49,6 +49,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 ### 1. Technology and interfaces
 
 - Use the **latest stable Rust compiler** supporting the **2024 language edition**; the compiler release and language edition are different version concepts.
+- **Linux is the only supported platform.** No Windows or macOS builds, CI or support.
 - Begin with **one Cargo package** containing a binary and a reusable library. Do not make a multi-crate workspace without a demonstrated requirement.
 - Use **Ratatui** for the TUI, with an appropriate terminal backend (Crossterm is the initial candidate); use a conventional CLI argument parser.
 - Both interfaces invoke the same evaluation engine. The TUI is not the source of truth for evaluation rules.
@@ -59,7 +60,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 2. Benchmark scope and provider identity
 
-- Initially score only **effort selection** for the target model families **Claude Sonnet** and **Claude Opus**. Valid effort names are the explicit ordered set supported by the benchmark revision (initially `low`, `medium`, `high`, `xhigh`); verify route-specific supported options during protocol research.
+- Initially score only **effort selection** for the target model families **Claude Sonnet** and **Claude Opus**. Valid effort names are the explicit ordered set supported by the benchmark revision (initially `low` < `medium` < `high` < `xhigh` < `max`; every target model accepts every level); verify route-specific supported options during protocol research.
 - A **Decision Model** selects effort; a **Target Model** is Sonnet or Opus. These are different roles.
 - A **Candidate** includes the underlying Decision Model identity when known and its **Provider Route**. Jev via Zen, Jev via OpenRouter, and Jev via TypeSafe direct are different candidates, even if the model name matches.
 - Initial provider transports: OpenCode Zen Decisions endpoint and OpenRouter Decisions API endpoint. Future transports such as SubQ and TypeSafe direct must be possible without changing the domain-level evaluation data; neither is implemented now.
@@ -68,18 +69,19 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 3. Dataset and ground truth
 
-- Import the original **75 effortless cases** as a **byte-for-byte unchanged, versioned source fixture**, subject to source attribution and its license; do not silently repair the original fixture.
-- The original has **20 holdout cases**, **67 Sonnet-labelled cases**, and **8 Opus-labelled cases**. Source records may include `current.effort`, `context`, `kind`, `holdout`, and a source ID. These remain provenance, not instructions to a Decisions model.
-- Define a distinct **derived paired dataset revision** representing a prompt/context with independent `sonnet` and `opus` acceptable-effort labels. Only merge identical prompt-and-context source records with compatible split provenance; retain every original ID and target-specific source metadata.
-- Four exact prompt/context pairs in the original dataset already have Sonnet and Opus labels. Do not synthesize the other labels. Unreviewed counterparts are absent/unscored.
-- Preserve dataset revision, source record provenance, kind/category and tuned/holdout split. Do not tune decision prompts or select models using the holdout set and then present that same holdout as untouched.
-- A label is a **set of acceptable efforts**, not a ranked prediction; its first listed value is not an enforced scoring preference.
+- The benchmark owns **one dataset file**, `datasets/cases.json` (see [ADR-0003](adr/0003-owned-per-target-effort-ranges.md)). It was converted once from the MIT-licensed effortless benchmark cases, and the effortless copyright notice and license accompany it. The upstream file is not kept or tracked, and Cases carry no source identifiers.
+- Each Case has a plain, stable **ID** (`c001`, `c002`, …) that never changes and is never reused, a task **message**, optional conversation **context**, and **labels** keyed by Target Model (`sonnet`, `opus`); every Case has at least one label.
+- A label is a **contiguous range of acceptable efforts**, written as one level (`"max"`) or as `"from-to"` (`"low-high"` means `low`, `medium` and `high`). `from` may not be above `to`. Every effort in the range is equally acceptable.
+- A Target Model may be absent from a Case; that combination is **unscored**. Do not synthesize missing labels.
+- Cases carry **no session state** (no current model, no current effort) and no category or holdout markers.
+- The initial conversion has **71 Cases** (four identical message/context pairs were merged) with **67 Sonnet** and **8 Opus** labels.
+- Any change to Cases or labels produces a new **Dataset Revision**, identified by the file's content hash.
 
 ### 4. Evaluation requests and independence
 
 - Each **Trial** is one **Candidate × Case × Target Model × repetition**; send an **independent Decisions API request** for each trial, never the full dataset as one request.
 - For an exact Sonnet-versus-Opus paired comparison, use the same task, relevant conversation context, question wording, and evaluation settings; change the target Claude model identifier. Preserve any known provider-envelope differences as evidence.
-- **Do not send the previous/current reasoning effort as a judging input**. The original `current.effort` field is source provenance only. Before implementing, establish whether each provider accepts omission or requires an explicit null; never substitute a meaningful effort that can anchor the judge.
+- **Do not send the previous/current reasoning effort as a judging input**. Before implementing, establish whether each provider accepts omission or requires an explicit null; never substitute a meaningful effort that can anchor the judge.
 - Relevant recent conversation context **does** matter, especially for follow-up/answer cases. Preserve and send it as defined by the dataset revision.
 - No effortless-style short-follow-up shortcut, confidence fallback, bias, floor/ceiling, save mode, or automatic keep-current rule is applied in the **raw model-quality** benchmark.
 - Parse and preserve the **raw effort prediction** separately from the normalized effort and any future **effective decision** produced by a selected policy. The initial accuracy score uses the raw normalized model prediction, not a post-policy decision.
@@ -97,19 +99,19 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 6. Scoring and reporting
 
-- A valid predicted effort is a **hit** if it belongs to that target's acceptable set.
-- Otherwise **under** means the predicted effort is below all acceptable levels, and **over** means above all acceptable levels. If an unaccepted prediction falls **between** acceptable levels, classify it as another miss rather than falsely calling it under/over.
+- A valid predicted effort is a **hit** if it falls within that target's acceptable range.
+- Otherwise **under** means the predicted effort is below the range, and **over** means above it. Ranges are contiguous, so there is no other kind of miss.
 - **Unscored** means there is no reviewed label. **Invalid** means a response did not yield a valid choice. **Provider failure** means the request failed. All are distinct from valid scored misses.
 - Report accuracy among **valid, scored predictions**, alongside eligible-case counts, invalid/unanswered counts, coverage, failure counts and run completion. Do not hide failures through denominator selection.
-- Always break out performance by **Sonnet vs Opus**, **holdout vs non-holdout**, and **candidate/provider route**; the original labels are heavily Sonnet-weighted. Overall micro-average is optional and must not replace those splits.
+- Always break out performance by **Sonnet vs Opus** (with each target's sample size; the initial labels are heavily Sonnet-weighted) and by **candidate/provider route**. Overall micro-average is optional and must not replace those splits.
 - Report **median and p95 latency** with clear definitions (per successful attempt vs full logical-trial elapsed time); include reliability, under/over counts, and repeat-to-repeat consistency. No arbitrary quality/latency/cost composite score.
 - Configure **manual per-route** input and output token prices per million tokens plus an optional fixed per-request fee. Snapshot the entered rates for a run. Compute observed costs only when all required usage/rate fields are present; otherwise mark missing/unknown. Do not fetch prices dynamically. Cost is informational, never an implicit grade.
 
 ### 7. CLI and TUI
 
 - CLI must support selecting candidates, dataset and targets, running a single case or full selection, repetitions, execution controls, structured export, result inspection, and clear exit status; syntax may be finalized in an implementation ticket.
-- TUI must allow selecting/managing candidates, browsing datasets/paired labels, configuring and starting runs, observing per-trial status, cancelling, inspecting quality/reliability/latency, editing manual prices, and comparing run history.
-- Both interfaces must present the same result semantics. Neither should silently mutate a versioned source fixture. Editing/reviewing new ground-truth labels can initially be done in external versioned files; a label-editor UI is not required for the first release.
+- TUI must allow selecting/managing candidates, browsing datasets and per-target labels, configuring and starting runs, observing per-trial status, cancelling, inspecting quality/reliability/latency, editing manual prices, and comparing run history.
+- Both interfaces must present the same result semantics. Neither should silently mutate the dataset file. Editing/reviewing new ground-truth labels can initially be done in external versioned files; a label-editor UI is not required for the first release.
 - An interactive network check is optional; offline fixtures and deterministic grading must work without provider keys.
 
 ## Testing decisions
@@ -120,9 +122,9 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 Tests should cover:
 
-- Untouched source-baseline preservation, holdout inheritance, paired-target normalization, and missing/unscored labels.
-- Identical test context with target Sonnet versus Opus; absence of current-effort anchoring and preservation of original source metadata.
-- Membership grading, under/over and in-between misses, invalid outputs, unscored observations, and independent target-specific totals.
+- Dataset validation: range syntax and order, unknown targets, efforts and fields, duplicate IDs, duplicate message/context, and missing/unscored labels.
+- Identical test context with target Sonnet versus Opus; absence of current-effort anchoring.
+- Range grading (hit, under, over), invalid outputs, unscored observations, and independent target-specific totals.
 - Repeat counts, retry histories, transport timeouts, malformed responses, cancellation, partial-run files, resume/read behavior where supported, and deterministic output using controlled fixtures.
 - Pricing math with manual rate snapshots, missing usage, missing rates, optional fees, and zero prices explicitly entered by the user.
 - Round-trip versioned data validation, unknown schema-version handling, credential/header redaction, and CLI/TUI agreement for the same saved run.
@@ -141,12 +143,12 @@ Tests should cover:
 
 ## Verification gates and recommended implementation order
 
-1. **Documentation and contract review:** approved domain vocabulary, source provenance, architecture, and this spec.
+1. **Documentation and contract review:** approved domain vocabulary, architecture, and this spec.
 2. **Rust foundation and offline case inspection:** a clean CLI build and deterministic dataset import/validation without network.
 3. **First tracer bullet:** choose one candidate and one case, issue one real Decisions request, preserve raw evidence, grade and read it back.
 4. **Second provider and paired targets:** validate distinct transport routes and Sonnet/Opus target switching.
 5. **Repetitions and resilience:** configurable batches, attempts/retries, cancellation and durable partial evidence.
-6. **Reporting and manual cost:** trustworthy per-target/per-partition metrics, history, missing-data semantics.
+6. **Reporting and manual cost:** trustworthy per-target metrics, history, missing-data semantics.
 7. **Ratatui workflow and release verification:** full user path, CLI parity, offline tests and documented installation.
 
 Each implementation slice should be **independently demonstrable end to end**, not a horizontal "all schema / all provider / all UI" handoff. Review the final ticket decomposition and blocking relationships **after** accepting this spec.
@@ -155,7 +157,6 @@ Each implementation slice should be **independently demonstrable end to end**, n
 
 - Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field.
 - Verify effort choice options and response confidence/usage fields per route.
-- Validate the imported dataset's source partition and duplicate-pair mapping before deriving a paired dataset revision.
 - Settle exact CLI flags, TUI keybindings, transport error taxonomy, and evidence schema field names during the relevant small implementation slices, while preserving the above domain-level invariants.
 
 ## Related work
