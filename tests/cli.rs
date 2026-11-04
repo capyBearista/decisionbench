@@ -1125,6 +1125,38 @@ fn a_truncated_body_keeps_the_http_status() {
 }
 
 #[test]
+fn a_non_utf8_error_body_is_kept_as_a_provider_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/decisions", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = [0; 4096];
+            let _ = stream.read(&mut buf);
+            let body = b"Bad gateway: caf\xe9 down";
+            let head = format!(
+                "HTTP/1.1 502 Bad Gateway\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+    let eval = Eval::new(
+        "non-utf8",
+        &candidate_toml("jev-openrouter", "openrouter", "m", &url),
+    );
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("attempt: provider_error, HTTP 502"),
+        "{}",
+        stdout(&out)
+    );
+    let attempt = &eval.evidence()["attempt"];
+    assert_eq!(attempt["raw_response"], "Bad gateway: caf\u{FFFD} down");
+}
+
+#[test]
 fn a_key_echoed_by_the_provider_is_redacted() {
     let body = format!(r#"{{"error":{{"message":"Invalid key {TEST_KEY}"}}}}"#);
     let stub = stub(401, &body);

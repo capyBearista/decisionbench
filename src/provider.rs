@@ -187,7 +187,11 @@ pub fn send(url: &str, key: Option<&str>, body: &Value) -> Attempt {
     let mut status = None;
     let result = request.send(body.to_string()).and_then(|mut response| {
         status = Some(response.status().as_u16());
-        response.body_mut().read_to_string()
+        // shortcut: invalid UTF-8 bytes become U+FFFD; store raw bytes (e.g. base64) if a provider ever needs them
+        response
+            .body_mut()
+            .read_to_vec()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
     });
     let latency_ms = clock.elapsed().as_millis() as u64;
     let (disposition, http_status, raw_response, error) = match (result, status) {
