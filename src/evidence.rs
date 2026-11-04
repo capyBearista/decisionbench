@@ -1,8 +1,9 @@
 //! Immutable evidence: one JSON file per evaluation, readable offline (SPEC §5).
 
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -61,18 +62,32 @@ impl Evidence {
     }
 }
 
-/// Writes `{id}.json` into `dir`, creating it. Never overwrites an existing file.
-pub fn write(dir: &Path, evidence: &Evidence) -> Result<PathBuf, String> {
-    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let path = dir.join(format!("{}.json", evidence.id));
-    let text = serde_json::to_string_pretty(evidence).map_err(|e| e.to_string())?;
-    OpenOptions::new()
+/// Creates `dir` (mode 0700) and opens `{id}.json` (mode 0600) for writing, never overwriting.
+/// Done before the request is sent, so an unwritable destination fails with nothing sent.
+pub fn create(dir: &Path, id: &str) -> Result<(File, PathBuf), String> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let path = dir.join(format!("{id}.json"));
+    let file = OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(&path)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    Ok(path)
+    Ok((file, path))
+}
+
+/// Writes the evidence into the file `create` opened. If that fails the reply is already paid for,
+/// so the full JSON goes to stderr rather than being lost.
+pub fn save(mut file: File, path: &Path, evidence: &Evidence) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(evidence).map_err(|e| e.to_string())?;
+    file.write_all(text.as_bytes()).map_err(|e| {
+        eprintln!("{text}");
+        format!("cannot write {}: {e}", path.display())
+    })
 }
 
 pub fn read(bytes: &[u8]) -> Result<Evidence, String> {
@@ -89,17 +104,19 @@ pub fn read(bytes: &[u8]) -> Result<Evidence, String> {
 }
 
 /// What went wrong: the provider's message when the body has one, else a cut of the raw body.
+/// Control characters are dropped: the text is provider-controlled and goes to a terminal.
 fn failure_text(attempt: &Attempt) -> String {
     let raw = attempt.raw_response.as_deref().unwrap_or_default();
     let message = serde_json::from_str::<Value>(raw)
         .ok()
         .and_then(|body| body.pointer("/error/message")?.as_str().map(String::from));
-    message
+    let text = message
         .or_else(|| attempt.error.clone())
         .unwrap_or_else(|| match raw.char_indices().nth(200) {
             Some((end, _)) => format!("{}...", &raw[..end]),
             None => raw.to_string(),
-        })
+        });
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// The summary `evaluate` and `show` both print.

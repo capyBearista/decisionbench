@@ -177,7 +177,8 @@ struct Evaluation {
     out: Option<PathBuf>,
 }
 
-/// Every input is checked before the request, so an input error sends and saves nothing.
+/// Every input is checked, and the evidence file is created, before the request, so an input or
+/// output error sends nothing. If the final write fails the evidence JSON goes to stderr instead.
 fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
     let config = match &args.config {
         Some(path) => path.clone(),
@@ -209,6 +210,8 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
         .ok_or_else(|| format!("unknown case {} in {dataset_name}", args.case_id))?;
     let key = candidate.provider.key()?;
 
+    let id = format!("{}-{}", now_unix_ms(), std::process::id());
+    let (file, path) = evidence::create(&out, &id)?;
     let request = request_body(&candidate.model, &instructions, case, args.target);
     let attempt = send(candidate.effective_url(), key.as_deref(), &request);
     let created_unix_ms = now_unix_ms();
@@ -216,7 +219,7 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
         .then(|| normalize(attempt.raw_response.as_deref().unwrap_or_default()));
     let evidence = Evidence {
         schema_version: evidence::SCHEMA_VERSION,
-        id: format!("{created_unix_ms}-{}", std::process::id()),
+        id,
         created_unix_ms,
         dataset: Hashed {
             name: dataset_name,
@@ -239,7 +242,7 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
         attempt,
         prediction,
     };
-    let path = evidence::write(&out, &evidence)?;
+    evidence::save(file, &path, &evidence)?;
     print!("{evidence}");
     println!("evidence: {}", path.display());
     Ok(if evidence.prediction.is_some() {

@@ -29,7 +29,7 @@ model = "jev-1.13-free"
 # url = "..."                      # optional: override the provider's default URL
 ```
 
-Credentials come from environment variables only and are never written to evidence: `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent when it is unset or empty).
+Credentials come from environment variables only and are never written to evidence: `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent when it is unset or empty). Requests honour the standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` environment variables; a candidate `url` override that uses plain `http://` sends the key unencrypted.
 
 `evaluate` sends the Case message, its context if any, and the Target Model (`--target sonnet` or `opus`). It never sends current effort or current model. It saves one JSON file per request under `$XDG_DATA_HOME/decisionbench/runs` (default `~/.local/share/decisionbench/runs`, or `--out DIR`) and prints a summary. Exit codes: `0` answered (the effort may still grade as invalid), `3` provider or transport failure (evidence still saved), `1` bad config, input or missing key (nothing sent or saved), `2` usage error.
 

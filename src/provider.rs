@@ -169,7 +169,7 @@ pub fn now_unix_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Sends one POST. The key goes only in the Authorization header and is never returned.
+/// Sends one POST. The key goes only in the Authorization header; any echo of it is redacted.
 pub fn send(url: &str, key: Option<&str>, body: &Value) -> Attempt {
     // shortcut: fixed 60 s timeout, configurable in #8
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -183,28 +183,37 @@ pub fn send(url: &str, key: Option<&str>, body: &Value) -> Attempt {
     if let Some(key) = key {
         request = request.header("authorization", format!("Bearer {key}"));
     }
+    // Keep the status when the headers arrived but the body could not be read.
+    let mut status = None;
     let result = request.send(body.to_string()).and_then(|mut response| {
-        let status = response.status().as_u16();
-        response
-            .body_mut()
-            .read_to_string()
-            .map(|body| (status, body))
+        status = Some(response.status().as_u16());
+        response.body_mut().read_to_string()
     });
     let latency_ms = clock.elapsed().as_millis() as u64;
-    let (disposition, http_status, raw_response, error) = match result {
-        Ok((status, body)) if (200..300).contains(&status) => {
+    let (disposition, http_status, raw_response, error) = match (result, status) {
+        (Ok(body), Some(status)) if (200..300).contains(&status) => {
             (Disposition::Answered, Some(status), Some(body), None)
         }
-        Ok((status, body)) => (Disposition::ProviderError, Some(status), Some(body), None),
-        Err(e) => (Disposition::TransportError, None, None, Some(e.to_string())),
+        (Ok(body), status) => (Disposition::ProviderError, status, Some(body), None),
+        (Err(e), status) => (
+            Disposition::TransportError,
+            status,
+            None,
+            Some(e.to_string()),
+        ),
+    };
+    // A provider may echo the key back; it must not reach the evidence or the terminal.
+    let redact = |text: String| match key {
+        Some(key) => text.replace(key, "[redacted]"),
+        None => text,
     };
     Attempt {
         started_unix_ms,
         latency_ms,
         disposition,
         http_status,
-        raw_response,
-        error,
+        raw_response: raw_response.map(redact),
+        error: error.map(redact),
     }
 }
 

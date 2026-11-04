@@ -87,11 +87,11 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 - Parse and preserve the **raw effort prediction** separately from the normalized effort and any future **effective decision** produced by a selected policy. The initial accuracy score uses the raw normalized model prediction, not a post-policy decision.
 - Mark an unsupported choice or missing effort as **invalid/unanswered**, not as correct or as a fallback effort.
 
-### 4a. Provider routes and Judge Instructions (verified 2026-11-03)
+### 4a. Provider routes and Judge Instructions (checked 2026-11-03)
 
-- Both routes accept the same body: `{"model", "state", "questions"}`. decisionbench sends `state` as `{"target_model", "recent_conversation" (only when the Case has context), "next_message"}` and one `choice` question, `effort`, whose instructions and per-effort criteria come from the selected Judge Instructions. `state` is free-form on both routes, so `current_effort` and `current_model` are **omitted**, not nulled.
+- Both routes document the same body: `{"model", "state", "questions"}`. decisionbench sends `state` as `{"target_model", "recent_conversation" (only when the Case has context), "next_message"}` and one `choice` question, `effort`, whose instructions and per-effort criteria come from the selected Judge Instructions. `state` is free-form, so `current_effort` and `current_model` are **omitted**, not nulled; OpenRouter accepted such a request live.
 - **OpenRouter** (`POST https://openrouter.ai/api/alpha/decisions`, `Authorization: Bearer` with `OPENROUTER_API_KEY`, required). A 200 reply is `{"id", "model", "provider", "answers": {"effort": {"choice", "confidence", "probabilities"}}, "usage": {"input_tokens", "output_tokens", "cost"}}`. The reply's `model` can be a dated revision of the requested one (`typesafe/jev-1.13` answered as `typesafe/jev-1.13-20260917`) and `provider` names the upstream host; both are kept as evidence. Errors are `{"error": {"code", "message"}}`.
-- **OpenCode Zen** (`POST https://opencode.ai/inference/systemone/v1/systemone`; the older `/zen/v1/systemone` shares its quota). Free models (`jev-1.13-free`) accept requests without a key; paid models answer `401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}` without `OPENCODE_API_KEY`. Errors are `{"type": "error", "error": {"type", "message"}}`; a used-up free quota is `429 FreeUsageLimitError` with `Retry-After`. **Not yet observed:** a successful Zen reply. It is assumed to match OpenRouter's `answers` shape; any other shape grades as invalid and its raw reply is kept.
+- **OpenCode Zen** (`POST https://opencode.ai/inference/systemone/v1/systemone`; the older `/zen/v1/systemone` shares its quota). Free models (`jev-1.13-free`) accept requests without a key; paid models answer `401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}` without `OPENCODE_API_KEY`. Errors are `{"type": "error", "error": {"type", "message"}}`; a used-up free quota is `429 FreeUsageLimitError` with `Retry-After`. **Not yet observed:** a successful Zen reply, and so whether Zen accepts a `state` without `current_effort` (only quota and auth errors have come back so far). The reply is assumed to match OpenRouter's `answers` shape; any other shape grades as invalid for a labelled target, and its raw reply is kept.
 - **Judge Instructions** are Markdown files (`prompts/<name>.md`): instructions first, then one `## <effort>` section per effort level, in scale order. They are selected per evaluation, recorded by name, SHA-256 and full text, and never edited through the CLI or TUI ([ADR-0004](adr/0004-judge-instructions-axis.md)). The bundled default, `neutral`, carries no effortless policy rules.
 
 ### 5. Execution, failures, and evidence
@@ -162,8 +162,8 @@ Each implementation slice should be **independently demonstrable end to end**, n
 
 ## Outstanding verification tasks (not permission to guess)
 
-- ~~Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field.~~ Settled in #6/#7: see §4a.
-- ~~Verify effort choice options and response confidence/usage fields per route.~~ Settled in #6/#7: see §4a.
+- Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field. **Settled for OpenRouter** in #6/#7 (see §4a); **still open for Zen** until a successful reply is observed.
+- Verify effort choice options and response confidence/usage fields per route. **Settled for OpenRouter** (see §4a); **still open for Zen**.
 - Settle exact CLI flags, TUI keybindings, transport error taxonomy, and evidence schema field names during the relevant small implementation slices, while preserving the above domain-level invariants.
 
 ## Related work

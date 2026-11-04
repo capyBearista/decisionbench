@@ -1062,3 +1062,199 @@ fn malformed_instructions_exit_1_naming_the_file() {
     assert!(files_in(&eval.out_dir).is_empty());
     assert!(stub.requests.try_recv().is_err());
 }
+
+// ---- review fixes ----
+
+#[test]
+fn unwritable_out_exits_1_before_any_request() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let mut eval = openrouter_eval("bad-out", &stub);
+    let blocker = temp_file("bad-out-blocker", "a regular file");
+    eval.out_dir = blocker.join("runs");
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("cannot create"), "{}", stderr(&out));
+    assert!(
+        stub.requests
+            .recv_timeout(Duration::from_millis(500))
+            .is_err(),
+        "no request was sent"
+    );
+}
+
+#[test]
+fn evidence_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("perms", &stub);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&files_in(&eval.out_dir)[0]), 0o600);
+    assert_eq!(mode(&eval.out_dir), 0o700);
+}
+
+#[test]
+fn a_truncated_body_keeps_the_http_status() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/decisions", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = [0; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\nconnection: close\r\n\r\nshort",
+            );
+        }
+    });
+    let eval = Eval::new(
+        "truncated",
+        &candidate_toml("jev-openrouter", "openrouter", "m", &url),
+    );
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("attempt: transport_error, HTTP 200, "),
+        "{}",
+        stdout(&out)
+    );
+    let attempt = &eval.evidence()["attempt"];
+    assert_eq!(attempt["disposition"], "transport_error");
+    assert_eq!(attempt["http_status"], 200);
+    assert!(attempt["error"].as_str().is_some_and(|e| !e.is_empty()));
+}
+
+#[test]
+fn a_key_echoed_by_the_provider_is_redacted() {
+    let body = format!(r#"{{"error":{{"message":"Invalid key {TEST_KEY}"}}}}"#);
+    let stub = stub(401, &body);
+    let eval = openrouter_eval("echo-key", &stub);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let file = std::fs::read_to_string(&files_in(&eval.out_dir)[0]).unwrap();
+    assert!(!file.contains(TEST_KEY), "{file}");
+    assert!(file.contains("Invalid key [redacted]"), "{file}");
+    assert!(!stdout(&out).contains(TEST_KEY) && !stderr(&out).contains(TEST_KEY));
+    assert!(
+        stdout(&out).contains("error: Invalid key [redacted]"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn terminal_output_strips_control_characters_but_evidence_keeps_them() {
+    for (n, body) in [
+        r#"{"error":{"message":"bad \u001b[31mred"}}"#,
+        "oops \u{1b}[31mred",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let stub = stub(500, body);
+        let eval = openrouter_eval(&format!("ctrl-{n}"), &stub);
+        let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+        assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+        assert!(!stdout(&out).contains('\u{1b}'), "{:?}", stdout(&out));
+        assert!(stdout(&out).contains("[31mred"), "{:?}", stdout(&out));
+        assert_eq!(eval.evidence()["attempt"]["raw_response"], body);
+    }
+}
+
+#[test]
+fn unlabelled_target_prints_unlabelled_and_grades_unscored() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let dataset = temp_file(
+        "unlabelled-dataset.json",
+        &dataset(r#"{"id":"u1","message":"m","ok":{"sonnet":"low"}}"#),
+    );
+    let eval = openrouter_eval("unlabelled", &stub);
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-openrouter",
+            "--case",
+            "u1",
+            "--target",
+            "opus",
+            "--dataset",
+            dataset.to_str().unwrap(),
+        ],
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let printed = stdout(&out);
+    assert!(printed.contains("case: u1 opus (unlabelled)"), "{printed}");
+    assert!(printed.contains("\ngrade: unscored\n"), "{printed}");
+    assert_eq!(eval.evidence()["label"], Value::Null);
+}
+
+#[test]
+fn zen_auth_error_exits_3_with_the_provider_message() {
+    let stub = stub(
+        401,
+        r#"{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}"#,
+    );
+    let eval = Eval::new(
+        "zen-401",
+        &candidate_toml("jev-zen", "zen", "jev-1.13", &stub.url),
+    );
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-zen",
+            "--case",
+            "c002",
+            "--target",
+            "opus",
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("attempt: provider_error, HTTP 401, "),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains("\nerror: Missing API key.\n"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn non_json_error_body_is_shown_cut_to_200_characters() {
+    let body = "é".repeat(300);
+    let stub = stub(502, &body);
+    let eval = openrouter_eval("bad-gateway", &stub);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let expected = format!("\nerror: {}...\n", "é".repeat(200));
+    assert!(stdout(&out).contains(&expected), "{}", stdout(&out));
+    assert_eq!(eval.evidence()["attempt"]["raw_response"], body);
+}
+
+#[test]
+fn same_named_instruction_files_are_told_apart_by_hash() {
+    let mut recorded = Vec::new();
+    for (n, text) in [CUSTOM.to_string(), CUSTOM.replace("low desc", "other desc")]
+        .into_iter()
+        .enumerate()
+    {
+        let stub = stub(200, OPENROUTER_REPLY);
+        let eval = openrouter_eval(&format!("samename-{n}"), &stub);
+        let dir = fresh_dir(&format!("samename-prompts-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("custom.md");
+        std::fs::write(&path, &text).unwrap();
+        let mut args = C002_OPUS.to_vec();
+        args.extend(["--instructions", path.to_str().unwrap()]);
+        let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let evidence = eval.evidence();
+        assert_eq!(evidence["instructions"]["name"], "custom");
+        recorded.push(evidence["instructions"]["sha256"].clone());
+    }
+    assert_ne!(recorded[0], recorded[1]);
+}
