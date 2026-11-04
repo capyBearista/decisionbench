@@ -1,6 +1,6 @@
 # ADR-0004: Judge Instructions are a selectable, versioned axis
 
-**Status:** Accepted (2026-11-03)
+**Status:** Accepted (2026-11-03). Superseded in part by [ADR-0005](0005-one-request-per-case-four-targets.md): a Trial no longer includes a Target Model, and the file format now has one `## <target>` section per model, each with its own instructions and effort lines. Selection by name and hash is unchanged.
 
 ## Context
 
