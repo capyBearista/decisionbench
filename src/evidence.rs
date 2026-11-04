@@ -199,9 +199,20 @@ pub fn append_on_new_line(file: &mut File, path: &Path, line: &Line) -> Result<(
 
 fn write_text(file: &mut File, path: &Path, text: String) -> Result<(), String> {
     file.write_all(text.as_bytes()).map_err(|e| {
-        eprint!("{text}");
+        eprint!("{}", escape_c1(&text));
         format!("cannot write {}: {e}", path.display())
     })
+}
+
+/// serde_json escapes C0 controls but not C1 (U+0080-U+009F, e.g. CSI), which a terminal acts on.
+/// Writes them as JSON `\u00XX` escapes so the printed copy stays valid JSON.
+fn escape_c1(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{80}'..='\u{9f}' => format!("\\u{:04x}", c as u32),
+            _ => c.to_string(),
+        })
+        .collect()
 }
 
 /// A parsed Run file.
@@ -320,16 +331,18 @@ impl fmt::Display for RunFile {
                 .iter()
                 .filter(|t| t.candidate == candidate.name)
                 .collect();
-            if mine.is_empty() {
-                continue;
-            }
-            writeln!(
+            write!(
                 f,
                 "candidate: {} ({} {})",
                 candidate.name,
                 candidate.provider.name(),
                 candidate.model
             )?;
+            if mine.is_empty() {
+                writeln!(f, ": no trials recorded")?;
+                continue;
+            }
+            writeln!(f)?;
             for instructions in &self.manifest.instructions {
                 for target in &self.manifest.targets {
                     let group: Vec<&&TrialRecord> = mine
@@ -508,6 +521,27 @@ mod tests {
             encode(&complete)
         );
         assert!(read_run(text.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn a_partial_run_lists_a_candidate_with_no_trials() {
+        let run = read_run(file(&[manifest(1)]).as_bytes()).unwrap();
+        let text = run.to_string();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("candidate: c (") && l.ends_with("): no trials recorded")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn c1_controls_are_escaped_for_stderr_only() {
+        let csi = "a\u{9b}31m\u{80}\u{9f}b\u{a0}";
+        let escaped = escape_c1(csi);
+        assert_eq!(escaped, "a\\u009b31m\\u0080\\u009fb\u{a0}");
+        // The escaped text is valid JSON that decodes to the original.
+        let decoded: String = serde_json::from_str(&format!("\"{escaped}\"")).unwrap();
+        assert_eq!(decoded, csi);
     }
 
     #[test]

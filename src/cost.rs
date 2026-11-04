@@ -55,13 +55,12 @@ pub fn attempt_cost(price: Option<&Price>, attempt: &Attempt) -> AttemptCost {
     let Some(price) = price else {
         return AttemptCost::Unknown(UnknownReason::NoPrice);
     };
-    // Headers arrived with 2xx but the body was lost: the provider did the work, usage unknown.
+    // A transport error after a 2xx status means the provider did the work but the body was lost,
+    // so it follows the usage logic below: no body gives no token counts, which is unknown only
+    // when a nonzero rate needs one.
     let cut_after_2xx = attempt.disposition == Disposition::TransportError
         && attempt.http_status.is_some_and(|s| (200..300).contains(&s));
-    if cut_after_2xx {
-        return AttemptCost::Unknown(UnknownReason::NoUsage);
-    }
-    if attempt.disposition != Disposition::Answered {
+    if attempt.disposition != Disposition::Answered && !cut_after_2xx {
         return AttemptCost::FailedUnbilled;
     }
     let usage: Value = attempt
@@ -312,6 +311,18 @@ mod tests {
         assert_eq!(
             attempt_cost(None, &cut),
             AttemptCost::Unknown(UnknownReason::NoPrice)
+        );
+    }
+
+    #[test]
+    fn a_cut_2xx_with_zero_token_rates_costs_the_per_request_fee() {
+        let cut = Attempt {
+            error: Some("body read failed".into()),
+            ..attempt(Disposition::TransportError, Some(200), None)
+        };
+        assert_eq!(
+            attempt_cost(Some(&price(0.0, 0.0, 0.003)), &cut),
+            AttemptCost::Known(0.003)
         );
     }
 
