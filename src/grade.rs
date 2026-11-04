@@ -3,12 +3,13 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use serde::Deserialize;
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dataset::{Case, Effort, EffortRange};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Target {
     Sonnet,

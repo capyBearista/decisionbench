@@ -1,5 +1,11 @@
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::mpsc::{Receiver, channel};
+use std::time::Duration;
+
+use serde_json::{Value, json};
 
 const EXPECTED_COUNTS: &str = "\
 cases: 71
@@ -8,10 +14,26 @@ opus labels: 8 (63 unscored)
 ";
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_decisionbench"))
-        .args(args)
-        .output()
-        .expect("binary runs")
+    run_with_env(args, &[])
+}
+
+/// Keys and proxies are cleared first so the host environment cannot leak into a test.
+fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_decisionbench"));
+    for name in [
+        "OPENROUTER_API_KEY",
+        "OPENCODE_API_KEY",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        command.env_remove(name);
+    }
+    command.args(args).envs(envs.iter().copied());
+    command.output().expect("binary runs")
 }
 
 fn dataset_path() -> PathBuf {
@@ -382,4 +404,661 @@ fn grade_rejects_invalid_dataset() {
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("invalid dataset"));
+}
+
+// ---- evaluate and show ----
+
+const TEST_KEY: &str = "sk-test-secret-1234";
+const OPENROUTER_REPLY: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"provider":"TypeSafe"}"#;
+const ZEN_429: &str = r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}"#;
+
+fn reply(choice: &str) -> String {
+    format!(r#"{{"answers":{{"effort":{{"type":"choice","choice":{choice}}}}}}}"#)
+}
+
+/// A request captured by the stub, split into head (request line and headers) and JSON body.
+struct Captured {
+    head: String,
+    body: Value,
+}
+
+impl Captured {
+    fn header(&self, name: &str) -> Option<String> {
+        self.head.lines().skip(1).find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+    }
+}
+
+struct Stub {
+    url: String,
+    requests: Receiver<String>,
+}
+
+impl Stub {
+    fn next(&self) -> Captured {
+        let raw = self
+            .requests
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stub saw a request");
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        Captured {
+            head: head.to_string(),
+            body: serde_json::from_str(body).unwrap(),
+        }
+    }
+}
+
+/// Serves every connection with the canned reply, reporting each raw request over a channel.
+fn stub(status: u16, body: &str) -> Stub {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/decisions", listener.local_addr().unwrap());
+    let (sender, requests) = channel();
+    let response = format!(
+        "HTTP/1.1 {status} Stub\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut raw = Vec::new();
+            let mut chunk = [0; 4096];
+            let head_end = loop {
+                let n = stream.read(&mut chunk).unwrap();
+                raw.extend_from_slice(&chunk[..n]);
+                if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().unwrap());
+            while raw.len() < head_end + length {
+                let n = stream.read(&mut chunk).unwrap();
+                raw.extend_from_slice(&chunk[..n]);
+            }
+            let _ = sender.send(String::from_utf8_lossy(&raw).into_owned());
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    Stub { url, requests }
+}
+
+fn candidate_toml(name: &str, provider: &str, model: &str, url: &str) -> String {
+    format!(
+        "[[candidate]]\nname = \"{name}\"\ndecision_model = \"jev-1.13\"\nprovider = \"{provider}\"\nmodel = \"{model}\"\nurl = \"{url}\"\n"
+    )
+}
+
+fn fresh_dir(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// Files directly inside `dir`; empty when it does not exist.
+fn files_in(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|entries| entries.map(|e| e.unwrap().path()).collect())
+        .unwrap_or_default()
+}
+
+/// One `evaluate` run with its own config file and output directory, both named after `test`.
+struct Eval {
+    out_dir: PathBuf,
+    config: PathBuf,
+}
+
+impl Eval {
+    fn new(test: &str, config_toml: &str) -> Self {
+        Self {
+            out_dir: fresh_dir(&format!("{test}-out")),
+            config: temp_file(&format!("{test}-config.toml"), config_toml),
+        }
+    }
+
+    fn run(&self, extra: &[&str], envs: &[(&str, &str)]) -> Output {
+        let mut args = vec!["evaluate", "--config", self.config.to_str().unwrap()];
+        args.extend(["--out", self.out_dir.to_str().unwrap()]);
+        args.extend(extra);
+        run_with_env(&args, envs)
+    }
+
+    /// The only evidence file written so far, parsed.
+    fn evidence(&self) -> Value {
+        let files = files_in(&self.out_dir);
+        assert_eq!(files.len(), 1, "{files:?}");
+        serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap()
+    }
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Everything `evaluate` printed before its `evidence:` line.
+fn summary(out: &Output) -> String {
+    stdout(out)
+        .lines()
+        .filter(|l| !l.starts_with("evidence: "))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+fn openrouter_eval(test: &str, stub: &Stub) -> Eval {
+    Eval::new(
+        test,
+        &candidate_toml(
+            "jev-openrouter",
+            "openrouter",
+            "typesafe/jev-1.13",
+            &stub.url,
+        ),
+    )
+}
+
+const C002_OPUS: [&str; 6] = [
+    "--candidate",
+    "jev-openrouter",
+    "--case",
+    "c002",
+    "--target",
+    "opus",
+];
+
+#[test]
+fn openrouter_request_is_the_documented_decisions_body() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("or-request", &stub);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let request = stub.next();
+    assert!(
+        request.head.starts_with("POST /decisions "),
+        "{}",
+        request.head
+    );
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer {TEST_KEY}"))
+    );
+    let body = &request.body;
+    assert_eq!(body["model"], "typesafe/jev-1.13");
+    assert_eq!(body["state"]["target_model"], "Claude Opus");
+    assert_eq!(
+        body["state"]["next_message"],
+        "rename the variable usr to user in auth.ts"
+    );
+    assert!(body["state"].get("recent_conversation").is_none());
+    let raw = body.to_string();
+    assert!(
+        !raw.contains("current_effort") && !raw.contains("current_model"),
+        "{raw}"
+    );
+    let effort = &body["questions"]["effort"];
+    assert_eq!(effort["type"], "choice");
+    assert!(
+        effort["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("Choose the reasoning effort")
+    );
+    let keys: Vec<&String> = effort["criteria"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["low", "medium", "high", "xhigh", "max"]);
+}
+
+#[test]
+fn answered_hit_prints_summary_and_saves_evidence() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("or-hit", &stub);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let printed = stdout(&out);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert_eq!(
+        lines[0],
+        "candidate: jev-openrouter (openrouter typesafe/jev-1.13)"
+    );
+    assert!(lines[1].starts_with("instructions: neutral ("), "{printed}");
+    assert_eq!(lines[2], "case: c002 opus (label low)");
+    assert!(
+        lines[3].starts_with("attempt: answered, HTTP 200, "),
+        "{printed}"
+    );
+    assert_eq!(lines[4], "effort: \"low\"");
+    assert_eq!(lines[5], "grade: hit");
+    let files = files_in(&eval.out_dir);
+    assert_eq!(lines[6], format!("evidence: {}", files[0].display()));
+
+    let evidence = eval.evidence();
+    assert_eq!(evidence["schema_version"], 1);
+    assert_eq!(evidence["case_id"], "c002");
+    assert_eq!(evidence["target"], "opus");
+    assert_eq!(evidence["label"], "low");
+    assert_eq!(evidence["candidate"]["url"], stub.url);
+    assert_eq!(evidence["candidate"]["provider"], "openrouter");
+    assert_eq!(evidence["dataset"]["name"], "bundled cases");
+    assert_eq!(evidence["attempt"]["disposition"], "answered");
+    assert_eq!(evidence["attempt"]["raw_response"], OPENROUTER_REPLY);
+    assert_eq!(evidence["prediction"]["effort"], "low");
+    assert_eq!(evidence["prediction"]["response_provider"], "TypeSafe");
+    assert!(
+        evidence.get("grade").is_none(),
+        "the grade is recomputed, not stored"
+    );
+}
+
+#[test]
+fn evidence_never_holds_the_key() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("or-redact", &stub);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0));
+    let file = std::fs::read_to_string(&files_in(&eval.out_dir)[0]).unwrap();
+    assert!(!file.contains(TEST_KEY));
+    assert!(!stdout(&out).contains(TEST_KEY) && !stderr(&out).contains(TEST_KEY));
+    assert!(!file.to_lowercase().contains("authorization"));
+}
+
+#[test]
+fn zen_without_a_key_sends_no_authorization_header() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = Eval::new(
+        "zen-nokey",
+        &candidate_toml("jev-zen", "zen", "jev-1.13-free", &stub.url),
+    );
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-zen",
+            "--case",
+            "c002",
+            "--target",
+            "opus",
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let request = stub.next();
+    assert_eq!(request.header("authorization"), None, "{}", request.head);
+    assert_eq!(request.body["model"], "jev-1.13-free");
+    assert_eq!(eval.evidence()["candidate"]["provider"], "zen");
+}
+
+#[test]
+fn zen_with_a_key_sends_it_and_an_empty_key_counts_as_unset() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = Eval::new(
+        "zen-key",
+        &candidate_toml("jev-zen", "zen", "jev-1.13", &stub.url),
+    );
+    let args = [
+        "--candidate",
+        "jev-zen",
+        "--case",
+        "c002",
+        "--target",
+        "opus",
+    ];
+    assert_eq!(
+        eval.run(&args, &[("OPENCODE_API_KEY", "")]).status.code(),
+        Some(0)
+    );
+    assert_eq!(stub.next().header("authorization"), None);
+    assert_eq!(
+        eval.run(&args, &[("OPENCODE_API_KEY", "zk")]).status.code(),
+        Some(0)
+    );
+    assert_eq!(
+        stub.next().header("authorization"),
+        Some("Bearer zk".to_string())
+    );
+}
+
+#[test]
+fn paired_targets_differ_only_in_target_model() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let dataset = temp_file(
+        "paired-dataset.json",
+        &dataset(
+            r#"{"id":"p1","message":"refactor it","context":"user: earlier\nassistant: ok","ok":{"sonnet":"low","opus":"medium"}}"#,
+        ),
+    );
+    let eval = openrouter_eval("paired", &stub);
+    let mut bodies = Vec::new();
+    for target in ["sonnet", "opus"] {
+        let args = [
+            "--candidate",
+            "jev-openrouter",
+            "--case",
+            "p1",
+            "--target",
+            target,
+            "--dataset",
+            dataset.to_str().unwrap(),
+        ];
+        let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        bodies.push(stub.next().body);
+    }
+    assert_eq!(bodies[0]["state"]["target_model"], "Claude Sonnet");
+    assert_eq!(bodies[1]["state"]["target_model"], "Claude Opus");
+    assert_eq!(
+        bodies[0]["state"]["recent_conversation"],
+        "user: earlier\nassistant: ok"
+    );
+    bodies[1]["state"]["target_model"] = json!("Claude Sonnet");
+    assert_eq!(bodies[0], bodies[1]);
+    assert_eq!(files_in(&eval.out_dir).len(), 2, "two runs write two files");
+}
+
+#[test]
+fn invalid_answers_are_graded_invalid_with_exit_0() {
+    for (n, body) in [
+        reply(r#""High""#),
+        "{}".to_string(),
+        "this is not json".to_string(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let stub = stub(200, &body);
+        let eval = openrouter_eval(&format!("invalid-{n}"), &stub);
+        let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+        assert_eq!(out.status.code(), Some(0), "{body}: {}", stderr(&out));
+        assert!(
+            stdout(&out).contains("\ngrade: invalid\n"),
+            "{}",
+            stdout(&out)
+        );
+        assert_eq!(eval.evidence()["attempt"]["raw_response"], body);
+    }
+}
+
+#[test]
+fn provider_failure_exits_3_and_keeps_the_raw_body() {
+    let stub = stub(429, ZEN_429);
+    let eval = Eval::new(
+        "zen-429",
+        &candidate_toml("jev-zen", "zen", "jev-1.13-free", &stub.url),
+    );
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-zen",
+            "--case",
+            "c002",
+            "--target",
+            "opus",
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let printed = stdout(&out);
+    assert!(
+        printed.contains("attempt: provider_error, HTTP 429, "),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("error: Free usage limit reached."),
+        "{printed}"
+    );
+    assert!(printed.contains("\ngrade: none\n"), "{printed}");
+    let evidence = eval.evidence();
+    assert_eq!(evidence["attempt"]["disposition"], "provider_error");
+    assert_eq!(evidence["attempt"]["http_status"], 429);
+    assert_eq!(evidence["attempt"]["raw_response"], ZEN_429);
+    assert_eq!(evidence["prediction"], Value::Null);
+}
+
+#[test]
+fn transport_failure_exits_3_and_saves_evidence() {
+    let eval = Eval::new(
+        "transport",
+        &candidate_toml("jev-openrouter", "openrouter", "m", "http://127.0.0.1:1"),
+    );
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let printed = stdout(&out);
+    assert!(printed.contains("attempt: transport_error, "), "{printed}");
+    assert!(printed.contains("\nerror: "), "{printed}");
+    assert!(printed.contains("\ngrade: none\n"), "{printed}");
+    let evidence = eval.evidence();
+    assert_eq!(evidence["attempt"]["disposition"], "transport_error");
+    assert!(
+        evidence["attempt"]["error"]
+            .as_str()
+            .is_some_and(|e| !e.is_empty())
+    );
+    assert_eq!(evidence["attempt"]["http_status"], Value::Null);
+}
+
+#[test]
+fn missing_openrouter_key_exits_1_without_a_request_or_file() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("no-key", &stub);
+    let out = eval.run(&C002_OPUS, &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("OPENROUTER_API_KEY"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(out.stdout.is_empty());
+    assert!(files_in(&eval.out_dir).is_empty());
+    assert!(stub.requests.try_recv().is_err(), "no request was sent");
+}
+
+#[test]
+fn input_errors_exit_1_before_any_request() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("inputs", &stub);
+    let unknown_field = Eval::new(
+        "inputs-field",
+        &format!(
+            "{}colour = \"red\"\n",
+            candidate_toml("c", "zen", "m", &stub.url)
+        ),
+    );
+    let unknown_provider = Eval::new(
+        "inputs-provider",
+        &candidate_toml("c", "bing", "m", &stub.url),
+    );
+    for (eval, args, fragment) in [
+        (
+            &eval,
+            ["--candidate", "nope", "--case", "c002", "--target", "opus"],
+            "unknown candidate `nope`",
+        ),
+        (
+            &eval,
+            [
+                "--candidate",
+                "jev-openrouter",
+                "--case",
+                "c999",
+                "--target",
+                "opus",
+            ],
+            "unknown case c999",
+        ),
+        (
+            &unknown_field,
+            ["--candidate", "c", "--case", "c002", "--target", "opus"],
+            "unknown field `colour`",
+        ),
+        (
+            &unknown_provider,
+            ["--candidate", "c", "--case", "c002", "--target", "opus"],
+            "unknown variant `bing`",
+        ),
+    ] {
+        let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+        assert_eq!(out.status.code(), Some(1), "{fragment}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains(fragment),
+            "{fragment} not in {}",
+            stderr(&out)
+        );
+        assert!(files_in(&eval.out_dir).is_empty());
+    }
+    assert!(stub.requests.try_recv().is_err(), "no request was sent");
+    let missing = run(&[
+        "evaluate",
+        "--config",
+        "/nonexistent/config.toml",
+        "--candidate",
+        "c",
+        "--case",
+        "c002",
+        "--target",
+        "opus",
+    ]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(stderr(&missing).contains("cannot read /nonexistent/config.toml"));
+    let bad_target = run(&[
+        "evaluate",
+        "--candidate",
+        "c",
+        "--case",
+        "c002",
+        "--target",
+        "haiku",
+    ]);
+    assert_eq!(bad_target.status.code(), Some(2));
+}
+
+#[test]
+fn show_prints_the_same_summary_and_leaves_the_file_unchanged() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("show", &stub);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0));
+    let file = files_in(&eval.out_dir).remove(0);
+    let before = std::fs::read(&file).unwrap();
+
+    let shown = run(&["show", file.to_str().unwrap()]);
+    assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
+    assert_eq!(stdout(&shown), summary(&out));
+    assert!(stdout(&shown).ends_with("grade: hit\n"));
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}
+
+#[test]
+fn show_regrades_from_the_stored_label_and_raw_effort() {
+    let stub = stub(200, &reply(r#""max""#));
+    let eval = openrouter_eval("show-regrade", &stub);
+    eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    let shown = run(&["show", files_in(&eval.out_dir)[0].to_str().unwrap()]);
+    assert!(
+        stdout(&shown).contains("effort: \"max\"\ngrade: over\n"),
+        "{}",
+        stdout(&shown)
+    );
+}
+
+#[test]
+fn show_rejects_unknown_schema_versions_and_bad_files() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("show-schema", &stub);
+    eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    let mut evidence = eval.evidence();
+    evidence["schema_version"] = json!(99);
+    let future = temp_file("future-evidence.json", &evidence.to_string());
+    let out = run(&["show", future.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("schema_version 99"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(out.stdout.is_empty());
+    let junk = temp_file("junk-evidence.json", "{");
+    assert_eq!(
+        run(&["show", junk.to_str().unwrap()]).status.code(),
+        Some(1)
+    );
+    assert_eq!(run(&["show", "/nonexistent/e.json"]).status.code(), Some(1));
+}
+
+fn hex_sha256(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+const CUSTOM: &str = "Pick the effort for this exact test.\n\n## low\nlow desc\n## medium\nmedium desc\n## high\nhigh desc\n## xhigh\nxhigh desc\n## max\nmax desc\n";
+
+#[test]
+fn custom_instructions_are_sent_and_recorded_by_name_and_hash() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("custom", &stub);
+    let dir = fresh_dir("custom-prompts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("custom.md");
+    std::fs::write(&path, CUSTOM).unwrap();
+    let mut args = C002_OPUS.to_vec();
+    args.extend(["--instructions", path.to_str().unwrap()]);
+    let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let effort = &stub.next().body["questions"]["effort"];
+    assert_eq!(
+        effort["instructions"],
+        "Pick the effort for this exact test."
+    );
+    assert_eq!(
+        effort["criteria"],
+        json!({"low":"low desc","medium":"medium desc","high":"high desc","xhigh":"xhigh desc","max":"max desc"})
+    );
+    let hash = hex_sha256(CUSTOM);
+    let evidence = eval.evidence();
+    assert_eq!(evidence["instructions"]["name"], "custom");
+    assert_eq!(evidence["instructions"]["sha256"], hash);
+    assert_eq!(evidence["instructions"]["text"], CUSTOM);
+    assert!(stdout(&out).contains(&format!("instructions: custom ({})", &hash[..12])));
+}
+
+#[test]
+fn default_instructions_are_recorded_as_neutral() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("neutral", &stub);
+    eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    let evidence = eval.evidence();
+    let bundled = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("prompts/neutral.md"),
+    )
+    .unwrap();
+    assert_eq!(evidence["instructions"]["name"], "neutral");
+    assert_eq!(evidence["instructions"]["text"], bundled);
+    assert_eq!(evidence["instructions"]["sha256"], hex_sha256(&bundled));
+}
+
+#[test]
+fn malformed_instructions_exit_1_naming_the_file() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("bad-instructions", &stub);
+    let path = temp_file("bad-instructions.md", "Intro.\n\n## low\nonly low\n");
+    let mut args = C002_OPUS.to_vec();
+    args.extend(["--instructions", path.to_str().unwrap()]);
+    let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(
+        err.contains("bad-instructions.md") && err.contains("missing `## medium`"),
+        "{err}"
+    );
+    assert!(files_in(&eval.out_dir).is_empty());
+    assert!(stub.requests.try_recv().is_err());
 }
