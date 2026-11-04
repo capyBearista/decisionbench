@@ -67,9 +67,14 @@ pub struct Labels {
     pub opus: Option<EffortRange>,
 }
 
-/// Only called for keys that are present; `EffortRange` itself rejects `null`.
+/// Only called for keys that are present, so `None` here means an explicit `null`.
 fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<EffortRange>, D::Error> {
-    EffortRange::deserialize(deserializer).map(Some)
+    match Option::<EffortRange>::deserialize(deserializer)? {
+        Some(range) => Ok(Some(range)),
+        None => Err(de::Error::custom(
+            "`null` label; omit the key to leave the target unscored",
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]

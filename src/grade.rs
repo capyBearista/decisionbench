@@ -45,15 +45,16 @@ pub enum Grade {
 }
 
 /// Grades a raw effort. Only an exact effort name is valid; there is no normalization.
-/// Invalid comes first: a reply without a valid effort is invalid whether or not the target is labelled.
+/// Unscored comes first: an unlabelled target is outside every scored count, so `invalid` means
+/// "labelled but no valid effort".
 pub fn grade(label: Option<EffortRange>, raw: &Value) -> Grade {
-    let Some(effort) = raw.as_str().and_then(Effort::parse) else {
-        return Grade::Invalid;
+    let Some(range) = label else {
+        return Grade::Unscored;
     };
-    match label {
-        None => Grade::Unscored,
-        Some(range) if effort < range.from => Grade::Under,
-        Some(range) if effort > range.to => Grade::Over,
+    match raw.as_str().and_then(Effort::parse) {
+        None => Grade::Invalid,
+        Some(effort) if effort < range.from => Grade::Under,
+        Some(effort) if effort > range.to => Grade::Over,
         Some(_) => Grade::Hit,
     }
 }
@@ -183,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn anything_but_an_exact_effort_name_is_invalid() {
+    fn anything_but_an_exact_effort_name_is_invalid_when_labelled() {
         for raw in [
             json!("High"),
             json!(" high"),
@@ -195,7 +196,7 @@ mod tests {
             json!(["high"]),
         ] {
             assert_eq!(grade(range(Low, Max), &raw), Invalid, "{raw}");
-            assert_eq!(grade(None, &raw), Invalid, "{raw}");
+            assert_eq!(grade(None, &raw), Unscored, "{raw}");
         }
     }
 }

@@ -244,7 +244,12 @@ fn rejects_null_target_label() {
     assert_rejected(
         "null_label.json",
         &dataset(r#"{"id":"c001","message":"m","ok":{"sonnet":"low","opus":null}}"#),
-        "null",
+        "`null` label; omit the key to leave the target unscored",
+    );
+    assert_rejected(
+        "null_sonnet.json",
+        &dataset(r#"{"id":"c001","message":"m","ok":{"sonnet":null,"opus":"low"}}"#),
+        "`null` label; omit the key to leave the target unscored",
     );
 }
 
@@ -282,9 +287,13 @@ fn grades_predictions_with_per_target_denominators() {
         {"case":"c001","target":"sonnet","effort":"low"},
         {"case":"c001","target":"sonnet","effort":"max"},
         {"case":"c001","target":"sonnet","effort":"High"},
+        {"case":"c001","target":"sonnet","effort":"medium"},
         {"case":"c001","target":"opus","effort":"medium"},
+        {"case":"c001","target":"opus","effort":"High"},
         {"case":"c002","target":"opus","effort":"max"},
-        {"case":"c002","target":"opus"}
+        {"case":"c002","target":"opus"},
+        {"case":"c002","target":"opus","effort":null},
+        {"case":"c002","target":"opus","effort":7}
     ]"#;
     let stdout = stdout_of_success(grade_files("denominators", predictions, Some(&cases)));
     let expected = "\
@@ -292,11 +301,15 @@ c001 sonnet \"high\" hit
 c001 sonnet \"low\" under
 c001 sonnet \"max\" over
 c001 sonnet \"High\" invalid
+c001 sonnet \"medium\" hit
 c001 opus \"medium\" unscored
+c001 opus \"High\" unscored
 c002 opus \"max\" hit
 c002 opus null invalid
-sonnet: 4 predictions: 1 hit, 1 under, 1 over, 1 invalid, 0 unscored; accuracy 1/3 valid scored
-opus: 3 predictions: 1 hit, 0 under, 0 over, 1 invalid, 1 unscored; accuracy 1/1 valid scored
+c002 opus null invalid
+c002 opus 7 invalid
+sonnet: 5 predictions: 2 hit, 1 under, 1 over, 1 invalid, 0 unscored; accuracy 2/4 valid scored
+opus: 6 predictions: 1 hit, 0 under, 0 over, 3 invalid, 2 unscored; accuracy 1/1 valid scored
 ";
     assert!(stdout.ends_with(expected), "{stdout}");
 }
