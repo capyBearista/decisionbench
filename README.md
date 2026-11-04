@@ -30,7 +30,7 @@ The later [Valbench integration](https://github.com/capyBearista/decisionbench/i
 
 ## Source attribution
 
-The initial dataset is derived from the MIT-licensed [effortless project](https://github.com/capyBearista/effortless) by HeyCubit. The original fixture is bundled unmodified with its license and pinned source commit in [datasets/effortless](datasets/effortless/SOURCE.md). The source dataset has **75 cases, 20 holdouts**, and includes labelled Sonnet/Opus examples.
+The initial dataset is derived from the MIT-licensed [effortless project](https://github.com/capyBearista/effortless) by HeyCubit. The original fixture is bundled with its license and pinned source commit; its only change from upstream (label lists put in ascending effort order) is recorded in [datasets/effortless](datasets/effortless/SOURCE.md). The source dataset has **75 cases, 20 holdouts**, and includes labelled Sonnet/Opus examples.
 
 ## Project license
 

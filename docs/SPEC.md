@@ -1,8 +1,8 @@
 # decisionbench: initial product and engineering specification
 
-**Status:** Proposed for review (2026-11-03)  
-**Scope:** Initial standalone release; no coding implementation authorized by this document alone  
-**Sources:** Agreed design interview; [effortless source benchmark](https://github.com/capyBearista/effortless/blob/main/bench/judge-cases.json); [effortless judge implementation](https://github.com/capyBearista/effortless/blob/main/hooks/register.tsx); [deferred Valbench integration](https://github.com/capyBearista/decisionbench/issues/1)  
+**Status:** Approved (2026-11-03)  
+**Scope:** Initial standalone release  
+**Sources:** Agreed design interview; [effortless source benchmark](https://github.com/capyBearista/effortless/blob/99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c/bench/judge-cases.json); [effortless judge implementation](https://github.com/capyBearista/effortless/blob/main/hooks/register.tsx); [deferred Valbench integration](https://github.com/capyBearista/decisionbench/issues/1)  
 **Domain terminology:** [GLOSSARY.md](../GLOSSARY.md)  
 **Architecture decisions:** [ADR-0001](adr/0001-standalone-engine.md), [ADR-0002](adr/0002-raw-model-relative-evaluation.md)
 
@@ -26,7 +26,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 2. As a user, I can select a subset of candidates to benchmark without editing source code.
 3. As a user, I can configure provider credentials outside result files and receive actionable errors for missing credentials.
 4. As a user, I can load, inspect, and select a versioned benchmark dataset.
-5. As a user, I can retain the original effortless dataset unmodified as a traceable baseline, including its 20 holdout cases.
+5. As a user, I can retain the original effortless dataset as a traceable baseline, including its 20 holdout cases.
 6. As a user, I can evaluate the same prompt against both Sonnet and Opus in independent requests.
 7. As a user, I can supply independently reviewed acceptable effort sets for each target model, not a derived one-step equivalence.
 8. As a user, I can see that an unlabelled target/prompt is **unscored**, not silently graded right or wrong.
@@ -49,6 +49,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 ### 1. Technology and interfaces
 
 - Use the **latest stable Rust compiler** supporting the **2024 language edition**; the compiler release and language edition are different version concepts.
+- **Linux is the only supported platform.** No Windows or macOS builds, CI or support.
 - Begin with **one Cargo package** containing a binary and a reusable library. Do not make a multi-crate workspace without a demonstrated requirement.
 - Use **Ratatui** for the TUI, with an appropriate terminal backend (Crossterm is the initial candidate); use a conventional CLI argument parser.
 - Both interfaces invoke the same evaluation engine. The TUI is not the source of truth for evaluation rules.
@@ -68,12 +69,12 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 3. Dataset and ground truth
 
-- Import the original **75 effortless cases** as a **byte-for-byte unchanged, versioned source fixture**, subject to source attribution and its license; do not silently repair the original fixture.
+- Import the original **75 effortless cases** as a **versioned source fixture**, subject to source attribution and its license. Its content is unchanged from upstream except one documented edit: acceptable-effort lists are listed in ascending order (see below). Record any change to the fixture in its `SOURCE.md`; do not silently repair it.
 - The original has **20 holdout cases**, **67 Sonnet-labelled cases**, and **8 Opus-labelled cases**. Source records may include `current.effort`, `context`, `kind`, `holdout`, and a source ID. These remain provenance, not instructions to a Decisions model.
 - Define a distinct **derived paired dataset revision** representing a prompt/context with independent `sonnet` and `opus` acceptable-effort labels. Only merge identical prompt-and-context source records with compatible split provenance; retain every original ID and target-specific source metadata.
 - Four exact prompt/context pairs in the original dataset already have Sonnet and Opus labels. Do not synthesize the other labels. Unreviewed counterparts are absent/unscored.
 - Preserve dataset revision, source record provenance, kind/category and tuned/holdout split. Do not tune decision prompts or select models using the holdout set and then present that same holdout as untouched.
-- A label is a **set of acceptable efforts**, not a ranked prediction; its first listed value is not an enforced scoring preference.
+- A label is a **set of acceptable efforts**, not a ranked prediction. Every dataset, including the source fixture, must list each set in ascending effort order (`low` < `medium` < `high` < `xhigh`) without repeats; files that do not are invalid. The order carries no scoring preference: any listed effort is a hit.
 
 ### 4. Evaluation requests and independence
 
@@ -120,7 +121,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 Tests should cover:
 
-- Untouched source-baseline preservation, holdout inheritance, paired-target normalization, and missing/unscored labels.
+- Source-baseline preservation (pinned digest; only the ordering edit documented in its `SOURCE.md`), holdout inheritance, paired-target normalization, and missing/unscored labels.
 - Identical test context with target Sonnet versus Opus; absence of current-effort anchoring and preservation of original source metadata.
 - Membership grading, under/over and in-between misses, invalid outputs, unscored observations, and independent target-specific totals.
 - Repeat counts, retry histories, transport timeouts, malformed responses, cancellation, partial-run files, resume/read behavior where supported, and deterministic output using controlled fixtures.

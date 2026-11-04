@@ -35,7 +35,7 @@ A versioned collection of Cases and their ground-truth labels, with explicit pro
 An immutable snapshot of dataset content and label decisions used by a Run. Changes to labels or Cases produce a new revision.
 
 **Label / Acceptable-Effort Set**  
-A human-reviewed set of effort levels considered acceptable for one Case and one Target Model. The set is not a ranking; multiple levels can be equally acceptable.
+A human-reviewed set of effort levels considered acceptable for one Case and one Target Model. The set is not a ranking; multiple levels can be equally acceptable. It is always listed in ascending effort order without repeats.
 
 **Unscored**  
 A Case–Target Model combination with no reviewed label. Predictions may still be recorded, but they cannot contribute to accuracy.

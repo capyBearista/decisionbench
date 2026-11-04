@@ -3,10 +3,10 @@ use std::process::{Command, Output};
 
 use sha2::{Digest, Sha256};
 
-const PINNED_SHA256: &str = "b94a548fc5ec096fb717a65943a42175d0b1de34b01833e8407ca14ce2f95c4f";
+const PINNED_SHA256: &str = "312f92df622edf082a109c81b9e2ca0054826c101ad0b1658a685efe54edc70e";
 
 const EXPECTED_SUMMARY: &str = "\
-dataset: effortless judge-cases (capyBearista/effortless@99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c)
+dataset: effortless judge-cases (capyBearista/effortless@99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c, label order normalized)
 cases: 75
 sonnet labels: 67
 opus labels: 8
@@ -49,7 +49,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Guards against local drift; equality with upstream is checked via the git blob SHA in SOURCE.md.
+/// Guards against accidental edits; the one deliberate change from upstream is listed in SOURCE.md.
 #[test]
 fn bundled_source_matches_pinned_digest() {
     assert_eq!(
@@ -190,4 +190,32 @@ fn rejects_unknown_field() {
 fn rejects_non_boolean_holdout() {
     let bad = VALID.replace(r#""id":"a""#, r#""id":"a","holdout":"yes""#);
     assert_rejected("holdout.json", &case(&bad), "expected a boolean");
+}
+
+#[test]
+fn rejects_out_of_order_efforts() {
+    let bad = VALID.replace(r#""ok":["low"]"#, r#""ok":["medium","low"]"#);
+    assert_rejected(
+        "order.json",
+        &case(&bad),
+        "case a: acceptable efforts must be listed low to xhigh without repeats",
+    );
+}
+
+#[test]
+fn rejects_repeated_efforts() {
+    let bad = VALID.replace(r#""ok":["low"]"#, r#""ok":["low","low"]"#);
+    assert_rejected("repeat.json", &case(&bad), "without repeats");
+}
+
+#[test]
+fn accepts_ordered_efforts() {
+    let good = VALID.replace(r#""ok":["low"]"#, r#""ok":["low","high","xhigh"]"#);
+    let path = temp_file("ordered.json", &case(&good));
+    let out = run(&["dataset", "inspect", path.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

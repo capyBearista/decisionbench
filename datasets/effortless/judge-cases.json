@@ -131,8 +131,8 @@
    },
    "message": "explain how the caching layer in src/cache works",
    "ok": [
-    "medium",
-    "low"
+    "low",
+    "medium"
    ]
   },
   {
@@ -312,8 +312,8 @@
    },
    "message": "clean up my whole drive",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ]
   },
   {
@@ -351,8 +351,8 @@
    },
    "message": "gör om hela sajten mobilanpassad",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ]
   },
   {
@@ -378,8 +378,8 @@
    "context": "user: we need a pricing section on the landing page\nassistant: Three ways to build it:\nA) a static three-column table, 20 minutes\nB) a dynamic section pulling plans from Stripe with a monthly/yearly toggle, currency detection and a comparison drawer\nC) skip it and link to a separate page\nWhich one?",
    "message": "B",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ]
   },
   {
@@ -405,8 +405,8 @@
    "context": "user: the importer is slow\nassistant: Two options: 1) add an index on orders.created_at (one migration), or 2) rewrite the importer as a streaming pipeline with batching, retries and a progress bar. Which do you want?",
    "message": "2",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ]
   },
   {
@@ -459,8 +459,8 @@
    "context": "user: the dashboard is slow\nassistant: I found the cause: every widget refetches all data on each render. Should I rewrite the data layer to a shared cache with subscriptions? It touches about 25 components.",
    "message": "do it",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ]
   },
   {
@@ -575,8 +575,8 @@
    },
    "message": "go through all my Notion tasks and tell me what's overdue",
    "ok": [
-    "medium",
-    "low"
+    "low",
+    "medium"
    ]
   },
   {
@@ -588,8 +588,8 @@
    },
    "message": "research the top 5 competitors in Nordic sports nutrition and compare pricing, with sources",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ]
   },
   {
@@ -826,8 +826,8 @@
    },
    "message": "the second one",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ],
    "context": "user: we need search\nassistant: Options: 1) a simple LIKE query on titles, 2) full-text search with Postgres tsvector, ranking, highlighting and a background reindex job. Which?"
   },
@@ -855,8 +855,8 @@
    },
    "message": "yes all of it",
    "ok": [
-    "high",
-    "medium"
+    "medium",
+    "high"
    ],
    "context": "user: plan the migration\nassistant: Plan: move 12 services to the new queue, add retries, backfill old jobs, update dashboards. Start now?"
   },

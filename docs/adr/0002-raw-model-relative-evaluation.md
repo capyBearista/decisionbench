@@ -13,7 +13,7 @@ The source fixture has 75 human-labelled cases (20 holdout), originally labelled
 - For each Case, request a **separate raw effort recommendation for Sonnet and Opus**, changing the target model while keeping the task, conversation context and evaluation instructions equivalent.
 - **Exclude current/previous reasoning effort from the judging input**. Historical current effort in the source fixture remains provenance only. Whether a transport requires an omitted or explicit-null field is a provider-compatibility verification task, not a license to substitute a non-null effort.
 - Grade **raw normalized effort predictions** against a **separate human-reviewed acceptable-effort set for each Target Model**.
-- Preserve original labels and split membership; missing counterpart labels remain **unscored** until independently reviewed. Do not generate them by subtracting one effort level.
+- Preserve original labels and split membership (acceptable-effort sets keep their members; only their listing order is normalized to ascending effort); missing counterpart labels remain **unscored** until independently reviewed. Do not generate them by subtracting one effort level.
 - Preserve Raw Responses, original confidence/probabilities, parse failures and each physical Attempt. Retries, transport failures and missing labels are distinct from incorrect valid choices.
 - Any **effective decision** from an uncertainty threshold, fallback, keep-current rule, bias or bounds is explicitly downstream **policy behavior**, not part of the initial raw-model-quality grade.
 - Report Sonnet and Opus results separately, with their sample sizes, to avoid hiding the baseline's 67:8 label imbalance behind one accuracy number.

@@ -7,12 +7,11 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
-/// The original effortless fixture, unmodified (see `datasets/effortless/SOURCE.md`).
+/// The original effortless fixture; its one documented change is in `datasets/effortless/SOURCE.md`.
 pub const EFFORTLESS_SOURCE: &[u8] = include_bytes!("../datasets/effortless/judge-cases.json");
 
 /// Human-readable identity of [`EFFORTLESS_SOURCE`].
-pub const EFFORTLESS_SOURCE_NAME: &str =
-    "effortless judge-cases (capyBearista/effortless@99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c)";
+pub const EFFORTLESS_SOURCE_NAME: &str = "effortless judge-cases (capyBearista/effortless@99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c, label order normalized)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -21,6 +20,7 @@ pub enum TargetModel {
     Opus,
 }
 
+/// Variant order is the effort order; `parse_source` relies on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -46,7 +46,7 @@ pub struct SourceCase {
     pub message: String,
     #[serde(default)]
     pub context: Option<String>,
-    /// Acceptable-effort set for `current.model`, as labelled in the source.
+    /// Acceptable-effort set for `current.model`, listed in ascending effort order.
     pub ok: Vec<Effort>,
     #[serde(default)]
     pub holdout: bool,
@@ -83,6 +83,12 @@ pub fn parse_source(bytes: &[u8]) -> Result<SourceDataset, String> {
         }
         if case.ok.is_empty() {
             return Err(format!("case {}: empty acceptable-effort set", case.id));
+        }
+        if !case.ok.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(format!(
+                "case {}: acceptable efforts must be listed low to xhigh without repeats",
+                case.id
+            ));
         }
     }
     Ok(dataset)
