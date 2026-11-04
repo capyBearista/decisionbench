@@ -14,14 +14,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cost::{CostTally, attempt_cost, plural};
-use crate::dataset::EffortRange;
+use crate::dataset::Labels;
 use crate::grade::{Grade, Tally, Target, grade};
 use crate::provider::{Attempt, Candidate, Disposition, normalize};
 use crate::run::Settings;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 /// Bump when grading semantics change, so old evidence stays interpretable.
-pub const GRADING_REVISION: u32 = 1;
+pub const GRADING_REVISION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hashed {
@@ -69,10 +69,11 @@ pub struct TrialRecord {
     pub candidate: String,
     pub instructions: Hashed,
     pub case_id: String,
-    pub target: Target,
+    /// The Target Models the request asked about, in `Target::ALL` order.
+    pub targets: Vec<Target>,
     pub repetition: u32,
-    /// The label as it was when the request was made.
-    pub label: Option<EffortRange>,
+    /// The Case's labels as they were when the request was made.
+    pub labels: Labels,
     pub request: Value,
     pub attempts: Vec<Attempt>,
     pub started_unix_ms: u64,
@@ -90,19 +91,28 @@ impl TrialRecord {
             .is_some_and(|a| a.disposition == Disposition::Answered)
     }
 
-    /// `None` unless the final Attempt was answered.
-    pub fn grade(&self) -> Option<Grade> {
+    /// One grade per asked target; `None` unless the final Attempt was answered.
+    pub fn grades(&self) -> Option<Vec<(Target, Grade)>> {
         let attempt = self
             .last_attempt()
             .filter(|a| a.disposition == Disposition::Answered)?;
-        let effort = normalize(attempt.raw_response.as_deref().unwrap_or_default()).effort;
-        Some(grade(self.label, &effort))
+        let efforts = normalize(attempt.raw_response.as_deref().unwrap_or_default()).efforts;
+        Some(
+            self.targets
+                .iter()
+                .map(|t| (*t, grade(self.labels.get(*t), &efforts[t])))
+                .collect(),
+        )
     }
 
     /// The per-trial progress line `run` prints to stderr.
     pub fn progress(&self, done: usize, total: usize) -> String {
-        let outcome = match (self.grade(), self.last_attempt()) {
-            (Some(g), _) => g.to_string(),
+        let outcome = match (self.grades(), self.last_attempt()) {
+            (Some(grades), _) => grades
+                .iter()
+                .map(|(target, grade)| format!("{target} {grade}"))
+                .collect::<Vec<_>>()
+                .join(" · "),
             (None, Some(a)) => {
                 let status = a
                     .http_status
@@ -112,11 +122,10 @@ impl TrialRecord {
             (None, None) => "no attempts".to_string(),
         };
         format!(
-            "[{done}/{total}] {} {} {} {} #{}: {outcome} ({}, {} ms)",
+            "[{done}/{total}] {} {} {} #{}: {outcome} ({}, {} ms)",
             self.candidate,
             self.instructions.name,
             self.case_id,
-            self.target,
             self.repetition,
             plural(self.attempts.len(), "attempt", "attempts"),
             self.elapsed_ms
@@ -344,16 +353,21 @@ impl fmt::Display for RunFile {
             }
             writeln!(f)?;
             for instructions in &self.manifest.instructions {
+                let group: Vec<&&TrialRecord> = mine
+                    .iter()
+                    .filter(|t| t.instructions.name == instructions.name)
+                    .collect();
+                if group.is_empty() {
+                    continue;
+                }
                 for target in &self.manifest.targets {
-                    let group: Vec<&&TrialRecord> = mine
-                        .iter()
-                        .filter(|t| t.instructions.name == instructions.name && t.target == *target)
-                        .collect();
-                    if group.is_empty() {
-                        continue;
-                    }
                     let mut tally = Tally::default();
-                    for grade in group.iter().filter_map(|t| t.grade()) {
+                    for (_, grade) in group
+                        .iter()
+                        .filter_map(|t| t.grades())
+                        .flatten()
+                        .filter(|(t, _)| t == target)
+                    {
                         tally.add(grade);
                     }
                     let short: String = instructions.sha256.chars().take(12).collect();
@@ -439,9 +453,9 @@ mod tests {
                 sha256: "a".repeat(64),
             },
             case_id: "c001".into(),
-            target: Target::Sonnet,
+            targets: vec![Target::Sonnet],
             repetition: 1,
-            label: None,
+            labels: Labels::default(),
             request: json!({}),
             attempts: Vec::new(),
             started_unix_ms: 1,
@@ -534,6 +548,73 @@ mod tests {
         );
     }
 
+    fn answered(body: &str) -> Attempt {
+        Attempt {
+            started_unix_ms: 0,
+            latency_ms: 0,
+            disposition: Disposition::Answered,
+            http_status: Some(200),
+            raw_response: Some(body.to_string()),
+            error: None,
+        }
+    }
+
+    fn graded_trial(attempts: Vec<Attempt>) -> TrialRecord {
+        let Line::Trial(mut record) = trial(0) else {
+            unreachable!()
+        };
+        record.targets = vec![Target::Haiku, Target::Sonnet, Target::Opus];
+        record.labels =
+            serde_json::from_value(json!({"sonnet": "low", "opus": "medium-high"})).unwrap();
+        record.attempts = attempts;
+        record
+    }
+
+    #[test]
+    fn each_asked_target_is_graded_from_its_own_answer() {
+        let body = r#"{"answers":{"effort_haiku":{"choice":"max"},"effort_sonnet":{"choice":"high"},"effort_opus":{"choice":"high"}}}"#;
+        let record = graded_trial(vec![answered(body)]);
+        assert_eq!(
+            record.grades().unwrap(),
+            [
+                (Target::Haiku, Grade::Unscored),
+                (Target::Sonnet, Grade::Over),
+                (Target::Opus, Grade::Hit),
+            ]
+        );
+        assert!(
+            record
+                .progress(1, 1)
+                .contains("#1: haiku unscored · sonnet over · opus hit (")
+        );
+        // A target without an answer is invalid when labelled, unscored otherwise.
+        let record = graded_trial(vec![answered(
+            r#"{"answers":{"effort_sonnet":{"choice":"low"}}}"#,
+        )]);
+        assert_eq!(
+            record.grades().unwrap(),
+            [
+                (Target::Haiku, Grade::Unscored),
+                (Target::Sonnet, Grade::Hit),
+                (Target::Opus, Grade::Invalid),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_final_attempt_has_no_grades() {
+        let mut failed = answered("busy");
+        failed.disposition = Disposition::ProviderError;
+        failed.http_status = Some(503);
+        let record = graded_trial(vec![failed]);
+        assert_eq!(record.grades(), None);
+        assert!(
+            record
+                .progress(1, 1)
+                .contains("#1: provider_error (HTTP 503): busy (")
+        );
+    }
+
     #[test]
     fn c1_controls_are_escaped_for_stderr_only() {
         let csi = "a\u{9b}31m\u{80}\u{9f}b\u{a0}";
@@ -545,9 +626,10 @@ mod tests {
     }
 
     #[test]
-    fn only_schema_2_is_read() {
+    fn only_schema_3_is_read() {
         for first in [
             r#"{"type":"run","schema_version":1}"#,
+            r#"{"type":"run","schema_version":2}"#,
             r#"{"schema_version":99}"#,
             r#"{"type":"run"}"#,
         ] {

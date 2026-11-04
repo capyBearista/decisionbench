@@ -1,5 +1,6 @@
 //! Provider routes and Candidates: how one Decisions request is built, sent and read (SPEC §4a).
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -99,40 +100,40 @@ pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, String> {
     Ok(config.candidate)
 }
 
-/// The Decisions request body. `current_effort` and `current_model` are omitted, not nulled (ADR-0002).
+/// The Decisions request body: one `effort_<target>` question per selected Target Model, in
+/// `Target::ALL` order. `current_effort` and `current_model` are omitted, not nulled (ADR-0002).
+/// Every selected target must have a section in `instructions`; `run` checks that first.
 pub fn request_body(
     model: &str,
     instructions: &JudgeInstructions,
     case: &Case,
-    target: Target,
+    targets: &[Target],
 ) -> Value {
     let mut state = Map::new();
-    state.insert(
-        "target_model".into(),
-        match target {
-            Target::Sonnet => "Claude Sonnet",
-            Target::Opus => "Claude Opus",
-        }
-        .into(),
-    );
+    state.insert("task".into(), instructions.task.clone().into());
     if let Some(context) = &case.context {
         state.insert("recent_conversation".into(), context.clone().into());
     }
     state.insert("next_message".into(), case.message.clone().into());
-    let criteria: Map<String, Value> = instructions
-        .criteria
-        .iter()
-        .map(|(effort, text)| (effort.name().to_string(), text.clone().into()))
+    let questions: Map<String, Value> = Target::ALL
+        .into_iter()
+        .filter(|t| targets.contains(t))
+        .filter_map(|t| {
+            let question = instructions.question(t)?;
+            let criteria: Map<String, Value> = question
+                .criteria
+                .iter()
+                .map(|(effort, text)| (effort.name().to_string(), text.clone().into()))
+                .collect();
+            let body = json!({
+                "type": "choice",
+                "instructions": question.instructions,
+                "criteria": criteria,
+            });
+            Some((format!("effort_{t}"), body))
+        })
         .collect();
-    json!({
-        "model": model,
-        "state": state,
-        "questions": {"effort": {
-            "type": "choice",
-            "instructions": instructions.instructions,
-            "criteria": criteria,
-        }},
-    })
+    json!({"model": model, "state": state, "questions": questions})
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,24 +247,39 @@ pub fn send(agent: &ureq::Agent, url: &str, key: Option<&str>, body: &Value) -> 
 /// What an answered reply carried. Values stay raw JSON; `effort` is graded later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prediction {
-    /// `answers.effort.choice`, or `null` when absent or the body is not JSON.
-    pub effort: Value,
-    pub confidence: Option<Value>,
-    pub probabilities: Option<Value>,
+    /// `answers.effort_<target>.choice` for every target, or `null` when absent or the body is
+    /// not JSON.
+    pub efforts: BTreeMap<Target, Value>,
+    /// Present `answers.effort_<target>.confidence` values.
+    pub confidences: BTreeMap<Target, Value>,
+    /// Present `answers.effort_<target>.probabilities` values.
+    pub probabilities: BTreeMap<Target, Value>,
     pub usage: Option<Value>,
     pub response_model: Option<Value>,
     pub response_provider: Option<Value>,
 }
 
-/// Reads a reply body. Only the `answers.effort` path is known; Zen's success shape is not yet observed.
+/// Reads a reply body. Only the `answers.effort_<target>` paths are known; Zen's success shape is not yet observed.
 pub fn normalize(raw: &str) -> Prediction {
     let body: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
-    let answer = |field: &str| body.pointer(&format!("/answers/effort/{field}")).cloned();
+    let answer = |target: Target, field: &str| {
+        body.pointer(&format!("/answers/effort_{target}/{field}"))
+            .cloned()
+    };
+    let each = |field: &str| -> BTreeMap<Target, Value> {
+        Target::ALL
+            .into_iter()
+            .filter_map(|t| Some((t, answer(t, field)?)))
+            .collect()
+    };
     let top = |field: &str| body.get(field).cloned();
     Prediction {
-        effort: answer("choice").unwrap_or(Value::Null),
-        confidence: answer("confidence"),
-        probabilities: answer("probabilities"),
+        efforts: Target::ALL
+            .into_iter()
+            .map(|t| (t, answer(t, "choice").unwrap_or(Value::Null)))
+            .collect(),
+        confidences: each("confidence"),
+        probabilities: each("probabilities"),
         usage: top("usage"),
         response_model: top("model"),
         response_provider: top("provider"),
@@ -273,17 +289,29 @@ pub fn normalize(raw: &str) -> Prediction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataset::{Effort, parse_cases};
+    use crate::instructions::parse_instructions;
 
-    const OPENROUTER_200: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"id":"gen-dec-1793762009-oxb0hWCuUBlv6AKzC6ON","provider":"TypeSafe"}"#;
+    const OPENROUTER_200: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort_sonnet":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79},"effort_opus":{"type":"choice","choice":"high"}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"id":"gen-dec-1793762009-oxb0hWCuUBlv6AKzC6ON","provider":"TypeSafe"}"#;
 
     #[test]
     fn normalizes_an_openrouter_reply() {
         let p = normalize(OPENROUTER_200);
-        assert_eq!(p.effort, json!("low"));
-        assert_eq!(p.confidence, Some(json!(0.79)));
+        assert_eq!(p.efforts[&Target::Sonnet], json!("low"));
+        assert_eq!(p.efforts[&Target::Opus], json!("high"));
+        // Targets that were not asked read as null.
+        assert_eq!(p.efforts[&Target::Haiku], Value::Null);
+        assert_eq!(p.efforts[&Target::Fable], Value::Null);
+        assert_eq!(
+            p.confidences,
+            BTreeMap::from([(Target::Sonnet, json!(0.79))])
+        );
         assert_eq!(
             p.probabilities,
-            Some(json!({"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0}))
+            BTreeMap::from([(
+                Target::Sonnet,
+                json!({"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0})
+            )])
         );
         assert_eq!(
             p.usage,
@@ -294,16 +322,84 @@ mod tests {
     }
 
     #[test]
-    fn missing_answers_or_non_json_leave_effort_null() {
+    fn missing_answers_or_non_json_leave_every_effort_null() {
         for raw in [
             r#"{"model":"m","usage":{"input_tokens":1}}"#,
             "not json",
             "",
         ] {
-            assert_eq!(normalize(raw).effort, Value::Null, "{raw:?}");
+            let efforts = normalize(raw).efforts;
+            assert_eq!(efforts.len(), 4, "{raw:?}");
+            assert!(efforts.values().all(Value::is_null), "{raw:?}");
         }
-        assert_eq!(normalize(r#"{"model":"m"}"#).confidence, None);
+        assert!(normalize(r#"{"model":"m"}"#).confidences.is_empty());
         assert_eq!(normalize("not json").usage, None);
+    }
+
+    fn instructions() -> JudgeInstructions {
+        let criteria = |n: &str| {
+            Effort::ALL
+                .iter()
+                .map(|e| format!("- {}: {n} {}\n", e.name(), e.name()))
+                .collect::<String>()
+        };
+        let text: String = Target::ALL
+            .iter()
+            .map(|t| format!("\n## {t}\nAsk {t}?\n\n{}", criteria(&t.to_string())))
+            .collect();
+        parse_instructions("t", &format!("The task.\n{text}")).unwrap()
+    }
+
+    fn case(context: Option<&str>) -> Case {
+        let context = context.map_or(String::new(), |c| format!(r#","context":"{c}""#));
+        parse_cases(
+            format!(r#"[{{"id":"c1","message":"do it"{context},"ok":{{"opus":"low"}}}}]"#)
+                .as_bytes(),
+        )
+        .unwrap()
+        .remove(0)
+    }
+
+    #[test]
+    fn request_has_one_question_per_selected_target_in_scale_order() {
+        // Given out of order; the request still lists them in Target::ALL order.
+        let body = request_body(
+            "m",
+            &instructions(),
+            &case(Some("earlier")),
+            &[Target::Fable, Target::Sonnet],
+        );
+        assert_eq!(body["model"], "m");
+        assert_eq!(
+            body["state"],
+            json!({"task":"The task.","recent_conversation":"earlier","next_message":"do it"})
+        );
+        let questions = body["questions"].as_object().unwrap();
+        let names: Vec<&String> = questions.keys().collect();
+        assert_eq!(names, ["effort_sonnet", "effort_fable"]);
+        assert_eq!(
+            questions["effort_fable"],
+            json!({
+                "type": "choice",
+                "instructions": "Ask fable?",
+                "criteria": {"low":"fable low","medium":"fable medium","high":"fable high","xhigh":"fable xhigh","max":"fable max"},
+            })
+        );
+        assert_eq!(questions["effort_sonnet"]["instructions"], "Ask sonnet?");
+        let raw = body.to_string();
+        assert!(
+            !raw.contains("target_model") && !raw.contains("current_"),
+            "{raw}"
+        );
+    }
+
+    #[test]
+    fn request_omits_recent_conversation_without_context() {
+        let body = request_body("m", &instructions(), &case(None), &[Target::Opus]);
+        assert_eq!(
+            body["state"],
+            json!({"task":"The task.","next_message":"do it"})
+        );
     }
 
     #[test]

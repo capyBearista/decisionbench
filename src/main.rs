@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -41,7 +41,7 @@ enum Command {
         #[arg(long)]
         dataset: Option<PathBuf>,
     },
-    /// Run a batch of Trials (Candidate × instructions × Case × Target × repetition), save the
+    /// Run a batch of Trials (Candidate × instructions × Case × repetition), save the
     /// evidence and print a summary.
     ///
     /// Exits 3 when some Trial ended in a provider or transport failure (evidence is still saved).
@@ -55,7 +55,7 @@ enum Command {
         /// Case id in the dataset; repeatable. Defaults to every Case.
         #[arg(long = "case")]
         cases: Vec<String>,
-        /// Target Model; repeatable. Defaults to both.
+        /// Target Model to ask about; repeatable. Defaults to all four.
         #[arg(long = "target", value_enum)]
         targets: Vec<Target>,
         /// Repetitions of every combination.
@@ -70,7 +70,7 @@ enum Command {
         /// Extra attempts after a transport error or a transient HTTP status.
         #[arg(long, default_value_t = 1)]
         retries: u32,
-        /// Also run Case × Target pairs that have no label.
+        /// Also run Cases that none of the selected Targets labels.
         #[arg(long)]
         include_unscored: bool,
         /// Config file; defaults to $XDG_CONFIG_HOME/decisionbench/config.toml.
@@ -168,16 +168,15 @@ fn grade(path: &Path, dataset: Option<&Path>) -> Result<(), String> {
         .map_err(|e| format!("invalid predictions {}: {e}", path.display()))?;
     let grades = grade_all(&cases, &predictions)
         .map_err(|e| format!("invalid predictions {}: {e}", path.display()))?;
-    let (mut sonnet, mut opus) = (Tally::default(), Tally::default());
+    let mut tallies: BTreeMap<Target, Tally> = BTreeMap::new();
     println!("dataset: {name}");
     for (p, g) in predictions.iter().zip(grades) {
         println!("{} {} {} {g}", p.case, p.target, p.effort);
-        match p.target {
-            Target::Sonnet => sonnet.add(g),
-            Target::Opus => opus.add(g),
-        }
+        tallies.entry(p.target).or_default().add(g);
     }
-    println!("sonnet: {sonnet}\nopus: {opus}");
+    for target in Target::ALL {
+        println!("{target}: {}", tallies.remove(&target).unwrap_or_default());
+    }
     Ok(())
 }
 
@@ -277,11 +276,21 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         cases.retain(|c| args.cases.contains(&c.id));
     }
     reject_duplicates("target", args.targets.iter().map(Target::to_string))?;
-    let targets = if args.targets.is_empty() {
-        vec![Target::Sonnet, Target::Opus]
+    // Canonical order, so the request, the evidence and the summary all list targets alike.
+    let mut targets = if args.targets.is_empty() {
+        Target::ALL.to_vec()
     } else {
         args.targets.clone()
     };
+    targets.sort();
+    for set in &instructions {
+        if let Some(target) = targets.iter().find(|t| set.question(**t).is_none()) {
+            return Err(format!(
+                "instructions `{}` has no section for target {target}",
+                set.name
+            ));
+        }
+    }
 
     let keys: Vec<Option<String>> = candidates
         .iter()
@@ -296,7 +305,7 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
     );
     if plan.trials.is_empty() {
         return Err(
-            "no trials: every selected Case × Target pair is unlabelled; pass --include-unscored to run them anyway"
+            "no trials: no selected Case is labelled for a selected Target; pass --include-unscored to run them anyway"
                 .to_string(),
         );
     }
@@ -340,7 +349,7 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         "planned: {} × {} × {} ({} unlabelled skipped) × {} = {}, up to {}",
         plural(candidates.len(), "candidate", "candidates"),
         plural(instructions.len(), "instruction set", "instruction sets"),
-        plural(plan.pairs, "pair", "pairs"),
+        plural(plan.cases, "case", "cases"),
         plan.skipped,
         plural(
             args.settings.repetitions as usize,
@@ -361,6 +370,7 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         keys: &keys,
         instructions: &instructions,
         cases: &cases,
+        targets: &manifest.targets,
     };
     let cancel = Arc::new(AtomicBool::new(false));
     let started = Arc::new(AtomicUsize::new(0));

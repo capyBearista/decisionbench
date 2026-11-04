@@ -11,8 +11,10 @@ use serde_json::{Value, json};
 
 const EXPECTED_COUNTS: &str = "\
 cases: 71
+haiku labels: 0 (71 unscored)
 sonnet labels: 67 (4 unscored)
 opus labels: 8 (63 unscored)
+fable labels: 0 (71 unscored)
 ";
 
 fn run(args: &[&str]) -> Output {
@@ -111,10 +113,13 @@ fn accepts_single_levels_ranges_and_partial_labels() {
         VALID,
         r#"{"id":"c002","message":"n","context":"user: hi","ok":{"sonnet":"max","opus":"low-max"}}"#,
         r#"{"id":"c003","message":"o","ok":{"opus":"medium-xhigh"}}"#,
+        r#"{"id":"c004","message":"p","ok":{"haiku":"low","fable":"max"}}"#,
     ];
     let stdout = assert_accepted("valid.json", &dataset(&cases.join(",")));
     assert!(
-        stdout.ends_with("cases: 3\nsonnet labels: 2 (1 unscored)\nopus labels: 2 (1 unscored)\n"),
+        stdout.ends_with(
+            "cases: 4\nhaiku labels: 1 (3 unscored)\nsonnet labels: 2 (2 unscored)\nopus labels: 2 (2 unscored)\nfable labels: 1 (3 unscored)\n"
+        ),
         "{stdout}"
     );
 }
@@ -152,8 +157,8 @@ fn rejects_malformed_ranges() {
 
 #[test]
 fn rejects_unknown_target_model() {
-    let bad = VALID.replace(r#""sonnet":"low""#, r#""haiku":"low""#);
-    assert_rejected("target.json", &dataset(&bad), "unknown field `haiku`");
+    let bad = VALID.replace(r#""sonnet":"low""#, r#""gemini":"low""#);
+    assert_rejected("target.json", &dataset(&bad), "unknown field `gemini`");
 }
 
 #[test]
@@ -337,8 +342,10 @@ c002 opus \"max\" hit
 c002 opus null invalid
 c002 opus null invalid
 c002 opus 7 invalid
+haiku: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/0 valid scored
 sonnet: 5 predictions: 2 hit, 1 under, 1 over, 1 invalid, 0 unscored; accuracy 2/4 valid scored
 opus: 6 predictions: 1 hit, 0 under, 0 over, 3 invalid, 2 unscored; accuracy 1/1 valid scored
+fable: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/0 valid scored
 ";
     assert!(stdout.ends_with(expected), "{stdout}");
 }
@@ -355,10 +362,33 @@ fn grades_against_bundled_dataset_by_default() {
         "\
 dataset: bundled cases
 c001 sonnet \"low\" hit
+haiku: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/0 valid scored
 sonnet: 1 predictions: 1 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 1/1 valid scored
 opus: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/0 valid scored
+fable: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/0 valid scored
 "
     );
+}
+
+#[test]
+fn grades_haiku_and_fable_predictions() {
+    let cases = dataset(r#"{"id":"c001","message":"m","ok":{"haiku":"low","fable":"high-max"}}"#);
+    let predictions = r#"[
+        {"case":"c001","target":"haiku","effort":"low"},
+        {"case":"c001","target":"fable","effort":"medium"},
+        {"case":"c001","target":"sonnet","effort":"low"}
+    ]"#;
+    let stdout = stdout_of_success(grade_files("haiku-fable", predictions, Some(&cases)));
+    let expected = "\
+c001 haiku \"low\" hit
+c001 fable \"medium\" under
+c001 sonnet \"low\" unscored
+haiku: 1 predictions: 1 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 1/1 valid scored
+sonnet: 1 predictions: 0 hit, 0 under, 0 over, 0 invalid, 1 unscored; accuracy 0/0 valid scored
+opus: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/0 valid scored
+fable: 1 predictions: 0 hit, 1 under, 0 over, 0 invalid, 0 unscored; accuracy 0/1 valid scored
+";
+    assert!(stdout.ends_with(expected), "{stdout}");
 }
 
 #[test]
@@ -377,8 +407,8 @@ fn rejects_bad_prediction_files() {
             "prediction 1 names unknown case c999",
         ),
         (
-            r#"[{"case":"c001","target":"haiku","effort":"low"}]"#,
-            "unknown variant `haiku`",
+            r#"[{"case":"c001","target":"gemini","effort":"low"}]"#,
+            "unknown variant `gemini`",
         ),
         (
             r#"[{"case":"c001","target":"sonnet","effort":"low","current_effort":"high"}]"#,
@@ -416,11 +446,29 @@ fn grade_rejects_invalid_dataset() {
 // ---- run and show ----
 
 const TEST_KEY: &str = "sk-test-secret-1234";
-const OPENROUTER_REPLY: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"provider":"TypeSafe"}"#;
+/// Every target answers `low`; the first one also carries probabilities and confidence.
+const OPENROUTER_REPLY: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort_haiku":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79},"effort_sonnet":{"type":"choice","choice":"low"},"effort_opus":{"type":"choice","choice":"low"},"effort_fable":{"type":"choice","choice":"low"}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"provider":"TypeSafe"}"#;
 const ZEN_429: &str = r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}"#;
 
+/// A reply where each listed target answers with its own raw JSON `choice`.
+fn reply_for(choices: &[(&str, &str)]) -> String {
+    let answers: Vec<String> = choices
+        .iter()
+        .map(|(target, choice)| {
+            format!(r#""effort_{target}":{{"type":"choice","choice":{choice}}}"#)
+        })
+        .collect();
+    format!(r#"{{"answers":{{{}}}}}"#, answers.join(","))
+}
+
+/// A reply where every target gives the same raw JSON `choice`.
 fn reply(choice: &str) -> String {
-    format!(r#"{{"answers":{{"effort":{{"type":"choice","choice":{choice}}}}}}}"#)
+    reply_for(&[
+        ("haiku", choice),
+        ("sonnet", choice),
+        ("opus", choice),
+        ("fable", choice),
+    ])
 }
 
 /// A request captured by the stub, split into head (request line and headers) and JSON body.
@@ -737,7 +785,12 @@ fn openrouter_request_is_the_documented_decisions_body() {
     );
     let body = &request.body;
     assert_eq!(body["model"], "typesafe/jev-1.13");
-    assert_eq!(body["state"]["target_model"], "Claude Opus");
+    assert!(
+        body["state"]["task"]
+            .as_str()
+            .unwrap()
+            .starts_with("Choose the reasoning effort")
+    );
     assert_eq!(
         body["state"]["next_message"],
         "rename the variable usr to user in auth.ts"
@@ -745,16 +798,18 @@ fn openrouter_request_is_the_documented_decisions_body() {
     assert!(body["state"].get("recent_conversation").is_none());
     let raw = body.to_string();
     assert!(
-        !raw.contains("current_effort") && !raw.contains("current_model"),
+        !raw.contains("current_effort")
+            && !raw.contains("current_model")
+            && !raw.contains("target_model"),
         "{raw}"
     );
-    let effort = &body["questions"]["effort"];
+    let questions: Vec<&String> = body["questions"].as_object().unwrap().keys().collect();
+    assert_eq!(questions, ["effort_opus"]);
+    let effort = &body["questions"]["effort_opus"];
     assert_eq!(effort["type"], "choice");
-    assert!(
-        effort["instructions"]
-            .as_str()
-            .unwrap()
-            .starts_with("Choose the reasoning effort")
+    assert_eq!(
+        effort["instructions"],
+        "Which effort should Claude Opus 5.5 use for the next message?"
     );
     let keys: Vec<&String> = effort["criteria"].as_object().unwrap().keys().collect();
     assert_eq!(keys, ["low", "medium", "high", "xhigh", "max"]);
@@ -793,12 +848,12 @@ fn answered_hit_prints_the_summary_and_saves_jsonl_evidence() {
     let progress = stderr(&out);
     assert!(
         progress.contains(
-            "planned: 1 candidate × 1 instruction set × 1 pair (0 unlabelled skipped) × 1 repetition = 1 trial, up to 2 requests"
+            "planned: 1 candidate × 1 instruction set × 1 case (0 unlabelled skipped) × 1 repetition = 1 trial, up to 2 requests"
         ),
         "{progress}"
     );
     assert!(
-        progress.contains("[1/1] jev-openrouter neutral c002 opus #1: hit (1 attempt, "),
+        progress.contains("[1/1] jev-openrouter neutral c002 #1: opus hit (1 attempt, "),
         "{progress}"
     );
 
@@ -806,7 +861,7 @@ fn answered_hit_prints_the_summary_and_saves_jsonl_evidence() {
     assert_eq!(lines.len(), 3);
     let manifest = &lines[0];
     assert_eq!(manifest["type"], "run");
-    assert_eq!(manifest["schema_version"], 2);
+    assert_eq!(manifest["schema_version"], 3);
     assert_eq!(manifest["dataset"]["name"], "bundled cases");
     assert_eq!(manifest["planned_trials"], 1);
     assert_eq!(manifest["candidates"][0]["name"], "jev-openrouter");
@@ -825,12 +880,13 @@ fn answered_hit_prints_the_summary_and_saves_jsonl_evidence() {
     assert_eq!(trial["seq"], 0);
     assert_eq!(trial["candidate"], "jev-openrouter");
     assert_eq!(trial["case_id"], "c002");
-    assert_eq!(trial["target"], "opus");
+    assert_eq!(trial["targets"], json!(["opus"]));
+    assert!(trial.get("target").is_none() && trial.get("label").is_none());
     assert_eq!(trial["repetition"], 1);
-    assert_eq!(trial["label"], "low");
+    assert_eq!(trial["labels"], json!({"sonnet": "low", "opus": "low"}));
     assert_eq!(trial["instructions"]["name"], "neutral");
     assert!(trial["instructions"].get("text").is_none());
-    assert_eq!(trial["request"]["state"]["target_model"], "Claude Opus");
+    assert!(trial["request"]["questions"]["effort_opus"].is_object());
     assert_eq!(trial["attempts"].as_array().unwrap().len(), 1);
     assert_eq!(trial["attempts"][0]["disposition"], "answered");
     assert_eq!(trial["attempts"][0]["raw_response"], OPENROUTER_REPLY);
@@ -901,7 +957,7 @@ fn zen_with_a_key_sends_it_and_an_empty_key_counts_as_unset() {
 }
 
 #[test]
-fn paired_targets_differ_only_in_target_model() {
+fn one_request_per_case_asks_one_question_per_selected_target() {
     let stub = stub(200, OPENROUTER_REPLY);
     let dataset = temp_file(
         "paired-dataset.json",
@@ -922,15 +978,120 @@ fn paired_targets_differ_only_in_target_model() {
         &[("OPENROUTER_API_KEY", TEST_KEY)],
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let mut bodies = [stub.next().body, stub.next().body];
-    assert_eq!(bodies[0]["state"]["target_model"], "Claude Sonnet");
-    assert_eq!(bodies[1]["state"]["target_model"], "Claude Opus");
+    let body = stub.next().body;
+    assert_eq!(stub.pending(), 0, "one request for all four targets");
     assert_eq!(
-        bodies[0]["state"]["recent_conversation"],
+        body["state"]["recent_conversation"],
         "user: earlier\nassistant: ok"
     );
-    bodies[1]["state"]["target_model"] = json!("Claude Sonnet");
-    assert_eq!(bodies[0], bodies[1]);
+    let questions: Vec<&String> = body["questions"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        questions,
+        [
+            "effort_haiku",
+            "effort_sonnet",
+            "effort_opus",
+            "effort_fable"
+        ]
+    );
+    // Each question carries its own target's instructions and the same criteria keys.
+    for (target, name) in [
+        ("haiku", "Haiku 5.5"),
+        ("sonnet", "Sonnet 5.5"),
+        ("opus", "Opus 5.5"),
+        ("fable", "Fable 5.1"),
+    ] {
+        assert_eq!(
+            body["questions"][format!("effort_{target}")]["instructions"],
+            format!("Which effort should Claude {name} use for the next message?")
+        );
+    }
+    // Targets without a label are still asked and show up as unscored.
+    assert!(
+        stdout(&out)
+            .contains(" haiku: 1 predictions: 0 hit, 0 under, 0 over, 0 invalid, 1 unscored;"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains(" sonnet: 1 predictions: 1 hit,"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains(" opus: 1 predictions: 0 hit, 1 under,"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stderr(&out)
+            .contains("#1: haiku unscored · sonnet hit · opus under · fable unscored (1 attempt, "),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn each_target_is_graded_from_its_own_answer() {
+    let body = reply_for(&[
+        ("sonnet", r#""high""#),
+        ("opus", r#""low""#),
+        ("fable", r#""High""#),
+    ]);
+    let stub = stub(200, &body);
+    let dataset = temp_file(
+        "own-answer-dataset.json",
+        &dataset(
+            r#"{"id":"p1","message":"m","ok":{"haiku":"low","sonnet":"low","opus":"low","fable":"low"}}"#,
+        ),
+    );
+    let eval = openrouter_eval("own-answer", &stub);
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-openrouter",
+            "--repetitions",
+            "1",
+            "--dataset",
+            dataset.to_str().unwrap(),
+        ],
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // haiku has no answer (missing), sonnet is over, opus a hit, fable misspelled.
+    assert!(
+        stderr(&out).contains("#1: haiku invalid · sonnet over · opus hit · fable invalid ("),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn the_request_asks_only_the_selected_targets() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("selected-targets", &stub);
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-openrouter",
+            "--case",
+            "c002",
+            "--repetitions",
+            "1",
+            "--target",
+            "fable",
+            "--target",
+            "haiku",
+            "--include-unscored",
+        ],
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let body = stub.next().body;
+    let questions: Vec<&String> = body["questions"].as_object().unwrap().keys().collect();
+    // Always in haiku, sonnet, opus, fable order, whatever order they were given.
+    assert_eq!(questions, ["effort_haiku", "effort_fable"]);
+    assert_eq!(eval.trials()[0]["targets"], json!(["haiku", "fable"]));
 }
 
 #[test]
@@ -952,7 +1113,11 @@ fn invalid_answers_are_graded_invalid_with_exit_0() {
             "{}",
             stdout(&out)
         );
-        assert!(stderr(&out).contains(" #1: invalid ("), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains(" #1: opus invalid ("),
+            "{}",
+            stderr(&out)
+        );
         assert_eq!(eval.trials()[0]["attempts"][0]["raw_response"], body);
     }
 }
@@ -969,7 +1134,7 @@ fn provider_failure_exits_3_and_keeps_the_raw_body() {
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     assert!(
         stderr(&out).contains(
-            "[1/1] jev-zen neutral c002 opus #1: provider_error (HTTP 429): Free usage limit reached. (1 attempt, "
+            "[1/1] jev-zen neutral c002 #1: provider_error (HTTP 429): Free usage limit reached. (1 attempt, "
         ),
         "{}",
         stderr(&out)
@@ -1086,8 +1251,8 @@ fn input_errors_exit_1_before_any_request() {
     let prompts = fresh_dir("inputs-prompts");
     std::fs::create_dir_all(prompts.join("x")).unwrap();
     std::fs::create_dir_all(prompts.join("y")).unwrap();
-    std::fs::write(prompts.join("x/same.md"), CUSTOM).unwrap();
-    std::fs::write(prompts.join("y/same.md"), CUSTOM.replace("low desc", "o")).unwrap();
+    std::fs::write(prompts.join("x/same.md"), custom()).unwrap();
+    std::fs::write(prompts.join("y/same.md"), custom().replace("low desc", "o")).unwrap();
     let (x, y) = (prompts.join("x/same.md"), prompts.join("y/same.md"));
     let case_opus = ["--case", "c002", "--target", "opus"];
     let c = |name: &'static str| vec!["--candidate", name];
@@ -1188,7 +1353,7 @@ fn input_errors_exit_1_before_any_request() {
 #[test]
 fn usage_errors_exit_2() {
     for args in [
-        vec!["run", "--candidate", "c", "--target", "haiku"],
+        vec!["run", "--candidate", "c", "--target", "gemini"],
         vec!["run"],
         vec!["run", "--candidate", "c", "--repetitions", "0"],
         vec!["run", "--candidate", "c", "--concurrency", "0"],
@@ -1197,6 +1362,23 @@ fn usage_errors_exit_2() {
         vec!["evaluate", "--candidate", "c"],
     ] {
         assert_eq!(run(&args).status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn every_target_name_is_accepted_by_run() {
+    // A run that fails on the missing config proves the argument parsed (exit 1, not 2).
+    for target in ["haiku", "sonnet", "opus", "fable"] {
+        let out = run(&[
+            "run",
+            "--config",
+            "/nonexistent/config.toml",
+            "--candidate",
+            "c",
+            "--target",
+            target,
+        ]);
+        assert_eq!(out.status.code(), Some(1), "{target}: {}", stderr(&out));
     }
 }
 
@@ -1303,7 +1485,19 @@ fn hex_sha256(text: &str) -> String {
         .collect()
 }
 
-const CUSTOM: &str = "Pick the effort for this exact test.\n\n## low\nlow desc\n## medium\nmedium desc\n## high\nhigh desc\n## xhigh\nxhigh desc\n## max\nmax desc\n";
+fn custom_text(targets: &[&str]) -> String {
+    let mut text = "Pick the effort for this exact test.\n".to_string();
+    for target in targets {
+        text.push_str(&format!(
+            "\n## {target}\nQuestion for {target}?\n\n- low: low desc\n- medium: medium desc\n- high: high desc\n- xhigh: xhigh desc\n- max: max desc\n"
+        ));
+    }
+    text
+}
+
+fn custom() -> String {
+    custom_text(&["haiku", "sonnet", "opus", "fable"])
+}
 
 #[test]
 fn custom_instructions_are_sent_and_recorded_by_name_and_hash() {
@@ -1312,25 +1506,27 @@ fn custom_instructions_are_sent_and_recorded_by_name_and_hash() {
     let dir = fresh_dir("custom-prompts");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("custom.md");
-    std::fs::write(&path, CUSTOM).unwrap();
+    std::fs::write(&path, custom()).unwrap();
     let args = args_with(&C002_OPUS, &["--instructions", path.to_str().unwrap()]);
     let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 
-    let effort = &stub.next().body["questions"]["effort"];
+    let body = stub.next().body;
     assert_eq!(
-        effort["instructions"],
+        body["state"]["task"],
         "Pick the effort for this exact test."
     );
+    let effort = &body["questions"]["effort_opus"];
+    assert_eq!(effort["instructions"], "Question for opus?");
     assert_eq!(
         effort["criteria"],
         json!({"low":"low desc","medium":"medium desc","high":"high desc","xhigh":"xhigh desc","max":"max desc"})
     );
-    let hash = hex_sha256(CUSTOM);
+    let hash = hex_sha256(&custom());
     let manifest = eval.manifest();
     assert_eq!(manifest["instructions"][0]["name"], "custom");
     assert_eq!(manifest["instructions"][0]["sha256"], hash);
-    assert_eq!(manifest["instructions"][0]["text"], CUSTOM);
+    assert_eq!(manifest["instructions"][0]["text"], custom());
     let trial = &eval.trials()[0];
     assert_eq!(
         trial["instructions"],
@@ -1359,17 +1555,54 @@ fn default_instructions_are_recorded_as_neutral() {
 fn malformed_instructions_exit_1_naming_the_file() {
     let stub = stub(200, OPENROUTER_REPLY);
     let eval = openrouter_eval("bad-instructions", &stub);
-    let path = temp_file("bad-instructions.md", "Intro.\n\n## low\nonly low\n");
+    let path = temp_file(
+        "bad-instructions.md",
+        "Intro.\n\n## opus\nQ?\n\n- low: only low\n",
+    );
     let args = args_with(&C002_OPUS, &["--instructions", path.to_str().unwrap()]);
     let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
     assert!(
-        err.contains("bad-instructions.md") && err.contains("missing `## medium`"),
+        err.contains("bad-instructions.md") && err.contains("missing `- medium:`"),
         "{err}"
     );
     assert!(files_in(&eval.out_dir).is_empty());
     assert!(stub.requests.try_recv().is_err());
+}
+
+#[test]
+fn instructions_missing_a_selected_target_exit_1_before_any_request() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("missing-target", &stub);
+    let path = temp_file("only-opus.md", &custom_text(&["opus"]));
+    let out = eval.run(
+        &args_with(
+            &C002_OPUS,
+            &[
+                "--instructions",
+                path.to_str().unwrap(),
+                "--target",
+                "sonnet",
+            ],
+        ),
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("instructions `only-opus`") && err.contains("no section for target sonnet"),
+        "{err}"
+    );
+    assert!(files_in(&eval.out_dir).is_empty());
+    assert!(stub.requests.try_recv().is_err(), "no request was sent");
+
+    // Without the missing target selected, the same file runs.
+    let out = eval.run(
+        &args_with(&C002_OPUS, &["--instructions", path.to_str().unwrap()]),
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
 
 #[test]
@@ -1546,7 +1779,7 @@ fn non_json_error_body_is_shown_cut_to_200_characters() {
 #[test]
 fn same_named_instruction_files_are_told_apart_by_hash() {
     let mut recorded = Vec::new();
-    for (n, text) in [CUSTOM.to_string(), CUSTOM.replace("low desc", "other desc")]
+    for (n, text) in [custom(), custom().replace("low desc", "other desc")]
         .into_iter()
         .enumerate()
     {
@@ -1568,7 +1801,7 @@ fn same_named_instruction_files_are_told_apart_by_hash() {
 
 // ---- selection, repetitions and unlabelled pairs ----
 
-/// `k1` and `k2` are labelled for both targets; `u1` only for sonnet.
+/// `k1` and `k2` are labelled for sonnet and opus; `u1` only for sonnet.
 fn selection_dataset(name: &str) -> PathBuf {
     temp_file(
         name,
@@ -1592,8 +1825,8 @@ fn a_full_matrix_runs_every_trial_once_repetition_first() {
     let dir = fresh_dir("matrix-prompts");
     std::fs::create_dir_all(&dir).unwrap();
     let (one, two) = (dir.join("one.md"), dir.join("two.md"));
-    std::fs::write(&one, CUSTOM).unwrap();
-    std::fs::write(&two, CUSTOM.replace("low desc", "other desc")).unwrap();
+    std::fs::write(&one, custom()).unwrap();
+    std::fs::write(&two, custom().replace("low desc", "other desc")).unwrap();
     let dataset = selection_dataset("matrix-dataset.json");
     let out = eval.run(
         &[
@@ -1621,30 +1854,30 @@ fn a_full_matrix_runs_every_trial_once_repetition_first() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
         stderr(&out).contains(
-            "planned: 2 candidates × 2 instruction sets × 4 pairs (0 unlabelled skipped) × 3 repetitions = 48 trials, up to 96 requests"
+            "planned: 2 candidates × 2 instruction sets × 2 cases (0 unlabelled skipped) × 3 repetitions = 24 trials, up to 48 requests"
         ),
         "{}",
         stderr(&out)
     );
-    assert_eq!(stub.pending(), 48);
-    assert_eq!(eval.manifest()["planned_trials"], 48);
-    assert!(stdout(&out).contains("trials: 48 recorded of 48 planned"));
+    assert_eq!(stub.pending(), 24);
+    assert_eq!(eval.manifest()["planned_trials"], 24);
+    assert!(stdout(&out).contains("trials: 24 recorded of 24 planned"));
 
     let mut trials = eval.trials();
-    assert_eq!(trials.len(), 48);
+    assert_eq!(trials.len(), 24);
     trials.sort_by_key(|t| t["seq"].as_u64().unwrap());
     let key = |t: &Value| {
         format!(
-            "{} {} {} {} {}",
-            t["candidate"], t["instructions"]["name"], t["case_id"], t["target"], t["repetition"]
+            "{} {} {} {}",
+            t["candidate"], t["instructions"]["name"], t["case_id"], t["repetition"]
         )
     };
     let distinct: std::collections::HashSet<String> = trials.iter().map(key).collect();
-    assert_eq!(distinct.len(), 48);
+    assert_eq!(distinct.len(), 24);
     for (i, t) in trials.iter().enumerate() {
         assert_eq!(t["seq"], i);
         // Repetition 1 of every combination, then repetition 2, then 3.
-        assert_eq!(t["repetition"], i / 16 + 1, "{}", key(t));
+        assert_eq!(t["repetition"], i / 8 + 1, "{}", key(t));
     }
     // Each wire model reached only its own candidate's trials.
     for t in &trials {
@@ -1675,7 +1908,7 @@ fn repetitions_default_to_three() {
 }
 
 #[test]
-fn unlabelled_pairs_are_skipped_by_default_and_counted() {
+fn cases_with_no_selected_target_labelled_are_skipped_by_default_and_counted() {
     let stub = stub(200, OPENROUTER_REPLY);
     let dataset = selection_dataset("skip-dataset.json");
     let eval = openrouter_eval("skip", &stub);
@@ -1687,6 +1920,8 @@ fn unlabelled_pairs_are_skipped_by_default_and_counted() {
             "k1",
             "--case",
             "u1",
+            "--target",
+            "opus",
             "--repetitions",
             "1",
             "--dataset",
@@ -1697,19 +1932,50 @@ fn unlabelled_pairs_are_skipped_by_default_and_counted() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
         stderr(&out).contains(
-            "planned: 1 candidate × 1 instruction set × 3 pairs (1 unlabelled skipped) × 1 repetition = 3 trials, up to 6 requests"
+            "planned: 1 candidate × 1 instruction set × 1 case (1 unlabelled skipped) × 1 repetition = 1 trial, up to 2 requests"
         ),
         "{}",
         stderr(&out)
     );
     let trials = eval.trials();
-    assert_eq!(trials.len(), 3);
-    assert!(trials.iter().all(|t| !t["label"].is_null()));
-    assert_eq!(stub.pending(), 3);
+    assert_eq!(trials.len(), 1);
+    assert_eq!(trials[0]["case_id"], "k1");
+    assert_eq!(stub.pending(), 1);
+    assert_eq!(eval.manifest()["cases"], json!(["k1", "u1"]));
 }
 
 #[test]
-fn include_unscored_adds_the_unlabelled_pairs() {
+fn a_case_is_kept_when_any_selected_target_is_labelled() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let dataset = selection_dataset("any-labelled-dataset.json");
+    let eval = openrouter_eval("any-labelled", &stub);
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-openrouter",
+            "--case",
+            "k1",
+            "--case",
+            "u1",
+            "--repetitions",
+            "1",
+            "--dataset",
+            dataset.to_str().unwrap(),
+        ],
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("2 cases (0 unlabelled skipped) × 1 repetition = 2 trials"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(eval.trials().len(), 2);
+    assert_eq!(stub.pending(), 2);
+}
+
+#[test]
+fn include_unscored_adds_the_cases_no_selected_target_labels() {
     let stub = stub(200, OPENROUTER_REPLY);
     let dataset = selection_dataset("unscored-dataset.json");
     let eval = openrouter_eval("unscored", &stub);
@@ -1721,6 +1987,8 @@ fn include_unscored_adds_the_unlabelled_pairs() {
             "k1",
             "--case",
             "u1",
+            "--target",
+            "opus",
             "--repetitions",
             "1",
             "--include-unscored",
@@ -1731,16 +1999,19 @@ fn include_unscored_adds_the_unlabelled_pairs() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
-        stderr(&out).contains("4 pairs (0 unlabelled skipped) × 1 repetition = 4 trials"),
+        stderr(&out).contains("2 cases (0 unlabelled skipped) × 1 repetition = 2 trials"),
         "{}",
         stderr(&out)
     );
     let trials = eval.trials();
-    assert_eq!(trials.len(), 4);
-    let unlabelled: Vec<&Value> = trials.iter().filter(|t| t["label"].is_null()).collect();
+    assert_eq!(trials.len(), 2);
+    let unlabelled: Vec<&Value> = trials
+        .iter()
+        .filter(|t| t["labels"].get("opus").is_none())
+        .collect();
     assert_eq!(unlabelled.len(), 1);
     assert_eq!(unlabelled[0]["case_id"], "u1");
-    assert_eq!(unlabelled[0]["target"], "opus");
+    assert_eq!(unlabelled[0]["labels"], json!({"sonnet": "low"}));
     assert_eq!(eval.manifest()["settings"]["include_unscored"], true);
     assert!(
         stdout(&out)
@@ -1751,7 +2022,7 @@ fn include_unscored_adds_the_unlabelled_pairs() {
 }
 
 #[test]
-fn selecting_only_unlabelled_pairs_is_an_error_mentioning_include_unscored() {
+fn selecting_only_unlabelled_cases_is_an_error_mentioning_include_unscored() {
     let stub = stub(200, OPENROUTER_REPLY);
     let dataset = selection_dataset("only-unlabelled-dataset.json");
     let eval = openrouter_eval("only-unlabelled", &stub);
@@ -2047,7 +2318,7 @@ fn a_transient_status_is_retried_and_final_attempts_decide_the_counts() {
     assert_eq!(trials[0]["attempts"][1]["disposition"], "answered");
     assert_eq!(trials[1]["attempts"].as_array().unwrap().len(), 1);
     assert!(
-        stderr(&out).contains("#1: hit (2 attempts, "),
+        stderr(&out).contains("#1: opus hit (2 attempts, "),
         "{}",
         stderr(&out)
     );
