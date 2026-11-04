@@ -178,4 +178,17 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
     for line in text.lines().filter(|l| !l.is_empty()) {
         assert!(screen.contains(line), "missing {line:?}");
     }
+
+    // One marked case on the Dataset screen: the run plans exactly that case.
+    let (mut app, out) = new_app("tui-workflow-marked");
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('j')); // c002, labelled for opus
+    press(&mut app, KeyCode::Char(' '));
+    assert!(screen_text(&app).contains("[x]"));
+    press(&mut app, KeyCode::Char('3'));
+    assert!(screen_text(&app).contains("cases: 1 selected (c002)"));
+    start(&mut app);
+    until(&mut app, "the marked run to end", |a| !a.run.active());
+    assert_eq!(app.run.planned, 1);
+    assert!(show(&only_file(&out)).contains("state: complete"));
 }

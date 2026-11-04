@@ -115,7 +115,7 @@ impl State {
     }
 }
 
-fn args(app: &App) -> Result<RunArgs, String> {
+pub(super) fn args(app: &App) -> Result<RunArgs, String> {
     let state = &app.setup;
     if app.candidates.dirty {
         return Err("unsaved candidate edits: press s on the Candidates screen first".into());
@@ -141,7 +141,7 @@ fn args(app: &App) -> Result<RunArgs, String> {
         } else {
             vec![PathBuf::from(&state.instructions)]
         },
-        cases: Vec::new(),
+        cases: app.dataset.marked.iter().cloned().collect(),
         targets: state.targets.iter().copied().collect(),
         settings: Settings {
             repetitions: state.repetitions,
@@ -287,7 +287,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     let height = area.height.saturating_sub(2) as usize;
     frame.render_widget(
-        Paragraph::new(list_lines(lines, cursor, height)).block(block("run setup")),
+        Paragraph::new(list_lines(lines, cursor, height)).block(block(&format!(
+            "run setup · cases: {} (chosen on Dataset)",
+            app.dataset.choice()
+        ))),
         area,
     );
 }

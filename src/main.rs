@@ -205,10 +205,10 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         })
         .map_err(|e| format!("cannot install the Ctrl-C handler: {e}"))?;
     }
-    let outcome = prepared.run(&control, |trial, done, echo| {
+    let outcome = prepared.run(&control, |trial, done, unsaved| {
         eprintln!("{}", trial.progress(done, planned));
-        if echo {
-            eprint!("{}", evidence::encode(&Line::Trial(trial.clone())));
+        if unsaved {
+            eprint!("{}", evidence::printable(&Line::Trial(trial.clone())));
         }
     });
 

@@ -319,6 +319,9 @@ pub fn run(config: Option<PathBuf>, out: Option<PathBuf>) -> Result<(), String> 
     let mut terminal = ratatui::try_init().map_err(|e| format!("cannot open the terminal: {e}"))?;
     let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
+    if let Some(report) = app.run.unsaved_report() {
+        eprint!("{report}");
+    }
     result.map_err(|e| format!("terminal error: {e}"))
 }
 

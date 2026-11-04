@@ -194,8 +194,13 @@ pub fn encode(line: &Line) -> String {
     text
 }
 
-/// Appends one line with a single `write_all`. If that fails the reply is already paid for, so
-/// the line goes to stderr rather than being lost.
+/// The line as it is safe to show on a terminal: C1 controls escaped, still valid JSON.
+pub fn printable(line: &Line) -> String {
+    escape_c1(&encode(line))
+}
+
+/// Appends one line with a single `write_all`. If that fails the reply is already paid for; the
+/// caller must keep the line (see `printable`).
 pub fn append(file: &mut File, path: &Path, line: &Line) -> Result<(), String> {
     write_text(file, path, encode(line))
 }
@@ -207,10 +212,8 @@ pub fn append_on_new_line(file: &mut File, path: &Path, line: &Line) -> Result<(
 }
 
 fn write_text(file: &mut File, path: &Path, text: String) -> Result<(), String> {
-    file.write_all(text.as_bytes()).map_err(|e| {
-        eprint!("{}", escape_c1(&text));
-        format!("cannot write {}: {e}", path.display())
-    })
+    file.write_all(text.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// serde_json escapes C0 controls but not C1 (U+0080-U+009F, e.g. CSI), which a terminal acts on.

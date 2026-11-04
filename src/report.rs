@@ -525,6 +525,20 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
                 ));
             }
         }
+        let missing_instructions = |from: &Manifest, other: &Manifest| {
+            from.instructions
+                .iter()
+                .filter(|i| !other.instructions.iter().any(|j| j.name == i.name))
+                .map(|i| {
+                    format!(
+                        "{}: instructions `{}` is not in {}",
+                        from.id, i.name, other.id
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        found.extend(missing_instructions(m, first));
+        found.extend(missing_instructions(first, m));
         let missing = |from: &Manifest, other: &Manifest| {
             from.candidates
                 .iter()
@@ -574,6 +588,35 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
     found
 }
 
+/// Settings that change reliability and latency but not what the answers are worth, so they never
+/// make Runs incomparable.
+fn setting_differences(runs: &[RunFile]) -> Vec<String> {
+    let first = &runs[0].manifest;
+    runs[1..]
+        .iter()
+        .flat_map(|run| {
+            let (m, a, b) = (&run.manifest, &run.manifest.settings, &first.settings);
+            [
+                (
+                    "timeout",
+                    format!("{}s", a.timeout_secs),
+                    format!("{}s", b.timeout_secs),
+                ),
+                (
+                    "concurrency",
+                    a.concurrency.to_string(),
+                    b.concurrency.to_string(),
+                ),
+                ("retries", a.retries.to_string(), b.retries.to_string()),
+            ]
+            .into_iter()
+            .filter(|(_, ours, theirs)| ours != theirs)
+            .map(|(what, ours, theirs)| format!("{}: {what} {ours} vs {theirs}", m.id))
+            .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 impl fmt::Display for Comparison<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let runs = self.0;
@@ -586,6 +629,16 @@ impl fmt::Display for Comparison<'_> {
         } else {
             writeln!(f, "Not directly comparable:")?;
             for line in found {
+                writeln!(f, "  - {line}")?;
+            }
+        }
+        let settings = setting_differences(runs);
+        if !settings.is_empty() {
+            writeln!(
+                f,
+                "\nsettings differ (affect reliability and latency, not accuracy):"
+            )?;
+            for line in settings {
                 writeln!(f, "  - {line}")?;
             }
         }

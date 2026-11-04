@@ -3352,3 +3352,46 @@ fn compare_flags_candidates_missing_from_either_run() {
     assert_has_line(&compare_pair(&x, &y), "- V2: candidate `c2` is not in X1");
     assert_has_line(&compare_pair(&y, &x), "- V2: candidate `c2` is not in X1");
 }
+
+#[test]
+fn compare_flags_instructions_missing_from_either_run() {
+    let x = compare_base("cmp-ins-x.jsonl");
+    let y = variant_of(&x, "cmp-ins-y.jsonl", |l| {
+        l[0]["instructions"][0]["name"] = json!("effortless");
+        for t in &mut l[1..3] {
+            t["instructions"]["name"] = json!("effortless");
+        }
+    });
+    let out = compare_pair(&x, &y);
+    assert_has_line(&out, "- V2: instructions `effortless` is not in X1");
+    assert_has_line(&out, "- X1: instructions `neutral` is not in V2");
+    assert!(!out.contains("no differences found"), "{out}");
+}
+
+#[test]
+fn compare_reports_reliability_settings_apart_from_comparability() {
+    let x = compare_base("cmp-set-x.jsonl");
+    let y = variant_of(&x, "cmp-set-y.jsonl", |l| {
+        l[0]["settings"]["retries"] = json!(2);
+        l[0]["settings"]["timeout_secs"] = json!(5);
+        l[0]["settings"]["concurrency"] = json!(4);
+    });
+    let out = compare_pair(&x, &y);
+    assert_has_line(
+        &out,
+        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, instructions, candidates and routes",
+    );
+    assert_has_line(
+        &out,
+        "settings differ (affect reliability and latency, not accuracy):",
+    );
+    for line in [
+        "- V2: timeout 5s vs 60s",
+        "- V2: concurrency 4 vs 1",
+        "- V2: retries 2 vs 1",
+    ] {
+        assert_has_line(&out, line);
+    }
+    assert!(!out.contains("Not directly comparable"), "{out}");
+    assert!(!compare_pair(&x, &x).contains("settings differ"));
+}

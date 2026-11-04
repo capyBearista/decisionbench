@@ -1,7 +1,9 @@
 //! Dataset inspection: the bundled Cases with their label per Target Model. Read-only.
 
+use std::collections::BTreeSet;
+
 use ratatui::Frame;
-use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
@@ -11,12 +13,15 @@ use crate::batch::load_dataset;
 use crate::dataset::{Case, Summary, summarize};
 use crate::grade::Target;
 
-pub const HINTS: &str = "j/k move · g/G first/last · Tab next screen · q quit";
+pub const HINTS: &str =
+    "j/k move · g/G first/last · Space mark case · x clear marks · Tab next screen · q quit";
 
 pub struct State {
     cases: Vec<Case>,
     summary: Summary,
     selected: usize,
+    /// Case ids to run; empty means every eligible Case.
+    pub marked: BTreeSet<String>,
 }
 
 impl State {
@@ -26,14 +31,36 @@ impl State {
             summary: summarize(&cases),
             cases,
             selected: 0,
+            marked: BTreeSet::new(),
         })
+    }
+
+    /// The Run setup's summary of the case choice.
+    pub fn choice(&self) -> String {
+        if self.marked.is_empty() {
+            return "all eligible".into();
+        }
+        let ids: Vec<&str> = self.marked.iter().take(3).map(String::as_str).collect();
+        let more = if self.marked.len() > 3 { ", …" } else { "" };
+        format!("{} selected ({}{more})", self.marked.len(), ids.join(", "))
     }
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
-    if let Some(nav) = nav(key) {
-        let state = &mut app.dataset;
-        state.selected = step(state.selected, state.cases.len(), nav);
+    let state = &mut app.dataset;
+    match key.code {
+        KeyCode::Char(' ') => {
+            let id = state.cases[state.selected].id.clone();
+            if !state.marked.remove(&id) {
+                state.marked.insert(id);
+            }
+        }
+        KeyCode::Char('x') => state.marked.clear(),
+        _ => {
+            if let Some(nav) = nav(key) {
+                state.selected = step(state.selected, state.cases.len(), nav);
+            }
+        }
     }
 }
 
@@ -69,9 +96,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 })
                 .collect();
             Line::from(format!(
-                "{marks} {:<6} {}",
+                "{} {marks} {:<6} {}",
+                if state.marked.contains(&case.id) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                },
                 case.id,
-                cut(&case.message, list.width.saturating_sub(16) as usize)
+                cut(&case.message, list.width.saturating_sub(20) as usize)
             ))
         })
         .collect();

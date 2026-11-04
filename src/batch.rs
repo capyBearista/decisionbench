@@ -322,9 +322,9 @@ impl Prepared {
     }
 
     /// Runs the Trials; the calling thread is the only writer of the evidence file. Workers send
-    /// finished Trials over a channel and each becomes one line. `on_trial` sees every Trial before it
-    /// is written, its 1-based position and whether an earlier write failed (the caller must then
-    /// print the Trial's line itself, since the file no longer takes it).
+    /// finished Trials over a channel and each becomes one line. `on_trial` sees every Trial after it
+    /// has been offered to the file, with its 1-based position and whether it is unsaved: this write or an
+    /// earlier one failed, so the caller must keep the Trial itself (see `evidence::printable`).
     pub fn run(
         self,
         control: &Control,
@@ -358,7 +358,6 @@ impl Prepared {
             let (cancel, started) = (&control.cancel, &control.started);
             scope.spawn(move || run::execute(job, specs, settings, cancel, started, tx));
             for trial in rx {
-                on_trial(&trial, trials.len() + 1, write_error.is_some());
                 let line = Line::Trial(trial.clone());
                 // The file is no longer trustworthy once a write failed, but the reply is paid for.
                 if write_error.is_none()
@@ -367,6 +366,7 @@ impl Prepared {
                     write_error = Some(e);
                     cancel.store(true, Ordering::Relaxed);
                 }
+                on_trial(&trial, trials.len() + 1, write_error.is_some());
                 trials.push(trial);
                 control.recorded.store(trials.len(), Ordering::Relaxed);
             }

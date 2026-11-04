@@ -237,3 +237,52 @@ fn saving_writes_a_temp_file_then_renames_it_over_the_config() {
     assert!(app.candidates.dirty);
     assert_eq!(std::fs::read_to_string(&config).unwrap(), first);
 }
+
+#[test]
+fn saving_keeps_the_configs_permissions_and_creates_new_ones_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let (mut app, dir) = app();
+    let config = dir.join("config.toml");
+    add_candidate(&mut app, "alpha", "m", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(mode(&config), 0o600);
+    for existing in [0o600, 0o640] {
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(existing)).unwrap();
+        add_candidate(&mut app, &format!("n{existing}"), "m", ["", "", ""]);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(mode(&config), existing);
+    }
+}
+
+#[test]
+fn space_marks_cases_on_the_dataset_screen_and_x_clears_them() {
+    let (mut app, _) = app();
+    assert_eq!(app.dataset.choice(), "all eligible");
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(app.dataset.marked.len(), 2);
+    assert!(app.dataset.choice().starts_with("2 selected ("));
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(app.dataset.marked.len(), 1);
+    press(&mut app, KeyCode::Char('x'));
+    assert!(app.dataset.marked.is_empty());
+    assert_eq!(app.dataset.choice(), "all eligible");
+}
+
+#[test]
+fn run_setup_passes_the_marked_cases_as_the_case_selection() {
+    let (mut app, _) = app();
+    add_candidate(&mut app, "alpha", "m", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    app.setup.chosen.insert("alpha".into());
+    assert!(setup::args(&app).unwrap().cases.is_empty());
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char(' '));
+    let marked: Vec<String> = app.dataset.marked.iter().cloned().collect();
+    assert_eq!(marked.len(), 1);
+    assert_eq!(setup::args(&app).unwrap().cases, marked);
+}

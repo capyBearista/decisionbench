@@ -14,7 +14,7 @@ use ratatui::widgets::{Gauge, Paragraph};
 use super::{App, Nav, Screen, block, nav, theme};
 use crate::batch::{Control, Prepared};
 use crate::cost::plural;
-use crate::evidence::RunState;
+use crate::evidence::{self, RunState};
 
 pub const HINTS: &str =
     "c cancel (again: stop waiting) · Enter results for this run · j/k scroll · q quit";
@@ -36,6 +36,8 @@ enum Msg {
         line: String,
         answered: bool,
         retries: usize,
+        /// The Trial's evidence line when the file did not take it.
+        unsaved: Option<String>,
     },
     Done {
         state: RunState,
@@ -54,6 +56,8 @@ pub struct State {
     /// Attempts beyond the first, over all Trials.
     pub retries: usize,
     pub lines: Vec<String>,
+    /// Evidence lines of Trials the file did not take: the failed write and every Trial after it.
+    unsaved: Vec<String>,
     pub path: Option<PathBuf>,
     /// Lines scrolled up from the newest.
     scrolled: usize,
@@ -70,6 +74,7 @@ impl Default for State {
             errors: 0,
             retries: 0,
             lines: Vec::new(),
+            unsaved: Vec::new(),
             path: None,
             scrolled: 0,
         }
@@ -95,8 +100,10 @@ impl State {
         };
         let planned = self.planned;
         std::thread::spawn(move || {
-            let outcome = prepared.run(&control, |trial, done, _| {
+            let outcome = prepared.run(&control, |trial, done, unsaved| {
                 let _ = tx.send(Msg::Trial {
+                    unsaved: unsaved
+                        .then(|| evidence::printable(&evidence::Line::Trial(trial.clone()))),
                     line: trial.progress(done, planned),
                     answered: trial.answered(),
                     retries: trial.attempts.len().saturating_sub(1),
@@ -138,7 +145,9 @@ impl State {
                     line,
                     answered,
                     retries,
+                    unsaved,
                 }) => {
+                    self.unsaved.extend(unsaved);
                     self.done += 1;
                     self.errors += usize::from(!answered);
                     self.retries += retries;
@@ -163,6 +172,17 @@ impl State {
             }
         }
         finished
+    }
+
+    /// What to print to stderr once the terminal is restored, so no paid Trial is lost.
+    pub fn unsaved_report(&self) -> Option<String> {
+        let path = self.path.as_ref().filter(|_| !self.unsaved.is_empty())?;
+        Some(format!(
+            "warning: {} not saved to {}; their records follow:\n{}",
+            plural(self.unsaved.len(), "trial was", "trials were"),
+            path.display(),
+            self.unsaved.concat()
+        ))
     }
 
     fn ended(&self) -> String {
@@ -258,6 +278,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 ),
                 theme::base(),
             ),
+            if state.unsaved.is_empty() {
+                Span::raw("")
+            } else {
+                theme::status(
+                    theme::Status::Fail,
+                    " · write failed: unsaved trials print on exit",
+                )
+            },
         ])),
         counts,
     );
@@ -326,6 +354,7 @@ mod tests {
                 line: "t".into(),
                 answered: false,
                 retries: 2,
+                unsaved: None,
             })
             .unwrap();
             tx.send(Msg::Done { state, error }).unwrap();
@@ -333,6 +362,36 @@ mod tests {
             assert_eq!(view.phase, phase);
             assert_eq!((view.done, view.errors, view.retries), (1, 1, 2));
         }
+    }
+
+    #[test]
+    fn trials_the_file_did_not_take_are_kept_for_the_exit_report() {
+        let (tx, rx) = channel();
+        let mut view = State {
+            phase: Phase::Running,
+            rx: Some(rx),
+            path: Some(PathBuf::from("runs/r.jsonl")),
+            ..State::default()
+        };
+        assert_eq!(view.unsaved_report(), None);
+        for unsaved in [
+            None,
+            Some("{\"a\":1}\n".to_string()),
+            Some("{\"b\":2}\n".to_string()),
+        ] {
+            tx.send(Msg::Trial {
+                line: "t".into(),
+                answered: true,
+                retries: 0,
+                unsaved,
+            })
+            .unwrap();
+        }
+        view.pump();
+        assert_eq!(
+            view.unsaved_report().unwrap(),
+            "warning: 2 trials were not saved to runs/r.jsonl; their records follow:\n{\"a\":1}\n{\"b\":2}\n"
+        );
     }
 
     #[test]
