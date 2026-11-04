@@ -18,6 +18,7 @@ use decisionbench::instructions::{
 use decisionbench::provider::{
     Candidate, env_nonempty, now_unix_ms, parse_candidates, request_url,
 };
+use decisionbench::report;
 use decisionbench::run::{self, Job, Settings};
 use decisionbench::sha256_hex;
 
@@ -83,8 +84,18 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Print the summary of a saved run file (offline).
+    /// Print the full report of a saved run file (offline).
     Show { file: PathBuf },
+    /// Put several saved run files side by side and list what makes them not comparable (offline).
+    Compare {
+        #[arg(required = true, num_args = 2..)]
+        files: Vec<PathBuf>,
+    },
+    /// List saved runs by created time (offline).
+    History {
+        /// Evidence directory; defaults to $XDG_DATA_HOME/decisionbench/runs.
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -138,6 +149,8 @@ fn main() -> ExitCode {
             out,
         }),
         Command::Show { file } => show(&file).map(|()| ExitCode::SUCCESS),
+        Command::Compare { files } => compare(&files).map(|()| ExitCode::SUCCESS),
+        Command::History { dir } => history(dir.as_deref()).map(|()| ExitCode::SUCCESS),
     };
     match result {
         Ok(code) => code,
@@ -458,12 +471,58 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
     })
 }
 
+fn load_run(path: &Path) -> Result<RunFile, String> {
+    evidence::read_run(&read(path)?)
+        .map_err(|e| format!("invalid evidence {}: {e}", path.display()))
+}
+
 fn show(path: &Path) -> Result<(), String> {
-    let run = evidence::read_run(&read(path)?)
-        .map_err(|e| format!("invalid evidence {}: {e}", path.display()))?;
-    for warning in &run.warnings {
+    print!("{}", report::report(&load_run(path)?));
+    Ok(())
+}
+
+fn compare(paths: &[PathBuf]) -> Result<(), String> {
+    let runs: Vec<RunFile> = paths
+        .iter()
+        .map(|p| load_run(p))
+        .collect::<Result<_, _>>()?;
+    for warning in runs.iter().flat_map(|r| &r.warnings) {
         eprintln!("warning: {warning}");
     }
-    print!("{run}");
+    print!("{}", report::Comparison(&runs));
+    Ok(())
+}
+
+fn history(dir: Option<&Path>) -> Result<(), String> {
+    let dir = match dir {
+        Some(dir) => dir.to_path_buf(),
+        None => default_path("XDG_DATA_HOME", ".local/share", "runs")?,
+    };
+    let listing = match std::fs::read_dir(&dir) {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("no runs in {}", dir.display());
+            return Ok(());
+        }
+        Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
+    };
+    let mut entries = Vec::new();
+    for entry in listing {
+        let path = entry
+            .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+            .path();
+        if path.extension().is_some_and(|ext| ext == "jsonl") {
+            let run = read(&path).and_then(|bytes| evidence::read_run(&bytes));
+            entries.push((
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                run,
+            ));
+        }
+    }
+    if entries.is_empty() {
+        println!("no runs in {}", dir.display());
+    } else {
+        print!("{}", report::history(entries));
+    }
     Ok(())
 }

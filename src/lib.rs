@@ -4,6 +4,7 @@ pub mod evidence;
 pub mod grade;
 pub mod instructions;
 pub mod provider;
+pub mod report;
 pub mod run;
 
 /// Lowercase hex SHA-256 of `bytes`.

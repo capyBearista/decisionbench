@@ -721,15 +721,6 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// Everything `run` printed before its `evidence:` line.
-fn summary(out: &Output) -> String {
-    stdout(out)
-        .lines()
-        .filter(|l| !l.starts_with("evidence: "))
-        .map(|l| format!("{l}\n"))
-        .collect()
-}
-
 fn openrouter_eval(test: &str, stub: &Stub) -> Eval {
     Eval::new(
         test,
@@ -1383,7 +1374,7 @@ fn every_target_name_is_accepted_by_run() {
 }
 
 #[test]
-fn show_prints_the_same_summary_and_leaves_the_file_unchanged() {
+fn show_prints_the_full_report_and_leaves_the_file_unchanged() {
     let stub = stub(200, OPENROUTER_REPLY);
     let eval = openrouter_eval("show", &stub);
     let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
@@ -1393,8 +1384,12 @@ fn show_prints_the_same_summary_and_leaves_the_file_unchanged() {
 
     let shown = run(&["show", file.to_str().unwrap()]);
     assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
-    assert_eq!(stdout(&shown), summary(&out));
-    assert!(stdout(&shown).starts_with("run: complete\n"));
+    assert!(
+        stdout(&shown).starts_with("== Run ==\n"),
+        "{}",
+        stdout(&shown)
+    );
+    assert_has_line(&stdout(&shown), "state: complete");
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
 
@@ -1405,7 +1400,7 @@ fn show_regrades_from_the_stored_label_and_raw_effort() {
     eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
     let shown = run(&["show", eval.file().to_str().unwrap()]);
     assert!(
-        stdout(&shown).contains(": 1 predictions: 0 hit, 0 under, 1 over, 0 invalid, 0 unscored;"),
+        stdout(&shown).contains("opus: hit 0, under 0, over 1, invalid 0, unscored 0; n=1"),
         "{}",
         stdout(&shown)
     );
@@ -2228,7 +2223,7 @@ fn one_signal_ends_partial_with_exit_130(signal: &str, name: &str) {
     let shown = run(&["show", eval.file().to_str().unwrap()]);
     assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
     assert!(
-        stdout(&shown).starts_with("run: partial\ntrials: 1 recorded of 3 planned\n"),
+        stdout(&shown).contains("state: partial (cancelled; not comparable to a complete run)\ntrials: 1 recorded of 3 planned\n"),
         "{}",
         stdout(&shown)
     );
@@ -2275,7 +2270,9 @@ fn a_second_sigint_exits_130_at_once_and_leaves_no_end_line() {
     assert_eq!(lines.len(), 1, "only the run line");
     let shown = run(&["show", eval.file().to_str().unwrap()]);
     assert!(
-        stdout(&shown).starts_with("run: partial (interrupted: no end record)\n"),
+        stdout(&shown).contains(
+            "state: partial (interrupted: no end record; not comparable to a complete run)\n"
+        ),
         "{}",
         stdout(&shown)
     );
@@ -2421,9 +2418,7 @@ fn a_file_without_an_end_line_is_reported_as_interrupted() {
     assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
     let printed = stdout(&shown);
     assert!(
-        printed.starts_with(
-            "run: partial (interrupted: no end record)\ntrials: 2 recorded of 2 planned\n"
-        ),
+        printed.contains("state: partial (interrupted: no end record; not comparable to a complete run)\ntrials: 2 recorded of 2 planned\n"),
         "{printed}"
     );
 }
@@ -2443,16 +2438,13 @@ fn a_truncated_last_line_is_tolerated_with_a_warning() {
     );
     let shown = run(&["show", cut.to_str().unwrap()]);
     assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
-    assert!(
-        stderr(&shown).contains("warning") && stderr(&shown).contains("line 3"),
-        "{}",
-        stderr(&shown)
-    );
     let printed = stdout(&shown);
     assert!(
-        printed.starts_with(
-            "run: partial (interrupted: no end record)\ntrials: 1 recorded of 2 planned\n"
-        ),
+        printed.contains("ignoring unreadable last line 3"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("state: partial (interrupted: no end record; not comparable to a complete run)\ntrials: 1 recorded of 2 planned\n"),
         "{printed}"
     );
 }
@@ -2508,7 +2500,6 @@ fn cost_uses_the_price_captured_in_the_run_and_counts_failed_attempts_as_unbille
     std::fs::write(&eval.config, priced("400")).unwrap();
     let shown = run(&["show", eval.file().to_str().unwrap()]);
     assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
-    assert_eq!(stdout(&shown), summary(&out));
     assert!(stdout(&shown).contains(cost), "{}", stdout(&shown));
 }
 
@@ -2629,4 +2620,673 @@ fn a_url_field_in_the_config_is_rejected() {
         stderr(&out)
     );
     assert!(files_in(&eval.out_dir).is_empty());
+}
+
+// ---- reports: show, compare, history (offline, hand-built evidence) ----
+
+const DATASET_SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const OTHER_DATASET_SHA: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+fn manifest_line(
+    id: &str,
+    created: u64,
+    dataset_sha: &str,
+    instructions: &[(&str, &str)],
+    candidates: &[(&str, &str, &str)],
+    targets: &[&str],
+    planned: usize,
+) -> Value {
+    json!({
+        "type": "run", "schema_version": 3, "id": id, "created_unix_ms": created,
+        "dataset": {"name": "ds.json", "sha256": dataset_sha},
+        "instructions": instructions.iter()
+            .map(|(n, s)| json!({"name": n, "sha256": s, "text": "t"})).collect::<Vec<_>>(),
+        "grading_revision": 2,
+        "candidates": candidates.iter()
+            .map(|(n, p, m)| json!({"name": n, "provider": p, "model": m, "url": "http://stub"}))
+            .collect::<Vec<_>>(),
+        "cases": ["c1"], "targets": targets,
+        "settings": {"repetitions": 1, "concurrency": 1, "timeout_secs": 60, "retries": 1, "include_unscored": false},
+        "planned_trials": planned,
+    })
+}
+
+fn attempt_line(latency: u64, disposition: &str, efforts: &[(&str, &str)]) -> Value {
+    let body = if disposition == "answered" {
+        let choices: Vec<(&str, String)> = efforts
+            .iter()
+            .map(|(t, e)| (*t, format!("\"{e}\"")))
+            .collect();
+        let choices: Vec<(&str, &str)> = choices.iter().map(|(t, e)| (*t, e.as_str())).collect();
+        reply_for(&choices)
+    } else {
+        "busy".to_string()
+    };
+    json!({
+        "started_unix_ms": 0, "latency_ms": latency, "disposition": disposition,
+        "http_status": match disposition {
+            "transport_error" => Value::Null,
+            "provider_error" => json!(503),
+            _ => json!(200),
+        },
+        "raw_response": body, "error": null,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trial_line(
+    seq: usize,
+    candidate: &str,
+    instructions: (&str, &str),
+    case: &str,
+    repetition: u32,
+    targets: &[&str],
+    labels: Value,
+    attempts: Vec<Value>,
+    elapsed: u64,
+) -> Value {
+    json!({
+        "type": "trial", "seq": seq, "candidate": candidate,
+        "instructions": {"name": instructions.0, "sha256": instructions.1},
+        "case_id": case, "targets": targets, "repetition": repetition, "labels": labels,
+        "request": {}, "attempts": attempts, "started_unix_ms": 0, "elapsed_ms": elapsed,
+    })
+}
+
+fn end_line(state: &str) -> Value {
+    json!({"type": "end", "state": state, "finished_unix_ms": 9})
+}
+
+fn write_run(file: &str, lines: &[Value]) -> PathBuf {
+    temp_file(file, &join_lines(lines))
+}
+
+/// One line with runs of spaces collapsed, so assertions ignore table padding.
+fn squash(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn assert_has_line(text: &str, expected: &str) {
+    assert!(
+        text.lines().any(|l| squash(l) == expected),
+        "missing line {expected:?} in:\n{text}"
+    );
+}
+
+fn show_text(path: &Path) -> String {
+    let out = run(&["show", path.to_str().unwrap()]);
+    stdout_of_success(out)
+}
+
+const NEUTRAL: (&str, &str) = ("neutral", SHA_A);
+
+/// Partial run (no end line, a cut last line) with candidate `alpha` (7 of its 7 trials recorded)
+/// and candidate `beta` (none), 9 planned. Targets: haiku, sonnet, opus.
+///
+/// Labels: L1 = haiku low-medium, sonnet high, opus max. L2 = sonnet low-medium, opus
+/// medium-high, haiku unlabelled. L3 = sonnet high only. L4 = no labels.
+/// alpha/neutral trials (T = seq):
+///   T0 c1 #1 L1 answered 100 ms, elapsed 120: haiku low, sonnet high, opus max
+///   T1 c1 #2 L1 answered 200 ms, elapsed 480: haiku high, sonnet high, opus "ultra"
+///   T2 c2 #1 L2 answered 300 ms, elapsed 250: haiku high, sonnet medium, opus low
+///   T3 c3 #1 L3 answered 400 ms, elapsed 900: sonnet low, opus high (haiku absent)
+///   T4 c3 #2 L3 transport_error 50 ms then provider_error 70 ms, elapsed 1100
+///   T5 c4 #1 L1 transport_error 30 ms, elapsed 40
+///   T6 c5 #1 L4 answered 1000 ms, elapsed 310: low, low, low
+fn partial_report_run() -> PathBuf {
+    let t = ["haiku", "sonnet", "opus"];
+    let l1 = json!({"haiku": "low-medium", "sonnet": "high", "opus": "max"});
+    let l2 = json!({"sonnet": "low-medium", "opus": "medium-high"});
+    let l3 = json!({"sonnet": "high"});
+    let l4 = json!({});
+    let answered = |ms, e: &[(&str, &str)]| vec![attempt_line(ms, "answered", e)];
+    let trial = |seq, case, rep, labels: &Value, attempts, elapsed| {
+        trial_line(
+            seq,
+            "alpha",
+            NEUTRAL,
+            case,
+            rep,
+            &t,
+            labels.clone(),
+            attempts,
+            elapsed,
+        )
+    };
+    let lines = vec![
+        manifest_line(
+            "R1",
+            1000,
+            DATASET_SHA,
+            &[NEUTRAL],
+            &[("alpha", "zen", "m-a"), ("beta", "openrouter", "m-b")],
+            &t,
+            9,
+        ),
+        trial(
+            0,
+            "c1",
+            1,
+            &l1,
+            answered(
+                100,
+                &[("haiku", "low"), ("sonnet", "high"), ("opus", "max")],
+            ),
+            120,
+        ),
+        trial(
+            1,
+            "c1",
+            2,
+            &l1,
+            answered(
+                200,
+                &[("haiku", "high"), ("sonnet", "high"), ("opus", "ultra")],
+            ),
+            480,
+        ),
+        trial(
+            2,
+            "c2",
+            1,
+            &l2,
+            answered(
+                300,
+                &[("haiku", "high"), ("sonnet", "medium"), ("opus", "low")],
+            ),
+            250,
+        ),
+        trial(
+            3,
+            "c3",
+            1,
+            &l3,
+            answered(400, &[("sonnet", "low"), ("opus", "high")]),
+            900,
+        ),
+        trial(
+            4,
+            "c3",
+            2,
+            &l3,
+            vec![
+                attempt_line(50, "transport_error", &[]),
+                attempt_line(70, "provider_error", &[]),
+            ],
+            1100,
+        ),
+        trial(
+            5,
+            "c4",
+            1,
+            &l1,
+            vec![attempt_line(30, "transport_error", &[])],
+            40,
+        ),
+        trial(
+            6,
+            "c5",
+            1,
+            &l4,
+            answered(
+                1000,
+                &[("haiku", "low"), ("sonnet", "low"), ("opus", "low")],
+            ),
+            310,
+        ),
+    ];
+    temp_file(
+        "report-partial.jsonl",
+        &format!("{}{{\"type\":\"trial\",\"seq\"", join_lines(&lines)),
+    )
+}
+
+#[test]
+fn show_prints_the_full_report_for_a_partial_run() {
+    let path = partial_report_run();
+    let before = std::fs::read(&path).unwrap();
+    let out = show_text(&path);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    // Header.
+    assert_has_line(&out, "== Run ==");
+    assert_has_line(&out, "id: R1");
+    assert_has_line(
+        &out,
+        "state: partial (interrupted: no end record; not comparable to a complete run)",
+    );
+    assert_has_line(&out, "trials: 7 recorded of 9 planned");
+    assert_has_line(&out, "dataset: ds.json sha256 0123456789ab");
+    assert_has_line(&out, "grading revision: 2");
+    assert_has_line(&out, "schema: 3");
+
+    // Accuracy per target, hand-counted over the 5 answered trials (T0 T1 T2 T3 T6):
+    //   haiku:  hit(T0) over(T1) unscored(T2 T3 T6) -> 1 hit of 2 valid scored, n=5
+    //   sonnet: hit(T0 T1 T2) under(T3) unscored(T6) -> 3 of 4, n=5
+    //   opus:   hit(T0) invalid(T1 "ultra") under(T2) unscored(T3 T6) -> 1 of 2, n=5
+    assert_has_line(&out, "candidate: alpha (zen m-a)");
+    assert_has_line(&out, "target neutral (aaaaaaaaaaaa)");
+    assert_has_line(&out, "haiku 1/2 (50.0%)");
+    assert_has_line(&out, "sonnet 3/4 (75.0%)");
+    assert_has_line(&out, "opus 1/2 (50.0%)");
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa) haiku: hit 1, under 0, over 1, invalid 0, unscored 3; n=5",
+    );
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa) sonnet: hit 3, under 1, over 0, invalid 0, unscored 1; n=5",
+    );
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa) opus: hit 1, under 1, over 0, invalid 1, unscored 2; n=5",
+    );
+    // beta has no trials: zero denominators.
+    assert_has_line(&out, "candidate: beta (openrouter m-b)");
+    assert_has_line(&out, "haiku n/a (0 valid scored)");
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa) opus: hit 0, under 0, over 0, invalid 0, unscored 0; n=0",
+    );
+
+    // Cross-model. Joint hit eligible: T0 (all 3 labelled and valid, all hit) and T2 (sonnet and
+    // opus labelled and valid; opus under); T1 has an invalid labelled opus, T3 has one label.
+    // -> 1/2. Gap agreement: T0 has 3 non-overlapping pairs, all strictly ordered as labelled
+    // (haiku<sonnet, haiku<opus, sonnet<opus) -> 3; T1 only haiku-sonnet is eligible and
+    // high = high is not strict -> 0 of 1; T2's sonnet/opus ranges overlap at medium.
+    // -> 3/4.
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa): joint hit 1/2 (50.0%); gap agreement 3/4 (75.0%)",
+    );
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa): joint hit n/a (0 eligible); gap agreement n/a (0 eligible)",
+    );
+
+    // Consistency: only c1 has two answered repetitions. haiku low/high differ (0 of 1);
+    // sonnet high/high agree (1 of 1); opus has one valid effort, so no group.
+    assert_has_line(&out, "neutral (aaaaaaaaaaaa) haiku: consistent 0/1 (0.0%)");
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa) sonnet: consistent 1/1 (100.0%)",
+    );
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa) opus: consistent n/a (0 cases with >=2 valid efforts)",
+    );
+
+    // Coverage: 5 answered of 7 recorded. Labelled predictions among answered, per target
+    // (valid scored + invalid): haiku 2, sonnet 4, opus 3 = 9, of which 1 invalid.
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa): answered trials 5/7 (71.4%); invalid labelled predictions 1/9 (11.1%)",
+    );
+    assert_has_line(
+        &out,
+        "neutral (aaaaaaaaaaaa): answered trials n/a (0 recorded trials); invalid labelled predictions n/a (0 labelled predictions)",
+    );
+
+    // Reliability: T4 ended provider_error, T5 transport_error; attempts 4 + 2 + 1 + 1 = 8;
+    // one retried trial (T4); failed attempts 2 + 1 = 3.
+    assert_has_line(
+        &out,
+        "outcomes: 1 provider_error, 1 transport_error; attempts: 8, retried trials: 1, failed attempts: 3",
+    );
+
+    // Latency over answered only. Attempts 100 200 300 400 1000: median rank ceil(.5*5)=3 -> 300,
+    // p95 rank ceil(.95*5)=5 -> 1000. Trial elapsed 120 250 310 480 900: median 310, p95 900.
+    assert_has_line(
+        &out,
+        "per-attempt (answered attempts): median 300 ms, p95 1000 ms (n=5)",
+    );
+    assert_has_line(
+        &out,
+        "logical trial elapsed (answered trials): median 310 ms, p95 900 ms (n=5)",
+    );
+    assert_has_line(&out, "per-attempt (answered attempts): n/a (n=0)");
+
+    // No price: 8 attempts.
+    assert_has_line(&out, "cost: unknown (no price for 8 attempts)");
+    // The cut last line is a read warning.
+    assert!(out.contains("ignoring unreadable last line 9"), "{out}");
+}
+
+#[test]
+fn the_header_flags_cancelled_and_failed_runs() {
+    let t = ["sonnet"];
+    let make = |file: &str, state: &str| {
+        write_run(
+            file,
+            &[
+                manifest_line(
+                    "S1",
+                    5,
+                    DATASET_SHA,
+                    &[NEUTRAL],
+                    &[("alpha", "zen", "m")],
+                    &t,
+                    1,
+                ),
+                trial_line(
+                    0,
+                    "alpha",
+                    NEUTRAL,
+                    "c1",
+                    1,
+                    &t,
+                    json!({"sonnet": "high"}),
+                    vec![attempt_line(10, "answered", &[("sonnet", "high")])],
+                    11,
+                ),
+                end_line(state),
+            ],
+        )
+    };
+    assert_has_line(
+        &show_text(&make("state-complete.jsonl", "complete")),
+        "state: complete",
+    );
+    assert_has_line(
+        &show_text(&make("state-partial.jsonl", "partial")),
+        "state: partial (cancelled; not comparable to a complete run)",
+    );
+    assert_has_line(
+        &show_text(&make("state-failed.jsonl", "failed")),
+        "state: failed (not comparable to a complete run)",
+    );
+}
+
+#[test]
+fn one_instruction_name_with_two_hashes_is_two_columns_and_a_warning() {
+    let t = ["sonnet"];
+    let labels = json!({"sonnet": "high"});
+    let path = write_run(
+        "report-two-hashes.jsonl",
+        &[
+            manifest_line(
+                "H1",
+                5,
+                DATASET_SHA,
+                &[("neutral", SHA_A)],
+                &[("alpha", "zen", "m")],
+                &t,
+                2,
+            ),
+            trial_line(
+                0,
+                "alpha",
+                ("neutral", SHA_A),
+                "c1",
+                1,
+                &t,
+                labels.clone(),
+                vec![attempt_line(10, "answered", &[("sonnet", "high")])],
+                11,
+            ),
+            trial_line(
+                1,
+                "alpha",
+                ("neutral", SHA_B),
+                "c1",
+                1,
+                &t,
+                labels,
+                vec![attempt_line(10, "answered", &[("sonnet", "low")])],
+                11,
+            ),
+            end_line("complete"),
+        ],
+    );
+    let out = show_text(&path);
+    assert_has_line(&out, "target neutral (aaaaaaaaaaaa) neutral (bbbbbbbbbbbb)");
+    assert_has_line(&out, "sonnet 1/1 (100.0%) 0/1 (0.0%)");
+    assert_has_line(
+        &out,
+        "instructions `neutral` appears with more than one hash: aaaaaaaaaaaa, bbbbbbbbbbbb",
+    );
+}
+
+#[test]
+fn a_single_hash_gives_no_warning() {
+    let out = show_text(&partial_report_run());
+    assert!(!out.contains("more than one hash"), "{out}");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_run(
+    file: &str,
+    id: &str,
+    created: u64,
+    sha: &str,
+    hash: &str,
+    provider: &str,
+    efforts: [&str; 2],
+    end: Option<&str>,
+) -> PathBuf {
+    let t = ["sonnet"];
+    let labels = json!({"sonnet": "high"});
+    let ins = ("neutral", hash);
+    let mut lines = vec![manifest_line(
+        id,
+        created,
+        sha,
+        &[ins],
+        &[("c1", provider, "m1")],
+        &t,
+        2,
+    )];
+    for (i, e) in efforts.iter().enumerate() {
+        lines.push(trial_line(
+            i,
+            "c1",
+            ins,
+            "c1",
+            i as u32 + 1,
+            &t,
+            labels.clone(),
+            vec![attempt_line(10, "answered", &[("sonnet", e)])],
+            11,
+        ));
+    }
+    lines.extend(end.map(end_line));
+    write_run(file, &lines)
+}
+
+#[test]
+fn compare_lines_up_matching_runs_one_column_each() {
+    // X: high (hit), low (under) -> 1/2. Y: high, high -> 2/2.
+    let x = compare_run(
+        "cmp-x.jsonl",
+        "X1",
+        1,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "low"],
+        Some("complete"),
+    );
+    let y = compare_run(
+        "cmp-y.jsonl",
+        "Y1",
+        2,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "high"],
+        Some("complete"),
+    );
+    let out = stdout_of_success(run(&["compare", x.to_str().unwrap(), y.to_str().unwrap()]));
+    assert_has_line(
+        &out,
+        "comparable: same dataset, grading, instructions and routes",
+    );
+    assert!(!out.contains("Not directly comparable"), "{out}");
+    assert_has_line(&out, "candidate instructions target X1 Y1");
+    assert_has_line(
+        &out,
+        "c1 neutral (aaaaaaaaaaaa) sonnet 1/2 (50.0%) 2/2 (100.0%)",
+    );
+}
+
+#[test]
+fn compare_lists_every_mismatch_before_the_table() {
+    let x = compare_run(
+        "cmp-base.jsonl",
+        "X1",
+        1,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "low"],
+        Some("complete"),
+    );
+    // Different dataset, instruction hash and route, and no end line.
+    let z = compare_run(
+        "cmp-odd.jsonl",
+        "Z1",
+        3,
+        OTHER_DATASET_SHA,
+        SHA_B,
+        "openrouter",
+        ["high", "high"],
+        None,
+    );
+    let out = stdout_of_success(run(&["compare", x.to_str().unwrap(), z.to_str().unwrap()]));
+    let head = out.find("Not directly comparable:").expect(&out);
+    let table = out.find("candidate").expect(&out);
+    assert!(head < table, "{out}");
+    assert!(!out.contains("comparable: same"), "{out}");
+    for expected in [
+        "Z1: dataset differs from X1 (fedcba987654 vs 0123456789ab)",
+        "Z1: instructions `neutral` differ in content (bbbbbbbbbbbb vs aaaaaaaaaaaa)",
+        "Z1: candidate `c1` route differs (openrouter m1 vs zen m1)",
+        "Z1: partial run (not comparable to a complete run)",
+    ] {
+        assert!(
+            out.lines().any(|l| squash(l) == format!("- {expected}")),
+            "missing {expected:?} in:\n{out}"
+        );
+    }
+    // Rows are keyed by instruction hash, so the differing one is its own row with `-` gaps.
+    assert_has_line(&out, "c1 neutral (aaaaaaaaaaaa) sonnet 1/2 (50.0%) -");
+    assert_has_line(&out, "c1 neutral (bbbbbbbbbbbb) sonnet - 2/2 (100.0%)");
+}
+
+#[test]
+fn compare_flags_different_target_sets_and_needs_two_readable_files() {
+    let x = compare_run(
+        "cmp-t1.jsonl",
+        "X1",
+        1,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "low"],
+        Some("complete"),
+    );
+    let mut lines = jsonl(&x);
+    lines[0]["id"] = json!("T2");
+    lines[0]["targets"] = json!(["sonnet", "opus"]);
+    let y = write_run("cmp-t2.jsonl", &lines);
+    let out = stdout_of_success(run(&["compare", x.to_str().unwrap(), y.to_str().unwrap()]));
+    assert_has_line(
+        &out,
+        "- T2: target set differs from X1 (sonnet, opus vs sonnet)",
+    );
+    // opus was not asked in X1: `-`; asked but never answered in T2: n/a.
+    assert_has_line(
+        &out,
+        "c1 neutral (aaaaaaaaaaaa) opus - n/a (0 valid scored)",
+    );
+
+    assert_eq!(
+        run(&["compare", x.to_str().unwrap()]).status.code(),
+        Some(2)
+    );
+    assert_eq!(run(&["compare"]).status.code(), Some(2));
+    let bad = temp_file("cmp-bad.jsonl", "{");
+    let out = run(&["compare", x.to_str().unwrap(), bad.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("cmp-bad.jsonl"), "{}", stderr(&out));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn history_lists_runs_by_created_time_and_unreadable_files_without_aborting() {
+    let dir = fresh_dir("history-dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = |from: &Path, name: &str| std::fs::copy(from, dir.join(name)).unwrap();
+    let late = compare_run(
+        "hist-late.jsonl",
+        "LATE",
+        2000,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "low"],
+        Some("complete"),
+    );
+    let early = compare_run(
+        "hist-early.jsonl",
+        "EARLY",
+        1000,
+        OTHER_DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "low"],
+        None,
+    );
+    copy(&late, "a-late.jsonl");
+    copy(&early, "z-early.jsonl");
+    std::fs::write(dir.join("junk.jsonl"), "{").unwrap();
+    std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+    let out = stdout_of_success(run(&["history", dir.to_str().unwrap()]));
+    let rows: Vec<String> = out.lines().map(squash).collect();
+    // Created order, not file-name order; the unreadable file comes last.
+    // EARLY: no end line -> partial, 2 recorded of 2 planned.
+    assert_eq!(rows[0], "id created state trials candidates dataset");
+    assert_eq!(rows[1], "EARLY 1000 partial 2/2 c1 fedcba987654");
+    assert_eq!(rows[2], "LATE 2000 complete 2/2 c1 0123456789ab");
+    assert!(rows[3].starts_with("junk.jsonl unreadable: "), "{rows:?}");
+    assert_eq!(rows.len(), 4, "{rows:?}");
+}
+
+#[test]
+fn history_of_an_empty_or_missing_dir_says_so_and_exits_0() {
+    let missing = fresh_dir("history-missing");
+    let out = stdout_of_success(run(&["history", missing.to_str().unwrap()]));
+    assert_eq!(out, format!("no runs in {}\n", missing.display()));
+    std::fs::create_dir_all(&missing).unwrap();
+    let out = stdout_of_success(run(&["history", missing.to_str().unwrap()]));
+    assert_eq!(out, format!("no runs in {}\n", missing.display()));
+}
+
+#[test]
+fn history_defaults_to_the_evidence_directory() {
+    let data = fresh_dir("history-xdg");
+    let runs = data.join("decisionbench/runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    let x = compare_run(
+        "hist-default.jsonl",
+        "D1",
+        7,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "low"],
+        Some("complete"),
+    );
+    std::fs::copy(&x, runs.join("D1.jsonl")).unwrap();
+    let out = stdout_of_success(run_with_env(
+        &["history"],
+        &[("XDG_DATA_HOME", data.to_str().unwrap())],
+    ));
+    assert!(
+        out.lines()
+            .any(|l| squash(l) == "D1 7 complete 2/2 c1 0123456789ab"),
+        "{out}"
+    );
 }
