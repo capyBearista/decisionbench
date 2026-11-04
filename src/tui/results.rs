@@ -12,7 +12,7 @@ use ratatui::widgets::Paragraph;
 
 use super::{App, Nav, block, cut, list_lines, nav, step, theme};
 use crate::batch::{load_run, read_runs};
-use crate::evidence::{RunFile, RunState};
+use crate::evidence::{RunFile, RunState, RunSummary};
 use crate::report;
 
 pub const HINTS: &str =
@@ -20,7 +20,7 @@ pub const HINTS: &str =
 
 struct Entry {
     name: String,
-    run: Result<RunFile, String>,
+    run: Result<RunSummary, String>,
 }
 
 struct View {
@@ -168,7 +168,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn state_status(run: &RunFile) -> Span<'static> {
+fn state_status(run: &RunSummary) -> Span<'static> {
     match run.end.as_ref().map(|e| e.state) {
         Some(RunState::Complete) => theme::status(theme::Status::Ok, "complete"),
         Some(RunState::Failed) => theme::status(theme::Status::Fail, "failed"),
@@ -212,7 +212,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                         state_status(run),
                         Span::raw(format!(
                             " {}/{} {}",
-                            run.trials.len(),
+                            run.trials,
                             m.planned_trials,
                             names.join(",")
                         )),

@@ -7,7 +7,7 @@ use std::fmt;
 
 use crate::cost::{CostTally, attempt_cost};
 use crate::dataset::Effort;
-use crate::evidence::{CandidateRecord, Manifest, RunFile, RunState, TrialRecord};
+use crate::evidence::{CandidateRecord, Manifest, RunFile, RunState, RunSummary, TrialRecord};
 use crate::grade::{Grade, Tally, Target};
 use crate::provider::{Disposition, normalize};
 
@@ -496,12 +496,6 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
                 .join(", ")
         };
         differ("target set", names(&m.targets), names(&first.targets));
-        let set = |cases: &[String]| {
-            let mut ids = cases.to_vec();
-            ids.sort();
-            ids.join(", ")
-        };
-        differ("case selection", set(&m.cases), set(&first.cases));
         differ(
             "repetitions",
             m.settings.repetitions.to_string(),
@@ -512,6 +506,36 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
             m.settings.include_unscored.to_string(),
             first.settings.include_unscored.to_string(),
         );
+        let (mut ours, mut theirs) = (m.cases.clone(), first.cases.clone());
+        ours.sort();
+        theirs.sort();
+        if ours != theirs {
+            let only_in = |id: &str, a: &[String], b: &[String]| {
+                let ids: Vec<&str> = a
+                    .iter()
+                    .filter(|c| !b.contains(c))
+                    .map(String::as_str)
+                    .collect();
+                match ids.len() {
+                    0 => String::new(),
+                    n if n <= 10 => format!("; only in {id}: {}", ids.join(", ")),
+                    n => format!(
+                        "; only in {id}: {}, … +{} more",
+                        ids[..10].join(", "),
+                        n - 10
+                    ),
+                }
+            };
+            found.push(format!(
+                "{}: case selection differs from {} ({} vs {} cases{}{})",
+                m.id,
+                first.id,
+                ours.len(),
+                theirs.len(),
+                only_in(&m.id, &ours, &theirs),
+                only_in(&first.id, &theirs, &ours),
+            ));
+        }
         for i in &m.instructions {
             if let Some(j) = first.instructions.iter().find(|j| j.name == i.name)
                 && j.sha256 != i.sha256
@@ -695,7 +719,7 @@ impl fmt::Display for Comparison<'_> {
 
 /// One line per readable Run by created time, then the unreadable files. Entries are
 /// (file name, parsed file or read error).
-pub fn history(mut entries: Vec<(String, Result<RunFile, String>)>) -> String {
+pub fn history(mut entries: Vec<(String, Result<RunSummary, String>)>) -> String {
     entries.sort_by_key(|(name, run)| {
         (
             run.as_ref()
@@ -721,8 +745,8 @@ pub fn history(mut entries: Vec<(String, Result<RunFile, String>)>) -> String {
                 rows.push(vec![
                     m.id.clone(),
                     m.created_unix_ms.to_string(),
-                    state(run).name().to_string(),
-                    format!("{}/{}", run.trials.len(), m.planned_trials),
+                    run.state().name().to_string(),
+                    format!("{}/{}", run.trials, m.planned_trials),
                     candidates.join(","),
                     short(&m.dataset.sha256),
                 ]);
@@ -822,7 +846,7 @@ mod tests {
     #[test]
     fn history_orders_by_created_time_and_keeps_unreadable_files() {
         assert_eq!(history(Vec::new()), "");
-        let bad = Err::<RunFile, String>("line 1: x".into());
+        let bad = Err::<RunSummary, String>("line 1: x".into());
         let text = history(vec![("b.jsonl".into(), bad)]);
         assert_eq!(text, "b.jsonl  unreadable: line 1: x\n");
     }

@@ -10,7 +10,7 @@ use crate::cost::plural;
 use crate::dataset::{BUNDLED_CASES, Case, parse_cases};
 use crate::evidence::{
     self, CandidateRecord, EndRecord, GRADING_REVISION, Hashed, InstructionsRecord, Line, Manifest,
-    RunFile, RunState, TrialRecord,
+    RunFile, RunState, RunSummary, TrialRecord,
 };
 use crate::grade::Target;
 use crate::instructions::{BUNDLED_NAME, BUNDLED_TEXT, JudgeInstructions, parse_instructions};
@@ -83,7 +83,7 @@ pub fn load_run(path: &Path) -> Result<RunFile, String> {
 }
 
 /// A file name and its parsed Run or read error.
-pub type RunEntry = (String, Result<RunFile, String>);
+pub type RunEntry = (String, Result<RunSummary, String>);
 
 /// Every `.jsonl` file in `dir`; empty when `dir` does not exist.
 pub fn read_runs(dir: &Path) -> Result<Vec<RunEntry>, String> {
@@ -98,7 +98,7 @@ pub fn read_runs(dir: &Path) -> Result<Vec<RunEntry>, String> {
             .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
             .path();
         if path.extension().is_some_and(|ext| ext == "jsonl") {
-            let run = read(&path).and_then(|bytes| evidence::read_run(&bytes));
+            let run = read(&path).and_then(|bytes| evidence::read_summary(&bytes));
             entries.push((
                 path.file_name().unwrap().to_string_lossy().into_owned(),
                 run,
@@ -407,5 +407,63 @@ impl Prepared {
             all_answered,
             write_error,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    /// A write error mid-run (the evidence file is /dev/full, which refuses every write) fails the
+    /// Run, and every Trial from the failing one on is handed to the caller as unsaved.
+    #[test]
+    fn a_failed_evidence_write_fails_the_run_and_flags_every_trial_unsaved() {
+        let dir = std::env::temp_dir().join(format!("decisionbench-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        let mut prepared = prepare(&RunArgs {
+            candidates: vec!["a".into()],
+            instructions: Vec::new(),
+            cases: ["c001", "c002", "c003"].map(String::from).to_vec(),
+            targets: vec![Target::Sonnet],
+            settings: Settings {
+                repetitions: 1,
+                concurrency: 3,
+                timeout_secs: 5,
+                retries: 0,
+                include_unscored: true,
+            },
+            config: Some(dir.join("config.toml")),
+            dataset: None,
+            out: Some(dir.join("runs")),
+        })
+        .unwrap();
+        // A server that holds all three requests until every Trial is in flight, then hangs up, so
+        // the first write failure finds the other two Trials already started.
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        prepared.urls = vec![format!("http://{}", server.local_addr().unwrap())];
+        let hold = std::thread::spawn(move || {
+            let held: Vec<_> = (0..3).map(|_| server.accept().unwrap()).collect();
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        prepared.file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+
+        let mut unsaved = Vec::new();
+        let outcome = prepared.run(&Control::default(), |_, _, lost| unsaved.push(lost));
+        hold.join().unwrap();
+
+        assert_eq!(outcome.state, RunState::Failed);
+        assert!(outcome.write_error.is_some());
+        assert_eq!(unsaved, [true, true, true]);
     }
 }

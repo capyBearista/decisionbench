@@ -222,6 +222,23 @@ fn quitting_with_unsaved_candidate_edits_needs_a_second_press() {
 }
 
 #[test]
+fn quitting_a_run_with_unsaved_candidate_edits_takes_two_presses() {
+    use super::progress::Phase;
+    for phase in [Phase::Running, Phase::Cancelling] {
+        let (mut app, _) = app();
+        add_candidate(&mut app, "alpha", "m", ["", "", ""]);
+        app.run.phase = phase.clone();
+        assert_eq!(press(&mut app, KeyCode::Char('q')), Effect::None);
+        assert_eq!(
+            app.message,
+            "run in progress and unsaved candidate edits: press again to cancel the run and quit without saving"
+        );
+        assert_eq!(app.run.phase, phase);
+        assert_eq!(press(&mut app, KeyCode::Char('q')), Effect::Quit);
+    }
+}
+
+#[test]
 fn saving_writes_a_temp_file_then_renames_it_over_the_config() {
     let (mut app, dir) = app();
     add_candidate(&mut app, "alpha", "m", ["", "", ""]);
@@ -236,6 +253,52 @@ fn saving_writes_a_temp_file_then_renames_it_over_the_config() {
     assert!(app.message.contains("cannot write"), "{}", app.message);
     assert!(app.candidates.dirty);
     assert_eq!(std::fs::read_to_string(&config).unwrap(), first);
+}
+
+#[test]
+fn saving_keeps_the_configs_comments() {
+    let (_, dir) = app();
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "# mine\n[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\" # pinned\n",
+    )
+    .unwrap();
+    let mut app = App::new(Some(config.clone()), Some(dir.join("runs"))).unwrap();
+    add_candidate(&mut app, "beta", "n", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    let saved = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        saved.contains("# mine") && saved.contains("model = \"m\" # pinned"),
+        "{saved}"
+    );
+    assert!(saved.contains("beta"), "{saved}");
+    assert_eq!(app.message, format!("saved {}", config.display()));
+}
+
+#[test]
+fn saving_through_a_symlinked_config_keeps_the_link() {
+    let (_, dir) = app();
+    std::fs::create_dir_all(dir.join("real")).unwrap();
+    let target = dir.join("real/config.toml");
+    let link = dir.join("config.toml");
+    std::fs::write(
+        &target,
+        "# mine\n[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let mut app = App::new(Some(link.clone()), Some(dir.join("runs"))).unwrap();
+    add_candidate(&mut app, "beta", "n", ["", "", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+    let saved = std::fs::read_to_string(&target).unwrap();
+    assert!(
+        saved.contains("# mine") && saved.contains("beta"),
+        "{saved}"
+    );
+    assert!(!dir.join("real/config.toml.tmp").exists());
 }
 
 #[test]

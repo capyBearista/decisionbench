@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{App, Nav, Screen, block, edit, list_lines, nav, step};
+use super::{App, Nav, Screen, block, cut, edit, list_lines, nav, step};
 use crate::batch::{RunArgs, prepare};
 use crate::grade::Target;
 use crate::run::Settings;
@@ -287,9 +287,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     let height = area.height.saturating_sub(2) as usize;
     frame.render_widget(
-        Paragraph::new(list_lines(lines, cursor, height)).block(block(&format!(
-            "run setup · cases: {} (chosen on Dataset)",
-            app.dataset.choice()
+        Paragraph::new(list_lines(lines, cursor, height)).block(block(&cut(
+            &format!(
+                "run setup · cases: {} (chosen on Dataset)",
+                app.dataset.choice()
+            ),
+            // Corners and the title's padding take four columns.
+            area.width.saturating_sub(4) as usize,
         ))),
         area,
     );

@@ -176,13 +176,33 @@ impl State {
 
     /// What to print to stderr once the terminal is restored, so no paid Trial is lost.
     pub fn unsaved_report(&self) -> Option<String> {
-        let path = self.path.as_ref().filter(|_| !self.unsaved.is_empty())?;
-        Some(format!(
-            "warning: {} not saved to {}; their records follow:\n{}",
-            plural(self.unsaved.len(), "trial was", "trials were"),
-            path.display(),
-            self.unsaved.concat()
-        ))
+        let path = self.path.as_ref()?;
+        let mut report = String::new();
+        if !self.unsaved.is_empty() {
+            report = format!(
+                "warning: {} not saved to {}; their records follow:\n{}",
+                plural(self.unsaved.len(), "trial was", "trials were"),
+                path.display(),
+                self.unsaved.concat()
+            );
+        }
+        // Only after the second cancel: the engine is still waiting on these, and they are lost.
+        let lost = match (&self.phase, &self.control) {
+            (Phase::Cancelled, Some(control)) => control.in_flight(),
+            _ => 0,
+        };
+        if lost > 0 {
+            report += &format!(
+                "warning: {} not recorded in {}\n",
+                plural(
+                    lost,
+                    "trial still in flight was",
+                    "trials still in flight were"
+                ),
+                path.display()
+            );
+        }
+        (!report.is_empty()).then_some(report)
     }
 
     fn ended(&self) -> String {
@@ -391,6 +411,42 @@ mod tests {
         assert_eq!(
             view.unsaved_report().unwrap(),
             "warning: 2 trials were not saved to runs/r.jsonl; their records follow:\n{\"a\":1}\n{\"b\":2}\n"
+        );
+    }
+
+    #[test]
+    fn stopping_the_wait_reports_the_trials_still_in_flight() {
+        let control = Arc::new(Control::default());
+        control.started.store(5, Ordering::Relaxed);
+        control.recorded.store(4, Ordering::Relaxed);
+        let mut view = State {
+            phase: Phase::Cancelled,
+            control: Some(control.clone()),
+            path: Some(PathBuf::from("runs/r.jsonl")),
+            ..State::default()
+        };
+        assert_eq!(
+            view.unsaved_report().unwrap(),
+            "warning: 1 trial still in flight was not recorded in runs/r.jsonl\n"
+        );
+        // Nothing in flight, and a cancel that is still waiting, report nothing.
+        control.recorded.store(5, Ordering::Relaxed);
+        assert_eq!(view.unsaved_report(), None);
+        control.recorded.store(0, Ordering::Relaxed);
+        view.phase = Phase::Cancelling;
+        assert_eq!(view.unsaved_report(), None);
+        // Unsaved records and lost in-flight Trials are both reported.
+        view.phase = Phase::Cancelled;
+        view.unsaved = vec!["{\"a\":1}\n".into()];
+        let report = view.unsaved_report().unwrap();
+        assert!(
+            report.starts_with("warning: 1 trial was not saved"),
+            "{report}"
+        );
+        assert!(
+            report
+                .ends_with("warning: 5 trials still in flight were not recorded in runs/r.jsonl\n"),
+            "{report}"
         );
     }
 

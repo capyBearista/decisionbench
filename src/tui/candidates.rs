@@ -157,10 +157,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('s') => {
             app.message = match save(app) {
-                Ok(()) => format!(
-                    "saved {} (comments in the file are not kept)",
-                    app.config.display()
-                ),
+                Ok(()) => format!("saved {}", app.config.display()),
                 Err(e) => e,
             };
         }
@@ -173,16 +170,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn save(app: &mut App) -> Result<(), String> {
-    let text = candidates_toml(&app.candidates.items)?;
-    if let Some(dir) = app.config.parent() {
+    // A symlinked config is written through, so the link survives the rename.
+    let config = std::fs::canonicalize(&app.config).unwrap_or_else(|_| app.config.clone());
+    let existing = match std::fs::read_to_string(&config) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {}: {e}", config.display())),
+    };
+    let text = candidates_toml(existing.as_deref(), &app.candidates.items)?;
+    if let Some(dir) = config.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
     // Write beside the config, then rename: a failed write never leaves a half-written config.
-    let mut temp = app.config.clone().into_os_string();
+    let mut temp = config.clone().into_os_string();
     temp.push(".tmp");
     // An existing config keeps its mode; a new one is private. Set it explicitly: a stale temp file keeps its own mode.
-    let permissions = std::fs::metadata(&app.config)
+    let permissions = std::fs::metadata(&config)
         .map(|m| m.permissions())
         .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
     std::fs::OpenOptions::new()
@@ -193,7 +197,7 @@ fn save(app: &mut App) -> Result<(), String> {
         .open(&temp)
         .and_then(|mut file| file.write_all(text.as_bytes()))
         .and_then(|()| std::fs::set_permissions(&temp, permissions))
-        .and_then(|()| std::fs::rename(&temp, &app.config))
+        .and_then(|()| std::fs::rename(&temp, &config))
         .map_err(|e| format!("cannot write {}: {e}", app.config.display()))?;
     app.candidates.dirty = false;
     Ok(())

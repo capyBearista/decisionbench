@@ -260,3 +260,18 @@ fn marking_two_runs_shows_the_compare_text() {
         assert!(contains(&rows, line), "missing compare line {line:?}");
     }
 }
+
+#[test]
+fn the_setup_title_fits_a_narrow_terminal_with_many_cases_marked() {
+    let (mut app, _) = app_with_fixture("tui-setup-title");
+    app.dataset
+        .marked
+        .extend((0..40).map(|i| format!("long-case-identifier-{i:03}")));
+    app.screen = Screen::Setup;
+    let rows = draw(&app, 60, 16);
+    assert!(
+        rows[1].starts_with("┌ run setup · cases: 40 selected") && rows[1].ends_with("… ┐"),
+        "{}",
+        rows[1]
+    );
+}

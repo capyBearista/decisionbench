@@ -132,8 +132,18 @@ impl App {
 }
 
 /// Quitting during a Run first cancels it; a second request leaves without waiting. Unsaved
-/// Candidate edits also need a second request, made right after the first.
+/// Candidate edits also need a second request, made right after the first; with both, that one
+/// request covers the run and the edits.
 fn request_quit(app: &mut App, confirmed: bool) -> Effect {
+    if app.run.active() && app.candidates.dirty {
+        if !confirmed {
+            app.quit_armed = true;
+            app.message = "run in progress and unsaved candidate edits: press again to cancel the run and quit without saving".into();
+            return Effect::None;
+        }
+        app.run.cancel();
+        return Effect::Quit;
+    }
     if app.run.cancel() {
         app.message = "cancelling: finishing in-flight trials; quit again to leave now".into();
         return Effect::None;

@@ -3322,8 +3322,25 @@ fn compare_flags_different_case_selection() {
         l[0]["cases"] = json!(["c1", "c2"]);
     });
     let out = compare_pair(&x, &y);
-    assert_has_line(&out, "- V2: case selection differs from X1 (c1, c2 vs c1)");
+    assert_has_line(
+        &out,
+        "- V2: case selection differs from X1 (2 vs 1 cases; only in V2: c2)",
+    );
     assert!(!out.contains("no differences found"), "{out}");
+}
+
+#[test]
+fn compare_caps_listed_case_ids_at_ten() {
+    let x = compare_base("cmp-cases-cap-x.jsonl");
+    let y = variant_of(&x, "cmp-cases-cap-y.jsonl", |l| {
+        let ids: Vec<String> = (0..25).map(|i| format!("d{i:02}")).collect();
+        l[0]["cases"] = json!(ids);
+    });
+    let out = compare_pair(&x, &y);
+    assert_has_line(
+        &out,
+        "- V2: case selection differs from X1 (25 vs 1 cases; only in V2: d00, d01, d02, d03, d04, d05, d06, d07, d08, d09, … +15 more; only in X1: c1)",
+    );
 }
 
 #[test]
@@ -3394,4 +3411,33 @@ fn compare_reports_reliability_settings_apart_from_comparability() {
     }
     assert!(!out.contains("Not directly comparable"), "{out}");
     assert!(!compare_pair(&x, &x).contains("settings differ"));
+}
+
+#[test]
+fn tui_without_a_terminal_exits_with_a_clear_error() {
+    // crossterm falls back to /dev/tty when stdin is not a tty, so `setsid` drops the controlling
+    // terminal: the test can never take over the terminal it runs in.
+    if Command::new("setsid").arg("--version").output().is_err() {
+        eprintln!("skipped: `setsid` is not installed, so the test cannot rule out a real tty");
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tui-no-terminal");
+    let out = Command::new("setsid")
+        .arg("--wait")
+        .arg(env!("CARGO_BIN_EXE_decisionbench"))
+        .args(["tui", "--config"])
+        .arg(dir.join("config.toml"))
+        .arg("--out")
+        .arg(dir.join("runs"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("setsid runs");
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cannot open the terminal"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }

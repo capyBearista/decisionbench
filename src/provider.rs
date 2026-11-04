@@ -5,6 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TomlError};
 
 use crate::cost::Price;
 use crate::dataset::Case;
@@ -100,19 +101,97 @@ pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, String> {
     Ok(config.candidate)
 }
 
-/// The config file text for `candidates`; it parses back through `parse_candidates`, which also
-/// rejects what the loader would (duplicate names, bad prices). Comments are not kept.
-pub fn candidates_toml(candidates: &[Candidate]) -> Result<String, String> {
+/// The config file text for `candidates`. With the `existing` text, its `[[candidate]]` tables are
+/// updated in place (matched by name) so comments and other content survive. The result parses
+/// back through `parse_candidates` into exactly `candidates`, which also rejects what the loader
+/// would (duplicate names, bad prices).
+pub fn candidates_toml(existing: Option<&str>, candidates: &[Candidate]) -> Result<String, String> {
     #[derive(Serialize)]
     struct Out<'a> {
         candidate: &'a [Candidate],
     }
-    let text = toml::to_string(&Out {
+    let fresh = toml::to_string(&Out {
         candidate: candidates,
     })
     .map_err(|e| e.to_string())?;
-    parse_candidates(&text)?;
+    let text = match existing {
+        None => fresh,
+        Some(existing) => {
+            let mut doc: DocumentMut = existing.parse().map_err(|e: TomlError| e.to_string())?;
+            let fresh: DocumentMut = fresh.parse().map_err(|e: TomlError| e.to_string())?;
+            match (doc.get_mut("candidate"), &fresh["candidate"]) {
+                (Some(Item::ArrayOfTables(old)), Item::ArrayOfTables(new)) => {
+                    let name = |t: &Table| t.get("name").and_then(Item::as_str).map(str::to_owned);
+                    let first = old.iter().next();
+                    let header = first
+                        .and_then(|t| Some((name(t), t.decor().prefix()?.as_str()?.to_owned())));
+                    // In `candidates` order: a matched old table keeps its comments.
+                    let mut rebuilt = ArrayOfTables::new();
+                    for table in new.iter() {
+                        let mut table = match old.iter().find(|o| name(o) == name(table)) {
+                            Some(o) => {
+                                let mut o = o.clone();
+                                sync(&mut o, table);
+                                o
+                            }
+                            None => table.clone(),
+                        };
+                        // A new first table inherits the file header comment above the old first.
+                        if rebuilt.is_empty()
+                            && let Some((first, header)) = &header
+                            && *first != name(&table)
+                        {
+                            let own = table
+                                .decor()
+                                .prefix()
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("");
+                            let prefix = format!("{header}{own}");
+                            table.decor_mut().set_prefix(prefix);
+                        }
+                        rebuilt.push(table);
+                    }
+                    *old = rebuilt;
+                }
+                (_, item) => doc["candidate"] = item.clone(),
+            }
+            doc.to_string()
+        }
+    };
+    if parse_candidates(&text)? != candidates {
+        return Err("the updated config does not match the candidates".into());
+    }
     Ok(text)
+}
+
+/// Makes `old` hold what `new` holds, changing only what differs so comments stay.
+fn sync(old: &mut Table, new: &Table) {
+    let gone: Vec<String> = old
+        .iter()
+        .map(|(k, _)| k)
+        .filter(|k| !new.contains_key(k))
+        .map(str::to_owned)
+        .collect();
+    for key in gone {
+        old.remove(&key);
+    }
+    let bare = |v: &toml_edit::Value| v.clone().decorated("", "").to_string();
+    for (key, item) in new {
+        match (old.get_mut(key), item) {
+            (Some(Item::Table(o)), Item::Table(n)) => sync(o, n),
+            (Some(Item::Value(o)), Item::Value(n)) => {
+                if bare(o) != bare(n) {
+                    let decor = o.decor().clone();
+                    *o = n.clone();
+                    *o.decor_mut() = decor;
+                }
+            }
+            (Some(slot), _) => *slot = item.clone(),
+            (None, _) => {
+                old.insert(key, item.clone());
+            }
+        }
+    }
 }
 
 /// The Decisions request body: one `effort_<target>` question per selected Target Model, in
@@ -313,13 +392,64 @@ mod tests {
     fn candidates_round_trip_through_the_config_text() {
         let text = "[[candidate]]\nname = \"a\"\ndecision_model = \"jev\"\nprovider = \"zen\"\nmodel = \"m\"\n\n[candidate.price]\ninput_per_million = 1.5\n\n[[candidate]]\nname = \"b\"\nprovider = \"openrouter\"\nmodel = \"n\"\n";
         let candidates = parse_candidates(text).unwrap();
-        let saved = candidates_toml(&candidates).unwrap();
+        let saved = candidates_toml(None, &candidates).unwrap();
         assert_eq!(parse_candidates(&saved).unwrap(), candidates);
-        assert!(candidates_toml(&[candidates[0].clone(), candidates[0].clone()]).is_err());
+        assert!(candidates_toml(None, &[candidates[0].clone(), candidates[0].clone()]).is_err());
         assert_eq!(
-            parse_candidates(&candidates_toml(&[]).unwrap()).unwrap(),
+            parse_candidates(&candidates_toml(None, &[]).unwrap()).unwrap(),
             []
         );
+    }
+
+    #[test]
+    fn updating_a_config_keeps_its_comments() {
+        let existing = "# my benchmark config\n\n[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\" # pinned\n\n# prices checked 2026-10\n[candidate.price]\ninput_per_million = 1.5\n\n# the second one\n[[candidate]]\nname = \"b\"\nprovider = \"openrouter\"\nmodel = \"n\"\n";
+        let mut candidates = parse_candidates(existing).unwrap();
+        candidates[0].price.as_mut().unwrap().input_per_million = 2.5;
+        candidates.push(Candidate {
+            name: "c".into(),
+            decision_model: None,
+            provider: Provider::Zen,
+            model: "o".into(),
+            price: None,
+        });
+        let saved = candidates_toml(Some(existing), &candidates).unwrap();
+        for kept in [
+            "# my benchmark config",
+            "model = \"m\" # pinned",
+            "# prices checked 2026-10",
+            "# the second one",
+            "input_per_million = 2.5",
+        ] {
+            assert!(saved.contains(kept), "{kept} missing from:\n{saved}");
+        }
+        assert_eq!(parse_candidates(&saved).unwrap(), candidates);
+        // Removing a Candidate (and its comment) and emptying the list both stay loadable.
+        let rest = [candidates[1].clone()];
+        let saved = candidates_toml(Some(&saved), &rest).unwrap();
+        assert!(!saved.contains("pinned") && saved.contains("# the second one"));
+        assert_eq!(parse_candidates(&saved).unwrap(), rest);
+        assert_eq!(
+            parse_candidates(&candidates_toml(Some(&saved), &[]).unwrap()).unwrap(),
+            []
+        );
+    }
+
+    #[test]
+    fn renaming_or_deleting_the_first_candidate_keeps_order_and_header() {
+        let existing = "# header\n[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n\n# second\n[[candidate]]\nname = \"b\"\nprovider = \"zen\"\nmodel = \"n\"\n";
+        let mut candidates = parse_candidates(existing).unwrap();
+        candidates[0].name = "a2".into();
+        let saved = candidates_toml(Some(existing), &candidates).unwrap();
+        assert_eq!(parse_candidates(&saved).unwrap(), candidates);
+        assert!(
+            saved.starts_with("# header") && saved.contains("# second"),
+            "{saved}"
+        );
+        let rest = [candidates[1].clone()];
+        let saved = candidates_toml(Some(existing), &rest).unwrap();
+        assert!(saved.starts_with("# header"), "{saved}");
+        assert_eq!(parse_candidates(&saved).unwrap(), rest);
     }
 
     #[test]

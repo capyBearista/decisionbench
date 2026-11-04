@@ -249,6 +249,40 @@ fn unsupported_schema(value: &Value) -> String {
 /// have died mid-write); an unparseable line anywhere else is an error, except one directly
 /// followed by an `end` line with state `failed` (a write failed and left a partial line).
 pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
+    parse(bytes, false).map(|(run, _)| run)
+}
+
+/// What a list of Runs needs: the manifest, the number of Trials and the end line. Trial lines
+/// are only checked for their `type` tag (not read into records), except the last two, which can
+/// be cut or partial; so a Trial line with a bad body in the middle counts here but fails
+/// `read_run`. Open the file with `read_run` for anything more.
+pub struct RunSummary {
+    pub manifest: Manifest,
+    pub trials: usize,
+    pub end: Option<EndRecord>,
+}
+
+impl RunSummary {
+    pub fn state(&self) -> RunState {
+        self.end.as_ref().map_or(RunState::Partial, |e| e.state)
+    }
+}
+
+pub fn read_summary(bytes: &[u8]) -> Result<RunSummary, String> {
+    let (run, skimmed) = parse(bytes, true)?;
+    Ok(RunSummary {
+        manifest: run.manifest,
+        trials: run.trials.len() + skimmed,
+        end: run.end,
+    })
+}
+
+/// `skim` leaves Trial lines other than the last two unread and counts them instead.
+fn parse(bytes: &[u8], skim: bool) -> Result<(RunFile, usize), String> {
+    #[derive(Deserialize)]
+    struct Tag {
+        r#type: String,
+    }
     // Lossy so a final line cut inside a multibyte character is a warning, not a failure.
     let text = String::from_utf8_lossy(bytes);
     let mut lines = text
@@ -268,8 +302,15 @@ pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
         Err(e) => return Err(format!("line 1: {e}")),
     };
     let rest: Vec<(usize, &str)> = lines.collect();
-    let (mut trials, mut end, mut warnings) = (Vec::new(), None, Vec::new());
+    let (mut trials, mut end, mut warnings, mut skimmed) = (Vec::new(), None, Vec::new(), 0);
     for (i, (n, line)) in rest.iter().enumerate() {
+        if skim
+            && i + 2 < rest.len()
+            && serde_json::from_str::<Tag>(line).is_ok_and(|t| t.r#type == "trial")
+        {
+            skimmed += 1;
+            continue;
+        }
         match serde_json::from_str::<Line>(line) {
             Ok(Line::Trial(trial)) => trials.push(trial),
             Ok(Line::End(record)) => end = Some(record),
@@ -299,12 +340,13 @@ pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
         }
     }
     trials.sort_by_key(|t| t.seq);
-    Ok(RunFile {
+    let run = RunFile {
         manifest,
         trials,
         end,
         warnings,
-    })
+    };
+    Ok((run, skimmed))
 }
 
 /// What went wrong: the provider's message when the body has one, else a cut of the raw body.
@@ -497,6 +539,38 @@ mod tests {
         assert_eq!(run.trials.len(), 1);
         assert_eq!(run.warnings.len(), 1);
         assert!(run.warnings[0].contains("line 3"), "{:?}", run.warnings);
+    }
+
+    #[test]
+    fn a_summary_counts_trials_and_tolerates_a_partial_file() {
+        let end = Line::End(EndRecord {
+            state: RunState::Complete,
+            finished_unix_ms: 9,
+        });
+        let summary =
+            read_summary(file(&[manifest(4), trial(0), trial(1), trial(2), end]).as_bytes());
+        let summary = summary.unwrap();
+        assert_eq!(summary.trials, 3);
+        assert_eq!(summary.state(), RunState::Complete);
+        assert_eq!(summary.manifest.planned_trials, 4);
+
+        // No end line: partial. A cut last line is not a Trial, however many lines precede it.
+        let whole = file(&[manifest(9), trial(0), trial(1), trial(2), trial(3)]);
+        let summary = read_summary(whole.as_bytes()).unwrap();
+        assert_eq!((summary.trials, summary.state()), (4, RunState::Partial));
+        let cut = format!("{whole}{}", &encode(&trial(4))[..30]);
+        assert_eq!(read_summary(cut.as_bytes()).unwrap().trials, 4);
+        // Same answers as the full read.
+        assert_eq!(read_run(cut.as_bytes()).unwrap().trials.len(), 4);
+
+        // An unreadable middle line is still an error; a bad manifest is too.
+        let middle = format!(
+            "{}{{oops\n{}",
+            file(&[manifest(2)]),
+            file(&[trial(0), trial(1)])
+        );
+        assert!(read_summary(middle.as_bytes()).is_err());
+        assert!(read_summary(b"").is_err());
     }
 
     #[test]
