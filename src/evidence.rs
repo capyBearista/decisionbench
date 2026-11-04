@@ -41,8 +41,9 @@ pub struct Evidence {
     pub dataset: Hashed,
     pub instructions: InstructionsRecord,
     pub grading_revision: u32,
-    /// With the effective URL filled in.
     pub candidate: Candidate,
+    /// The URL the request actually went to (route identity).
+    pub url: String,
     pub case_id: String,
     pub target: Target,
     /// The label as it was when the request was made.

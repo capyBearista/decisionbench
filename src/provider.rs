@@ -52,6 +52,11 @@ pub fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+// Test hook only: lets the CLI tests reach a local stub. It also redirects the API key, so never set it outside tests.
+pub fn request_url(provider: Provider) -> String {
+    env_nonempty("DECISIONBENCH_TEST_BASE_URL").unwrap_or_else(|| provider.url().to_string())
+}
+
 /// A Decision Model reached through one Provider Route; configured as a `[[candidate]]` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,14 +68,6 @@ pub struct Candidate {
     pub provider: Provider,
     /// The model id sent on the wire.
     pub model: String,
-    /// Overrides the provider's default URL (proxies, tests).
-    pub url: Option<String>,
-}
-
-impl Candidate {
-    pub fn effective_url(&self) -> &str {
-        self.url.as_deref().unwrap_or(self.provider.url())
-    }
 }
 
 #[derive(Deserialize)]
@@ -289,7 +286,5 @@ mod tests {
         let one = "[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n";
         let err = parse_candidates(&format!("{one}{one}")).unwrap_err();
         assert!(err.contains("duplicate candidate name `a`"), "{err}");
-        let found = parse_candidates(one).unwrap();
-        assert_eq!(found[0].effective_url(), Provider::Zen.url());
     }
 }
