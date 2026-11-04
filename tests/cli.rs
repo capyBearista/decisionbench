@@ -1795,9 +1795,10 @@ const SIX_TRIALS: [&str; 10] = [
 
 #[test]
 fn concurrency_bounds_simultaneous_requests() {
-    for (n, concurrency, expected_peak) in [(0, "2", 2), (1, "1", 1)] {
+    // The delay must dwarf scheduling jitter so two workers reliably overlap.
+    for (n, concurrency, expected_peak, delay_ms) in [(0, "2", 2, 1000), (1, "1", 1, 100)] {
         let stub = scripted(vec![
-            Reply::new(200, OPENROUTER_REPLY).delayed(Duration::from_millis(400)),
+            Reply::new(200, OPENROUTER_REPLY).delayed(Duration::from_millis(delay_ms)),
         ]);
         let eval = openrouter_eval(&format!("concurrency-{n}"), &stub);
         let out = eval.run(
@@ -1872,10 +1873,17 @@ impl Live {
         }
     }
 
-    fn sigint(&self) {
+    fn signal(&self, name: &str) {
         let pid = self.child.id().to_string();
-        let sent = Command::new("kill").args(["-INT", &pid]).status().unwrap();
+        let sent = Command::new("kill")
+            .args([&format!("-{name}"), &pid])
+            .status()
+            .unwrap();
         assert!(sent.success());
+    }
+
+    fn sigint(&self) {
+        self.signal("INT");
     }
 
     fn wait_for_stderr(&self, needle: &str) {
@@ -1915,13 +1923,22 @@ impl Live {
 
 #[test]
 fn one_sigint_finishes_in_flight_trials_then_ends_partial_with_exit_130() {
+    one_signal_ends_partial_with_exit_130("INT", "sigint-once");
+}
+
+#[test]
+fn one_sigterm_finishes_in_flight_trials_then_ends_partial_with_exit_130() {
+    one_signal_ends_partial_with_exit_130("TERM", "sigterm-once");
+}
+
+fn one_signal_ends_partial_with_exit_130(signal: &str, name: &str) {
     let stub = scripted(vec![
         Reply::new(200, OPENROUTER_REPLY).delayed(Duration::from_secs(1)),
     ]);
-    let eval = openrouter_eval("sigint-once", &stub);
+    let eval = openrouter_eval(name, &stub);
     let live = Live::start(&eval, &args_with(&C002_OPUS[..6], &["--repetitions", "3"]));
     stub.next(); // the handler is installed before the first request goes out
-    live.sigint();
+    live.signal(signal);
     let (code, err) = live.finish(Duration::from_secs(10));
     assert_eq!(code, Some(130), "{err}");
     assert!(

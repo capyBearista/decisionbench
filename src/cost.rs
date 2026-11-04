@@ -45,7 +45,8 @@ pub enum UnknownReason {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttemptCost {
     Known(f64),
-    /// A non-2xx reply or transport error; counted as 0 on the assumption that it was not billed.
+    /// A non-2xx reply or a transport error before any 2xx; counted as 0 on the assumption that it
+    /// was not billed.
     FailedUnbilled,
     Unknown(UnknownReason),
 }
@@ -54,6 +55,12 @@ pub fn attempt_cost(price: Option<&Price>, attempt: &Attempt) -> AttemptCost {
     let Some(price) = price else {
         return AttemptCost::Unknown(UnknownReason::NoPrice);
     };
+    // Headers arrived with 2xx but the body was lost: the provider did the work, usage unknown.
+    let cut_after_2xx = attempt.disposition == Disposition::TransportError
+        && attempt.http_status.is_some_and(|s| (200..300).contains(&s));
+    if cut_after_2xx {
+        return AttemptCost::Unknown(UnknownReason::NoUsage);
+    }
     if attempt.disposition != Disposition::Answered {
         return AttemptCost::FailedUnbilled;
     }
@@ -289,6 +296,23 @@ mod tests {
         for a in [provider, transport] {
             assert_eq!(attempt_cost(Some(&p), &a), AttemptCost::FailedUnbilled);
         }
+    }
+
+    #[test]
+    fn a_transport_error_after_a_2xx_status_has_unknown_usage() {
+        let p = price(0.04, 0.08, 0.01);
+        let cut = Attempt {
+            error: Some("body read failed".into()),
+            ..attempt(Disposition::TransportError, Some(200), None)
+        };
+        assert_eq!(
+            attempt_cost(Some(&p), &cut),
+            AttemptCost::Unknown(UnknownReason::NoUsage)
+        );
+        assert_eq!(
+            attempt_cost(None, &cut),
+            AttemptCost::Unknown(UnknownReason::NoPrice)
+        );
     }
 
     #[test]

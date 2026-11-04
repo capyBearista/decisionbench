@@ -416,7 +416,13 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         state,
         finished_unix_ms: now_unix_ms(),
     };
-    if let Err(e) = evidence::append(&mut file, &path, &Line::End(end.clone())) {
+    let end_line = Line::End(end.clone());
+    let written = if write_error.is_some() {
+        evidence::append_on_new_line(&mut file, &path, &end_line)
+    } else {
+        evidence::append(&mut file, &path, &end_line)
+    };
+    if let Err(e) = written {
         write_error.get_or_insert(e);
         state = RunState::Failed;
         end.state = state;

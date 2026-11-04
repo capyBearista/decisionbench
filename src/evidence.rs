@@ -188,7 +188,16 @@ pub fn encode(line: &Line) -> String {
 /// Appends one line with a single `write_all`. If that fails the reply is already paid for, so
 /// the line goes to stderr rather than being lost.
 pub fn append(file: &mut File, path: &Path, line: &Line) -> Result<(), String> {
-    let text = encode(line);
+    write_text(file, path, encode(line))
+}
+
+/// Like `append`, for after a failed write: that write may have left a partial line with no
+/// newline, so this line starts on a fresh one instead of being glued onto it.
+pub fn append_on_new_line(file: &mut File, path: &Path, line: &Line) -> Result<(), String> {
+    write_text(file, path, format!("\n{}", encode(line)))
+}
+
+fn write_text(file: &mut File, path: &Path, text: String) -> Result<(), String> {
     file.write_all(text.as_bytes()).map_err(|e| {
         eprint!("{text}");
         format!("cannot write {}: {e}", path.display())
@@ -214,7 +223,8 @@ fn unsupported_schema(value: &Value) -> String {
 }
 
 /// Reads a Run file. A missing end line and a truncated last line are tolerated (the process may
-/// have died mid-write); an unparseable line anywhere else is an error.
+/// have died mid-write); an unparseable line anywhere else is an error, except one directly
+/// followed by an `end` line with state `failed` (a write failed and left a partial line).
 pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
     // Lossy so a final line cut inside a multibyte character is a warning, not a failure.
     let text = String::from_utf8_lossy(bytes);
@@ -246,7 +256,23 @@ pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
             Err(e) if i + 1 == rest.len() => {
                 warnings.push(format!("ignoring unreadable last line {}: {e}", n + 1));
             }
-            Err(e) => return Err(format!("line {}: {e}", n + 1)),
+            Err(e) => {
+                let failed_end_follows = matches!(
+                    rest.get(i + 1)
+                        .map(|(_, next)| serde_json::from_str::<Line>(next)),
+                    Some(Ok(Line::End(EndRecord {
+                        state: RunState::Failed,
+                        ..
+                    })))
+                );
+                if !failed_end_follows {
+                    return Err(format!("line {}: {e}", n + 1));
+                }
+                warnings.push(format!(
+                    "ignoring partial line {} left by a failed write: {e}",
+                    n + 1
+                ));
+            }
         }
     }
     trials.sort_by_key(|t| t.seq);
@@ -451,6 +477,37 @@ mod tests {
         let twice = file(&[manifest(1), manifest(1)]);
         assert!(read_run(twice.as_bytes()).is_err());
         assert!(read_run(b"").is_err());
+    }
+
+    #[test]
+    fn a_partial_line_before_a_failed_end_line_is_a_warning() {
+        let end = Line::End(EndRecord {
+            state: RunState::Failed,
+            finished_unix_ms: 9,
+        });
+        let partial = &encode(&trial(1))[..30];
+        let text = format!(
+            "{}{partial}\n{}",
+            file(&[manifest(2), trial(0)]),
+            encode(&end)
+        );
+        let run = read_run(text.as_bytes()).unwrap();
+        assert_eq!(run.trials.len(), 1);
+        assert_eq!(run.end.unwrap().state, RunState::Failed);
+        assert_eq!(run.warnings.len(), 1);
+        assert!(run.warnings[0].contains("line 3"), "{:?}", run.warnings);
+
+        // A glued end line (the old behavior) is unreadable, and a complete end does not excuse it.
+        let complete = Line::End(EndRecord {
+            state: RunState::Complete,
+            finished_unix_ms: 9,
+        });
+        let text = format!(
+            "{}{partial}\n{}",
+            file(&[manifest(2), trial(0)]),
+            encode(&complete)
+        );
+        assert!(read_run(text.as_bytes()).is_err());
     }
 
     #[test]
