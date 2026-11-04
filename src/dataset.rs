@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// The bundled dataset (`datasets/cases.json`).
 pub const BUNDLED_CASES: &[u8] = include_bytes!("../datasets/cases.json");
@@ -20,15 +20,21 @@ pub enum Effort {
 }
 
 impl Effort {
+    /// Every effort, in scale order.
+    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
     pub(crate) fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "low" => Self::Low,
-            "medium" => Self::Medium,
-            "high" => Self::High,
-            "xhigh" => Self::Xhigh,
-            "max" => Self::Max,
-            _ => return None,
-        })
+        Self::ALL.into_iter().find(|e| e.name() == name)
     }
 }
 
@@ -53,6 +59,22 @@ impl<'de> Deserialize<'de> for EffortRange {
             )));
         }
         Ok(Self { from, to })
+    }
+}
+
+impl std::fmt::Display for EffortRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.from == self.to {
+            f.write_str(self.from.name())
+        } else {
+            write!(f, "{}-{}", self.from.name(), self.to.name())
+        }
+    }
+}
+
+impl Serialize for EffortRange {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 

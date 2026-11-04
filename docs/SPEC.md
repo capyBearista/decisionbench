@@ -4,7 +4,7 @@
 **Scope:** Initial standalone release  
 **Sources:** Agreed design interview; [effortless source benchmark](https://github.com/capyBearista/effortless/blob/99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c/bench/judge-cases.json); [effortless judge implementation](https://github.com/capyBearista/effortless/blob/main/hooks/register.tsx); [deferred Valbench integration](https://github.com/capyBearista/decisionbench/issues/1)  
 **Domain terminology:** [GLOSSARY.md](../GLOSSARY.md)  
-**Architecture decisions:** [ADR-0001](adr/0001-standalone-engine.md), [ADR-0002](adr/0002-raw-model-relative-evaluation.md), [ADR-0003](adr/0003-owned-per-target-effort-ranges.md)
+**Architecture decisions:** [ADR-0001](adr/0001-standalone-engine.md), [ADR-0002](adr/0002-raw-model-relative-evaluation.md), [ADR-0003](adr/0003-owned-per-target-effort-ranges.md), [ADR-0004](adr/0004-judge-instructions-axis.md)
 
 ## Problem statement
 
@@ -79,7 +79,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 4. Evaluation requests and independence
 
-- Each **Trial** is one **Candidate × Case × Target Model × repetition**; send an **independent Decisions API request** for each trial, never the full dataset as one request.
+- Each **Trial** is one **Candidate × Judge Instructions × Case × Target Model × repetition**; send an **independent Decisions API request** for each trial, never the full dataset as one request.
 - For an exact Sonnet-versus-Opus paired comparison, use the same task, relevant conversation context, question wording, and evaluation settings; change the target Claude model identifier. Preserve any known provider-envelope differences as evidence.
 - **Do not send the previous/current reasoning effort as a judging input**. Before implementing, establish whether each provider accepts omission or requires an explicit null; never substitute a meaningful effort that can anchor the judge.
 - Relevant recent conversation context **does** matter, especially for follow-up/answer cases. Preserve and send it as defined by the dataset revision.
@@ -87,13 +87,20 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 - Parse and preserve the **raw effort prediction** separately from the normalized effort and any future **effective decision** produced by a selected policy. The initial accuracy score uses the raw normalized model prediction, not a post-policy decision.
 - Mark an unsupported choice or missing effort as **invalid/unanswered**, not as correct or as a fallback effort.
 
+### 4a. Provider routes and Judge Instructions (checked 2026-11-03)
+
+- Both routes document the same body: `{"model", "state", "questions"}`. decisionbench sends `state` as `{"target_model", "recent_conversation" (only when the Case has context), "next_message"}` and one `choice` question, `effort`, whose instructions and per-effort criteria come from the selected Judge Instructions. `state` is free-form, so `current_effort` and `current_model` are **omitted**, not nulled; OpenRouter accepted such a request live.
+- **OpenRouter** (`POST https://openrouter.ai/api/alpha/decisions`, `Authorization: Bearer` with `OPENROUTER_API_KEY`, required). A 200 reply is `{"id", "model", "provider", "answers": {"effort": {"choice", "confidence", "probabilities"}}, "usage": {"input_tokens", "output_tokens", "cost"}}`. The reply's `model` can be a dated revision of the requested one (`typesafe/jev-1.13` answered as `typesafe/jev-1.13-20260917`) and `provider` names the upstream host; both are kept as evidence. Errors are `{"error": {"code", "message"}}`.
+- **OpenCode Zen** (`POST https://opencode.ai/inference/systemone/v1/systemone`; the older `/zen/v1/systemone` shares its quota). Free models (`jev-1.13-free`) accept requests without a key; paid models answer `401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}` without `OPENCODE_API_KEY`. Errors are `{"type": "error", "error": {"type", "message"}}`; a used-up free quota is `429 FreeUsageLimitError` with `Retry-After`. **Not yet observed:** a successful Zen reply, and so whether Zen accepts a `state` without `current_effort` (only quota and auth errors have come back so far). The reply is assumed to match OpenRouter's `answers` shape; any other shape grades as invalid for a labelled target, and its raw reply is kept.
+- **Judge Instructions** are Markdown files (`prompts/<name>.md`): instructions first, then one `## <effort>` section per effort level, in scale order. They are selected per evaluation, recorded by name, SHA-256 and full text, and never edited through the CLI or TUI ([ADR-0004](adr/0004-judge-instructions-axis.md)). The bundled default, `neutral`, carries no effortless policy rules.
+
 ### 5. Execution, failures, and evidence
 
 - Default to **three independent logical trials scheduled per combination**, with configurable repetitions, timeouts and concurrency. Retries are bounded and configurable, not unlimited. Retry policy should identify retryable transport/status errors and distinguish them from valid but wrong predictions.
 - Every logical trial can contain one or more **physical Attempts**; record each attempt and its disposition. Do not discard timeouts/errors that precede a successful retry.
 - A run may finish **complete**, **partial/cancelled**, or **failed**. Cancellation preserves completed evidence and failure details. Avoid presenting partial results as equivalent to complete runs.
 - Provider errors, missing/invalid predictions, and wrong valid predictions have different meanings. Report **response correctness**, **coverage**, and **transport reliability** separately with honest denominators.
-- Persist an immutable **Run** manifest and attempt-level evidence with schema version, dataset revision and hash, judge task/prompt revision or hash, target model, provider route + wire model identifier, repetition/attempt identity, relevant request and response metadata, wall-clock timing, error categories, usage (if provided), and grading revision.
+- Persist an immutable **Run** manifest and attempt-level evidence with schema version, dataset revision and hash, Judge Instructions name, content hash and full text, target model, provider route + wire model identifier, repetition/attempt identity, relevant request and response metadata, wall-clock timing, error categories, usage (if provided), and grading revision.
 - Keep credentials, auth headers and tokens **out of result files and logs**. Raw response retention is local by default; warn that benchmark prompts/context may be sensitive. Explicitly document safe redaction and export behavior.
 - Reading an old run must not require a live provider or the TUI. Derived reports can be regenerated against an explicit new grading revision without mutating original evidence.
 
@@ -103,7 +110,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 - Otherwise **under** means the predicted effort is below the range, and **over** means above it. Ranges are contiguous, so there is no other kind of miss.
 - **Unscored** means there is no reviewed label. **Invalid** means a response did not yield a valid choice. **Provider failure** means the request failed. All are distinct from valid scored misses. A target with no label is unscored whatever the response; invalid applies only to labelled targets.
 - Report accuracy among **valid, scored predictions**, alongside eligible-case counts, invalid/unanswered counts, coverage, failure counts and run completion. Do not hide failures through denominator selection.
-- Always break out performance by **Sonnet vs Opus** (with each target's sample size; the initial labels are heavily Sonnet-weighted) and by **candidate/provider route**. Overall micro-average is optional and must not replace those splits.
+- Always break out performance by **Sonnet vs Opus** (with each target's sample size; the initial labels are heavily Sonnet-weighted) and by **candidate/provider route** and **Judge Instructions** (name and hash), so instruction sets can be compared side by side. Overall micro-average is optional and must not replace those splits.
 - Report **median and p95 latency** with clear definitions (per successful attempt vs full logical-trial elapsed time); include reliability, under/over counts, and repeat-to-repeat consistency. No arbitrary quality/latency/cost composite score.
 - Configure **manual per-route** input and output token prices per million tokens plus an optional fixed per-request fee. Snapshot the entered rates for a run. Compute observed costs only when all required usage/rate fields are present; otherwise mark missing/unknown. Do not fetch prices dynamically. Cost is informational, never an implicit grade.
 
@@ -155,8 +162,8 @@ Each implementation slice should be **independently demonstrable end to end**, n
 
 ## Outstanding verification tasks (not permission to guess)
 
-- Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field.
-- Verify effort choice options and response confidence/usage fields per route.
+- Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field. **Settled for OpenRouter** in #6/#7 (see §4a); **still open for Zen** until a successful reply is observed.
+- Verify effort choice options and response confidence/usage fields per route. **Settled for OpenRouter** (see §4a); **still open for Zen**.
 - Settle exact CLI flags, TUI keybindings, transport error taxonomy, and evidence schema field names during the relevant small implementation slices, while preserving the above domain-level invariants.
 
 ## Related work
