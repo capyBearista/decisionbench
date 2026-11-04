@@ -149,12 +149,13 @@ fn run_trial(spec: &TrialSpec, job: &Job, settings: &Settings, agent: &ureq::Age
 
 /// Runs the planned Trials on `settings.concurrency` workers, sending each finished record over
 /// `tx`, and returns when every worker is done. A worker checks `cancel` before taking a new
-/// Trial; a Trial already started finishes, retries included.
+/// Trial; a Trial already started finishes, retries included. `started` counts the Trials taken.
 pub fn execute(
     job: &Job,
     trials: &[TrialSpec],
     settings: &Settings,
     cancel: &AtomicBool,
+    started: &AtomicUsize,
     tx: Sender<TrialRecord>,
 ) {
     let agent = agent(Duration::from_secs(settings.timeout_secs));
@@ -169,6 +170,7 @@ pub fn execute(
                     let Some(spec) = trials.get(next.fetch_add(1, Ordering::Relaxed)) else {
                         break;
                     };
+                    started.fetch_add(1, Ordering::Relaxed);
                     if tx.send(run_trial(spec, job, settings, agent)).is_err() {
                         break;
                     }

@@ -1,10 +1,10 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::Arc;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -21,6 +21,10 @@ fn run(args: &[&str]) -> Output {
 
 /// Keys and proxies are cleared first so the host environment cannot leak into a test.
 fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    command_with_env(args, envs).output().expect("binary runs")
+}
+
+fn command_with_env(args: &[&str], envs: &[(&str, &str)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_decisionbench"));
     for name in [
         "OPENROUTER_API_KEY",
@@ -36,7 +40,7 @@ fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
         command.env_remove(name);
     }
     command.args(args).envs(envs.iter().copied());
-    command.output().expect("binary runs")
+    command
 }
 
 fn dataset_path() -> PathBuf {
@@ -620,12 +624,16 @@ impl Eval {
     }
 
     fn run(&self, extra: &[&str], envs: &[(&str, &str)]) -> Output {
+        self.command(extra, envs).output().expect("binary runs")
+    }
+
+    fn command(&self, extra: &[&str], envs: &[(&str, &str)]) -> Command {
         let mut args = vec!["run", "--config", self.config.to_str().unwrap()];
         args.extend(["--out", self.out_dir.to_str().unwrap()]);
         args.extend(extra);
         let mut envs = envs.to_vec();
         envs.push(("DECISIONBENCH_TEST_BASE_URL", &self.url));
-        run_with_env(&args, &envs)
+        command_with_env(&args, &envs)
     }
 
     /// The only evidence file written so far.
@@ -785,12 +793,12 @@ fn answered_hit_prints_the_summary_and_saves_jsonl_evidence() {
     let progress = stderr(&out);
     assert!(
         progress.contains(
-            "planned: 1 candidates × 1 instructions × 1 pairs (0 unlabelled skipped) × 1 repetitions = 1 trials, up to 2 requests"
+            "planned: 1 candidate × 1 instruction set × 1 pair (0 unlabelled skipped) × 1 repetition = 1 trial, up to 2 requests"
         ),
         "{progress}"
     );
     assert!(
-        progress.contains("[1/1] jev-openrouter neutral c002 opus #1: hit (1 attempts, "),
+        progress.contains("[1/1] jev-openrouter neutral c002 opus #1: hit (1 attempt, "),
         "{progress}"
     );
 
@@ -961,7 +969,7 @@ fn provider_failure_exits_3_and_keeps_the_raw_body() {
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     assert!(
         stderr(&out).contains(
-            "[1/1] jev-zen neutral c002 opus #1: provider_error (HTTP 429): Free usage limit reached. (1 attempts, "
+            "[1/1] jev-zen neutral c002 opus #1: provider_error (HTTP 429): Free usage limit reached. (1 attempt, "
         ),
         "{}",
         stderr(&out)
@@ -1613,7 +1621,7 @@ fn a_full_matrix_runs_every_trial_once_repetition_first() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
         stderr(&out).contains(
-            "planned: 2 candidates × 2 instructions × 4 pairs (0 unlabelled skipped) × 3 repetitions = 48 trials, up to 96 requests"
+            "planned: 2 candidates × 2 instruction sets × 4 pairs (0 unlabelled skipped) × 3 repetitions = 48 trials, up to 96 requests"
         ),
         "{}",
         stderr(&out)
@@ -1689,7 +1697,7 @@ fn unlabelled_pairs_are_skipped_by_default_and_counted() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
         stderr(&out).contains(
-            "planned: 1 candidates × 1 instructions × 3 pairs (1 unlabelled skipped) × 1 repetitions = 3 trials, up to 6 requests"
+            "planned: 1 candidate × 1 instruction set × 3 pairs (1 unlabelled skipped) × 1 repetition = 3 trials, up to 6 requests"
         ),
         "{}",
         stderr(&out)
@@ -1723,7 +1731,7 @@ fn include_unscored_adds_the_unlabelled_pairs() {
     );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
-        stderr(&out).contains("4 pairs (0 unlabelled skipped) × 1 repetitions = 4 trials"),
+        stderr(&out).contains("4 pairs (0 unlabelled skipped) × 1 repetition = 4 trials"),
         "{}",
         stderr(&out)
     );
@@ -1824,6 +1832,181 @@ fn timeout_gives_a_transport_error_without_waiting_for_the_reply() {
     assert_eq!(attempt["disposition"], "transport_error");
     assert!((900..2500).contains(&attempt["latency_ms"].as_u64().unwrap()));
     assert_eq!(eval.manifest()["settings"]["timeout_secs"], 1);
+}
+
+// ---- cancellation ----
+
+/// A `run` started in the background, with its stderr collected by a thread.
+struct Live {
+    child: Child,
+    stderr: Arc<Mutex<String>>,
+    reader: std::thread::JoinHandle<()>,
+}
+
+impl Live {
+    fn start(eval: &Eval, extra: &[&str]) -> Self {
+        let mut command = eval.command(extra, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("binary starts");
+        let mut pipe = child.stderr.take().unwrap();
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&stderr);
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0; 1024];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&chunk[..n]));
+            }
+        });
+        Self {
+            child,
+            stderr,
+            reader,
+        }
+    }
+
+    fn sigint(&self) {
+        let pid = self.child.id().to_string();
+        let sent = Command::new("kill").args(["-INT", &pid]).status().unwrap();
+        assert!(sent.success());
+    }
+
+    fn wait_for_stderr(&self, needle: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !self.stderr.lock().unwrap().contains(needle) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no `{needle}` in stderr: {}",
+                self.stderr.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The exit code and everything written to stderr; kills the child if it outlives `limit`.
+    fn finish(mut self, limit: Duration) -> (Option<i32>, String) {
+        let deadline = std::time::Instant::now() + limit;
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                self.child.kill().unwrap();
+                self.child.wait().unwrap();
+                panic!(
+                    "run did not exit within {limit:?}: {}",
+                    self.stderr.lock().unwrap()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        self.reader.join().unwrap();
+        let stderr = self.stderr.lock().unwrap().clone();
+        (status.code(), stderr)
+    }
+}
+
+#[test]
+fn one_sigint_finishes_in_flight_trials_then_ends_partial_with_exit_130() {
+    let stub = scripted(vec![
+        Reply::new(200, OPENROUTER_REPLY).delayed(Duration::from_secs(1)),
+    ]);
+    let eval = openrouter_eval("sigint-once", &stub);
+    let live = Live::start(&eval, &args_with(&C002_OPUS[..6], &["--repetitions", "3"]));
+    stub.next(); // the handler is installed before the first request goes out
+    live.sigint();
+    let (code, err) = live.finish(Duration::from_secs(10));
+    assert_eq!(code, Some(130), "{err}");
+    assert!(
+        err.contains("cancelling: waiting for 1 in-flight trial; press Ctrl-C again to stop now"),
+        "{err}"
+    );
+    assert_eq!(err.matches("cancelling:").count(), 1, "{err}");
+    let trials = eval.trials();
+    assert_eq!(
+        trials.len(),
+        1,
+        "the in-flight trial is recorded, no new one starts"
+    );
+    assert_eq!(trials[0]["attempts"][0]["disposition"], "answered");
+    assert_eq!(eval.end()["state"], "partial");
+    let shown = run(&["show", eval.file().to_str().unwrap()]);
+    assert_eq!(shown.status.code(), Some(0), "{}", stderr(&shown));
+    assert!(
+        stdout(&shown).starts_with("run: partial\ntrials: 1 recorded of 3 planned\n"),
+        "{}",
+        stdout(&shown)
+    );
+}
+
+#[test]
+fn a_cancelled_trial_still_makes_its_retries() {
+    let stub = scripted(vec![
+        Reply::new(503, r#"{"error":{"message":"busy"}}"#),
+        Reply::new(200, OPENROUTER_REPLY),
+    ]);
+    let eval = openrouter_eval("sigint-retry", &stub);
+    let live = Live::start(&eval, &args_with(&C002_OPUS[..6], &["--repetitions", "3"]));
+    stub.next();
+    live.sigint(); // lands in or before the 1 s retry pause
+    let (code, err) = live.finish(Duration::from_secs(10));
+    assert_eq!(code, Some(130), "{err}");
+    let trials = eval.trials();
+    assert_eq!(trials.len(), 1);
+    assert_eq!(trials[0]["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(trials[0]["attempts"][1]["disposition"], "answered");
+}
+
+#[test]
+fn a_second_sigint_exits_130_at_once_and_leaves_no_end_line() {
+    let stub = scripted(vec![
+        Reply::new(200, OPENROUTER_REPLY).delayed(Duration::from_secs(5)),
+    ]);
+    let eval = openrouter_eval("sigint-twice", &stub);
+    let live = Live::start(&eval, &args_with(&C002_OPUS[..6], &["--repetitions", "3"]));
+    stub.next();
+    live.sigint();
+    live.wait_for_stderr("cancelling:");
+    let clock = std::time::Instant::now();
+    live.sigint();
+    let (code, err) = live.finish(Duration::from_secs(3));
+    assert_eq!(code, Some(130), "{err}");
+    assert!(
+        clock.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        clock.elapsed()
+    );
+    let lines = eval.lines();
+    assert_eq!(lines.len(), 1, "only the run line");
+    let shown = run(&["show", eval.file().to_str().unwrap()]);
+    assert!(
+        stdout(&shown).starts_with("run: partial (interrupted: no end record)\n"),
+        "{}",
+        stdout(&shown)
+    );
+}
+
+#[test]
+fn a_sigint_during_the_last_trial_still_ends_complete() {
+    let stub = scripted(vec![
+        Reply::new(200, OPENROUTER_REPLY).delayed(Duration::from_secs(1)),
+    ]);
+    let eval = openrouter_eval("sigint-last", &stub);
+    let live = Live::start(&eval, &C002_OPUS);
+    stub.next();
+    live.sigint();
+    let (code, err) = live.finish(Duration::from_secs(10));
+    // The state follows recorded == planned, not the cancel flag.
+    assert_eq!(code, Some(0), "{err}");
+    assert!(err.contains("cancelling:"), "{err}");
+    assert_eq!(eval.end()["state"], "complete");
 }
 
 // ---- retries ----

@@ -95,7 +95,7 @@ pub fn fmt_usd(x: f64) -> String {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cost::{CostTally, attempt_cost};
+use crate::cost::{CostTally, attempt_cost, plural};
 use crate::dataset::EffortRange;
 use crate::grade::{Grade, Tally, Target, grade};
 use crate::provider::{Attempt, Candidate, Disposition, normalize};
@@ -112,13 +112,13 @@ impl TrialRecord {
             (None, None) => "no attempts".to_string(),
         };
         format!(
-            "[{done}/{total}] {} {} {} {} #{}: {outcome} ({} attempts, {} ms)",
+            "[{done}/{total}] {} {} {} {} #{}: {outcome} ({}, {} ms)",
             self.candidate,
             self.instructions.name,
             self.case_id,
             self.target,
             self.repetition,
-            self.attempts.len(),
+            plural(self.attempts.len(), "attempt", "attempts"),
             self.elapsed_ms
         )
     }

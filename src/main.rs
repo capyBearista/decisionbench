@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 
 use clap::{Parser, Subcommand};
+use decisionbench::cost::plural;
 use decisionbench::dataset::{BUNDLED_CASES, Case, parse_cases, summarize};
 use decisionbench::evidence::{
     self, CandidateRecord, EndRecord, GRADING_REVISION, Hashed, InstructionsRecord, Line, Manifest,
@@ -336,13 +337,22 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
     };
     evidence::append(&mut file, &path, &Line::Run(manifest.clone()))?;
     eprintln!(
-        "planned: {} candidates × {} instructions × {} pairs ({} unlabelled skipped) × {} repetitions = {planned} trials, up to {} requests",
-        candidates.len(),
-        instructions.len(),
-        plan.pairs,
+        "planned: {} × {} × {} ({} unlabelled skipped) × {} = {}, up to {}",
+        plural(candidates.len(), "candidate", "candidates"),
+        plural(instructions.len(), "instruction set", "instruction sets"),
+        plural(plan.pairs, "pair", "pairs"),
         plan.skipped,
-        args.settings.repetitions,
-        planned * (1 + args.settings.retries as usize),
+        plural(
+            args.settings.repetitions as usize,
+            "repetition",
+            "repetitions"
+        ),
+        plural(planned, "trial", "trials"),
+        plural(
+            planned * (1 + args.settings.retries as usize),
+            "request",
+            "requests"
+        ),
     );
 
     let job = Job {
@@ -352,13 +362,34 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         instructions: &instructions,
         cases: &cases,
     };
-    let cancel = AtomicBool::new(false);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::new(AtomicUsize::new(0));
+    {
+        let (cancel, started, recorded) = (cancel.clone(), started.clone(), recorded.clone());
+        let signals = AtomicUsize::new(0);
+        ctrlc::set_handler(move || {
+            if signals.fetch_add(1, Ordering::Relaxed) > 0 {
+                std::process::exit(130);
+            }
+            cancel.store(true, Ordering::Relaxed);
+            let in_flight = started
+                .load(Ordering::Relaxed)
+                .saturating_sub(recorded.load(Ordering::Relaxed));
+            eprintln!(
+                "cancelling: waiting for {}; press Ctrl-C again to stop now",
+                plural(in_flight, "in-flight trial", "in-flight trials")
+            );
+        })
+        .map_err(|e| format!("cannot install the Ctrl-C handler: {e}"))?;
+    }
     let (tx, rx) = mpsc::channel();
     let mut trials = Vec::new();
     let mut write_error: Option<String> = None;
     std::thread::scope(|scope| {
-        let (job, specs, settings, cancel) = (&job, &plan.trials, &args.settings, &cancel);
-        scope.spawn(move || run::execute(job, specs, settings, cancel, tx));
+        let (job, specs, settings) = (&job, &plan.trials, &args.settings);
+        let (cancel, started) = (&*cancel, &*started);
+        scope.spawn(move || run::execute(job, specs, settings, cancel, started, tx));
         for trial in rx {
             eprintln!("{}", trial.progress(trials.len() + 1, planned));
             let line = Line::Trial(trial.clone());
@@ -370,6 +401,7 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
                 cancel.store(true, Ordering::Relaxed);
             }
             trials.push(trial);
+            recorded.store(trials.len(), Ordering::Relaxed);
         }
     });
 
