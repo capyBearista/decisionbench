@@ -10,6 +10,3 @@ repository = "https://github.com/capyBearista/decisionbench"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[dev-dependencies]
-sha2 = "0.11"

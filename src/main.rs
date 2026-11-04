@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use decisionbench::dataset::{EFFORTLESS_SOURCE, EFFORTLESS_SOURCE_NAME, parse_source};
+use decisionbench::dataset::{BUNDLED_CASES, parse_cases, summarize};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -20,9 +20,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DatasetCommand {
-    /// Validate a source dataset and print a summary (offline).
+    /// Validate a dataset file and print a summary (offline).
     Inspect {
-        /// Source fixture to inspect; defaults to the bundled effortless dataset.
+        /// Dataset file to inspect; defaults to the bundled dataset.
         path: Option<PathBuf>,
     },
 }
@@ -30,10 +30,7 @@ enum DatasetCommand {
 fn main() -> ExitCode {
     let Command::Dataset(DatasetCommand::Inspect { path }) = Cli::parse().command;
     let (name, bytes) = match &path {
-        None => (
-            EFFORTLESS_SOURCE_NAME.to_string(),
-            EFFORTLESS_SOURCE.to_vec(),
-        ),
+        None => ("bundled cases".to_string(), BUNDLED_CASES.to_vec()),
         Some(p) => match std::fs::read(p) {
             Ok(bytes) => (p.display().to_string(), bytes),
             Err(e) => {
@@ -42,9 +39,9 @@ fn main() -> ExitCode {
             }
         },
     };
-    match parse_source(&bytes) {
-        Ok(dataset) => {
-            print!("dataset: {name}\n{}", dataset.summary());
+    match parse_cases(&bytes) {
+        Ok(cases) => {
+            print!("dataset: {name}\n{}", summarize(&cases));
             ExitCode::SUCCESS
         }
         Err(e) => {

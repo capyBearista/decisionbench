@@ -1,2 +1,0 @@
-# Keep fixture bytes exact (no line-ending conversion); changes from upstream are recorded in each SOURCE.md.
-datasets/** -text

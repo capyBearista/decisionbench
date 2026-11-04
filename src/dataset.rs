@@ -1,63 +1,76 @@
-//! Source Cases from the original effortless benchmark fixture.
+//! The benchmark dataset: Cases with an acceptable-effort range per Target Model (ADR-0003).
 //!
-//! Parsing only reads the source; the bytes are never rewritten. `current.effort`
-//! is historical session metadata kept as provenance, never a judging input (ADR-0002).
+//! Cases carry no session state; current effort is never a judging input (ADR-0002).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 
-/// The original effortless fixture; its one documented change is in `datasets/effortless/SOURCE.md`.
-pub const EFFORTLESS_SOURCE: &[u8] = include_bytes!("../datasets/effortless/judge-cases.json");
+/// The bundled dataset (`datasets/cases.json`).
+pub const BUNDLED_CASES: &[u8] = include_bytes!("../datasets/cases.json");
 
-/// Human-readable identity of [`EFFORTLESS_SOURCE`].
-pub const EFFORTLESS_SOURCE_NAME: &str = "effortless judge-cases (capyBearista/effortless@99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c, label order normalized)";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TargetModel {
-    Sonnet,
-    Opus,
-}
-
-/// Variant order is the effort order; `parse_source` relies on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Variant order is the effort order; range validation relies on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Effort {
     Low,
     Medium,
     High,
     Xhigh,
+    Max,
+}
+
+impl Effort {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::Xhigh,
+            "max" => Self::Max,
+            _ => return None,
+        })
+    }
+}
+
+/// Contiguous acceptable efforts, written `"max"` or `"low-high"` (inclusive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffortRange {
+    pub from: Effort,
+    pub to: Effort,
+}
+
+impl<'de> Deserialize<'de> for EffortRange {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let (from, to) = text.split_once('-').unwrap_or((&text, &text));
+        let effort = |name: &str| {
+            Effort::parse(name).ok_or_else(|| de::Error::custom(format!("unknown effort `{name}`")))
+        };
+        let (from, to) = (effort(from)?, effort(to)?);
+        if from > to {
+            return Err(de::Error::custom(format!(
+                "range `{text}` starts above its end"
+            )));
+        }
+        Ok(Self { from, to })
+    }
+}
+
+/// Labels per Target Model; an absent target is unscored.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Labels {
+    pub sonnet: Option<EffortRange>,
+    pub opus: Option<EffortRange>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceDataset {
-    pub about: String,
-    pub cases: Vec<SourceCase>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SourceCase {
+pub struct Case {
     pub id: String,
-    pub kind: String,
-    pub current: SessionState,
     pub message: String,
-    #[serde(default)]
     pub context: Option<String>,
-    /// Acceptable-effort set for `current.model`, listed in ascending effort order.
-    pub ok: Vec<Effort>,
-    #[serde(default)]
-    pub holdout: bool,
-}
-
-/// Session state recorded with a Source Case: the labelled Target Model and its historical effort.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionState {
-    pub model: TargetModel,
-    pub effort: Effort,
+    pub ok: Labels,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,73 +78,54 @@ pub struct Summary {
     pub cases: usize,
     pub sonnet_labels: usize,
     pub opus_labels: usize,
-    pub sonnet_holdout: usize,
-    pub opus_holdout: usize,
-    pub categories: BTreeMap<String, usize>,
 }
 
-/// Parses and validates a source fixture.
-pub fn parse_source(bytes: &[u8]) -> Result<SourceDataset, String> {
-    let dataset: SourceDataset = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    if dataset.cases.is_empty() {
+/// Parses and validates a dataset file.
+pub fn parse_cases(bytes: &[u8]) -> Result<Vec<Case>, String> {
+    let cases: Vec<Case> = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if cases.is_empty() {
         return Err("no cases".to_string());
     }
     let mut ids = HashSet::new();
-    for case in &dataset.cases {
+    let mut prompts = HashMap::new();
+    for case in &cases {
+        if case.id.is_empty() {
+            return Err("case with empty id".to_string());
+        }
+        if case.ok.sonnet.is_none() && case.ok.opus.is_none() {
+            return Err(format!("case {} has no labels", case.id));
+        }
         if !ids.insert(case.id.as_str()) {
             return Err(format!("duplicate case id {}", case.id));
         }
-        if case.ok.is_empty() {
-            return Err(format!("case {}: empty acceptable-effort set", case.id));
-        }
-        if !case.ok.windows(2).all(|pair| pair[0] < pair[1]) {
+        let prompt = (case.message.as_str(), case.context.as_deref());
+        if let Some(first) = prompts.insert(prompt, case.id.as_str()) {
             return Err(format!(
-                "case {}: acceptable efforts must be listed low to xhigh without repeats",
+                "case {} repeats the message and context of {first}",
                 case.id
             ));
         }
     }
-    Ok(dataset)
+    Ok(cases)
 }
 
-impl SourceDataset {
-    pub fn summary(&self) -> Summary {
-        let mut s = Summary {
-            cases: self.cases.len(),
-            sonnet_labels: 0,
-            opus_labels: 0,
-            sonnet_holdout: 0,
-            opus_holdout: 0,
-            categories: BTreeMap::new(),
-        };
-        for case in &self.cases {
-            let (labels, holdout) = match case.current.model {
-                TargetModel::Sonnet => (&mut s.sonnet_labels, &mut s.sonnet_holdout),
-                TargetModel::Opus => (&mut s.opus_labels, &mut s.opus_holdout),
-            };
-            *labels += 1;
-            *holdout += usize::from(case.holdout);
-            *s.categories.entry(case.kind.clone()).or_default() += 1;
-        }
-        s
+pub fn summarize(cases: &[Case]) -> Summary {
+    Summary {
+        cases: cases.len(),
+        sonnet_labels: cases.iter().filter(|c| c.ok.sonnet.is_some()).count(),
+        opus_labels: cases.iter().filter(|c| c.ok.opus.is_some()).count(),
     }
 }
 
 impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "cases: {}", self.cases)?;
-        writeln!(f, "sonnet labels: {}", self.sonnet_labels)?;
-        writeln!(f, "opus labels: {}", self.opus_labels)?;
-        writeln!(
-            f,
-            "holdout: {} (sonnet {}, opus {})",
-            self.sonnet_holdout + self.opus_holdout,
-            self.sonnet_holdout,
-            self.opus_holdout
-        )?;
-        writeln!(f, "categories:")?;
-        for (kind, count) in &self.categories {
-            writeln!(f, "  {kind}: {count}")?;
+        for (target, labels) in [("sonnet", self.sonnet_labels), ("opus", self.opus_labels)] {
+            writeln!(
+                f,
+                "{target} labels: {labels} ({} unscored)",
+                self.cases - labels
+            )?;
         }
         Ok(())
     }

@@ -1,10 +1,10 @@
 # decisionbench
 
-**Status: early implementation.** The Rust CLI can validate and summarize the bundled source dataset offline; benchmarking is not implemented yet.
+**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset offline; benchmarking is not implemented yet.
 
 ```sh
-cargo run -- dataset inspect            # bundled effortless dataset
-cargo run -- dataset inspect FILE.json  # another source fixture
+cargo run -- dataset inspect            # bundled dataset
+cargo run -- dataset inspect FILE.json  # another dataset file
 ```
 
 **decisionbench** is a planned standalone, terminal-first benchmark for **Decisions models**: specialized models asked to choose an appropriate reasoning-effort level for a target assistant. Its first benchmark evaluates effort-selection quality for **Claude Sonnet** and **Claude Opus** separately, not task-execution success.
@@ -13,8 +13,8 @@ cargo run -- dataset inspect FILE.json  # another source fixture
 
 - **Rust** benchmark engine shared by a **headless CLI** and **Ratatui TUI**.
 - Initial provider routes: **OpenCode Zen** and **OpenRouter Decisions API**; the same underlying model exposed through different routes is compared as a distinct candidate.
-- Versioned dataset starting from the original 75 [effortless labelled cases](https://github.com/capyBearista/effortless/blob/99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c/bench/judge-cases.json), preserving 20 holdouts and source provenance.
-- Independent, human-reviewed acceptable effort levels for Sonnet and Opus. Missing counterparts remain **unscored**. Each evaluation is a separate API request, with three logical trials per combination by default.
+- One versioned dataset (`datasets/cases.json`, 71 Cases) converted from the effortless benchmark cases.
+- Independent, human-reviewed acceptable effort ranges for Sonnet and Opus, such as `"low-high"`. Missing counterparts remain **unscored**. Each evaluation is a separate API request, with three logical trials per combination by default.
 - Accuracy and under/over-selection, reliability, latency, consistency, history and manually configured per-route cost reported **separately**. No composite leaderboard score.
 - Raw predictions and confidence retained separately from any future production fallback/retention policy. **Current effort is not supplied as a judging anchor.**
 - Local TOML configuration and versioned JSON/JSONL evidence. No web UI, mandatory service, Docker runtime, or coding-agent harness dependency.
@@ -25,12 +25,12 @@ The later [Valbench integration](https://github.com/capyBearista/decisionbench/i
 
 - [Product and engineering specification](docs/SPEC.md): behavior, evidence, scoring, scope and testing decisions.
 - [Domain glossary](GLOSSARY.md): canonical terminology for models, provider routes, cases, trials and evidence.
-- [Architecture decisions](docs/adr/): why the engine is standalone and why the benchmark grades raw, model-relative predictions.
+- [Architecture decisions](docs/adr/): why the engine is standalone, why the benchmark grades raw, model-relative predictions, and why labels are per-target effort ranges.
 - [Issue tracker convention](docs/agents/issue-tracker.md) and [domain-documentation map](docs/agents/domain.md): how future implementation work should use these documents.
 
 ## Source attribution
 
-The initial dataset is derived from the MIT-licensed [effortless project](https://github.com/capyBearista/effortless) by HeyCubit. The original fixture is bundled with its license and pinned source commit; its only change from upstream (label lists put in ascending effort order) is recorded in [datasets/effortless](datasets/effortless/SOURCE.md). The source dataset has **75 cases, 20 holdouts**, and includes labelled Sonnet/Opus examples.
+The dataset is derived from the MIT-licensed [effortless project](https://github.com/capyBearista/effortless) by HeyCubit. Its license is in [datasets/LICENSE-effortless](datasets/LICENSE-effortless).
 
 ## Project license
 

@@ -1,26 +1,10 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use sha2::{Digest, Sha256};
-
-const PINNED_SHA256: &str = "312f92df622edf082a109c81b9e2ca0054826c101ad0b1658a685efe54edc70e";
-
-const EXPECTED_SUMMARY: &str = "\
-dataset: effortless judge-cases (capyBearista/effortless@99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c, label order normalized)
-cases: 75
-sonnet labels: 67
-opus labels: 8
-holdout: 20 (sonnet 19, opus 1)
-categories:
-  answer: 14
-  big: 8
-  follow-up: 5
-  meta: 5
-  model-relative: 5
-  non-code: 7
-  normal: 13
-  short-but-big: 7
-  trivial: 11
+const EXPECTED_COUNTS: &str = "\
+cases: 71
+sonnet labels: 67 (4 unscored)
+opus labels: 8 (63 unscored)
 ";
 
 fn run(args: &[&str]) -> Output {
@@ -30,69 +14,59 @@ fn run(args: &[&str]) -> Output {
         .expect("binary runs")
 }
 
-fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("datasets/effortless/judge-cases.json")
+fn dataset_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("datasets/cases.json")
 }
 
 /// Writes `contents` to a uniquely named file in the target temp dir.
 fn temp_file(name: &str, contents: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let path = dir.join(name);
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::write(&path, contents).unwrap();
     path
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// Guards against accidental edits; the one deliberate change from upstream is listed in SOURCE.md.
-#[test]
-fn bundled_source_matches_pinned_digest() {
-    assert_eq!(
-        sha256_hex(decisionbench::dataset::EFFORTLESS_SOURCE),
-        PINNED_SHA256
+fn stdout_of_success(out: Output) -> String {
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8(out.stdout).unwrap()
 }
 
 #[test]
 fn inspect_bundled_dataset_prints_summary() {
-    let out = run(&["dataset", "inspect"]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), EXPECTED_SUMMARY);
+    let stdout = stdout_of_success(run(&["dataset", "inspect"]));
+    assert_eq!(stdout, format!("dataset: bundled cases\n{EXPECTED_COUNTS}"));
 }
 
 #[test]
 fn inspect_explicit_path_prints_same_counts() {
-    let path = fixture_path();
-    let out = run(&["dataset", "inspect", path.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+    let path = dataset_path();
+    let stdout = stdout_of_success(run(&["dataset", "inspect", path.to_str().unwrap()]));
+    assert_eq!(
+        stdout,
+        format!("dataset: {}\n{EXPECTED_COUNTS}", path.display())
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let (first, rest) = stdout.split_once('\n').unwrap();
-    assert_eq!(first, format!("dataset: {}", path.display()));
-    assert_eq!(rest, EXPECTED_SUMMARY.split_once('\n').unwrap().1);
 }
 
-fn case(fields: &str) -> String {
-    format!(r#"{{"about": "x", "cases": [{fields}]}}"#)
+const VALID: &str = r#"{"id":"c001","message":"m","ok":{"sonnet":"low"}}"#;
+
+fn dataset(cases: &str) -> String {
+    format!("[{cases}]")
 }
 
-const VALID: &str = r#"{"id":"a","kind":"trivial","current":{"model":"sonnet","effort":"low"},"message":"m","ok":["low"]}"#;
+fn inspect_file(name: &str, contents: &str) -> Output {
+    let path = temp_file(name, contents);
+    run(&["dataset", "inspect", path.to_str().unwrap()])
+}
+
+fn assert_accepted(name: &str, contents: &str) -> String {
+    stdout_of_success(inspect_file(name, contents))
+}
 
 fn assert_rejected(name: &str, contents: &str, expected_fragment: &str) {
-    let path = temp_file(name, contents);
-    let out = run(&["dataset", "inspect", path.to_str().unwrap()]);
+    let out = inspect_file(name, contents);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
     assert!(out.stdout.is_empty(), "no summary on failure");
@@ -103,19 +77,120 @@ fn assert_rejected(name: &str, contents: &str, expected_fragment: &str) {
 }
 
 #[test]
-fn minimal_valid_file_is_accepted() {
-    let path = temp_file("valid.json", &case(VALID));
-    let out = run(&["dataset", "inspect", path.to_str().unwrap()]);
+fn accepts_single_levels_ranges_and_partial_labels() {
+    let cases = [
+        VALID,
+        r#"{"id":"c002","message":"n","context":"user: hi","ok":{"sonnet":"max","opus":"low-max"}}"#,
+        r#"{"id":"c003","message":"o","ok":{"opus":"medium-xhigh"}}"#,
+    ];
+    let stdout = assert_accepted("valid.json", &dataset(&cases.join(",")));
     assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        stdout.ends_with("cases: 3\nsonnet labels: 2 (1 unscored)\nopus labels: 2 (1 unscored)\n"),
+        "{stdout}"
     );
 }
 
 #[test]
+fn rejects_unknown_effort() {
+    let bad = VALID.replace(r#""sonnet":"low""#, r#""sonnet":"huge""#);
+    assert_rejected("effort.json", &dataset(&bad), "unknown effort `huge`");
+}
+
+#[test]
+fn rejects_reversed_range() {
+    let bad = VALID.replace(r#""sonnet":"low""#, r#""sonnet":"high-low""#);
+    assert_rejected(
+        "reversed.json",
+        &dataset(&bad),
+        "range `high-low` starts above its end",
+    );
+}
+
+#[test]
+fn rejects_malformed_ranges() {
+    for (name, range, fragment) in [
+        ("trailing.json", "low-", "unknown effort ``"),
+        (
+            "three.json",
+            "low-medium-high",
+            "unknown effort `medium-high`",
+        ),
+    ] {
+        let bad = VALID.replace(r#""sonnet":"low""#, &format!(r#""sonnet":"{range}""#));
+        assert_rejected(name, &dataset(&bad), fragment);
+    }
+}
+
+#[test]
+fn rejects_unknown_target_model() {
+    let bad = VALID.replace(r#""sonnet":"low""#, r#""haiku":"low""#);
+    assert_rejected("target.json", &dataset(&bad), "unknown field `haiku`");
+}
+
+#[test]
+fn rejects_duplicate_target_model() {
+    let bad = VALID.replace(r#""sonnet":"low""#, r#""sonnet":"low","sonnet":"high""#);
+    assert_rejected(
+        "dup-target.json",
+        &dataset(&bad),
+        "duplicate field `sonnet`",
+    );
+}
+
+#[test]
+fn rejects_session_state_and_unknown_fields() {
+    for field in [
+        r#""current":{"model":"sonnet","effort":"low"}"#,
+        r#""kind":"trivial""#,
+    ] {
+        let bad = VALID.replace(r#""id":"c001""#, &format!(r#""id":"c001",{field}"#));
+        assert_rejected("unknown.json", &dataset(&bad), "unknown field");
+    }
+}
+
+#[test]
+fn rejects_missing_message() {
+    let bad = VALID.replace(r#","message":"m""#, "");
+    assert_rejected("missing.json", &dataset(&bad), "missing field `message`");
+}
+
+#[test]
+fn rejects_duplicate_ids() {
+    let second = VALID.replace(r#""message":"m""#, r#""message":"other""#);
+    assert_rejected(
+        "dup-id.json",
+        &dataset(&format!("{VALID},{second}")),
+        "duplicate case id c001",
+    );
+}
+
+#[test]
+fn rejects_duplicate_message_and_context() {
+    let second = VALID.replace("c001", "c002");
+    assert_rejected(
+        "dup-message.json",
+        &dataset(&format!("{VALID},{second}")),
+        "case c002 repeats the message and context of c001",
+    );
+}
+
+#[test]
+fn same_message_with_different_context_is_allowed() {
+    let second = VALID.replace("c001", "c002").replace(
+        r#""message":"m""#,
+        r#""message":"m","context":"user: earlier""#,
+    );
+    assert_accepted("context.json", &dataset(&format!("{VALID},{second}")));
+}
+
+#[test]
+fn rejects_empty_dataset() {
+    assert_rejected("empty.json", "[]", "no cases");
+}
+
+#[test]
 fn rejects_malformed_json() {
-    assert_rejected("malformed.json", "{\"cases\": [", "EOF");
+    assert_rejected("malformed.json", "[{", "EOF");
 }
 
 #[test]
@@ -135,87 +210,31 @@ fn usage_error_exits_2() {
 }
 
 #[test]
-fn rejects_empty_dataset() {
-    assert_rejected("empty.json", r#"{"about": "x", "cases": []}"#, "no cases");
+fn rejects_other_malformed_range_text() {
+    for (n, label) in [r#""""#, r#""-low""#, r#"" low""#, r#""LOW""#, "5"]
+        .iter()
+        .enumerate()
+    {
+        let bad = VALID.replace(r#""sonnet":"low""#, &format!(r#""sonnet":{label}"#));
+        let out = inspect_file(&format!("range-{n}.json"), &dataset(&bad));
+        assert_eq!(out.status.code(), Some(1), "{label} should be rejected");
+    }
 }
 
 #[test]
-fn rejects_missing_required_field() {
-    let no_message = VALID.replace(r#","message":"m""#, "");
-    assert_rejected(
-        "missing.json",
-        &case(&no_message),
-        "missing field `message`",
-    );
+fn accepts_range_with_equal_ends() {
+    let good = VALID.replace(r#""sonnet":"low""#, r#""sonnet":"low-low""#);
+    assert_accepted("equal-ends.json", &dataset(&good));
 }
 
 #[test]
-fn rejects_unknown_effort() {
-    let bad = VALID.replace(r#""ok":["low"]"#, r#""ok":["max"]"#);
-    assert_rejected("effort.json", &case(&bad), "unknown variant `max`");
+fn rejects_case_without_labels() {
+    let bad = VALID.replace(r#"{"sonnet":"low"}"#, "{}");
+    assert_rejected("no-labels.json", &dataset(&bad), "case c001 has no labels");
 }
 
 #[test]
-fn rejects_unknown_target_model() {
-    let bad = VALID.replace(r#""model":"sonnet""#, r#""model":"haiku""#);
-    assert_rejected("model.json", &case(&bad), "unknown variant `haiku`");
-}
-
-#[test]
-fn rejects_empty_acceptable_set() {
-    let bad = VALID.replace(r#""ok":["low"]"#, r#""ok":[]"#);
-    assert_rejected(
-        "empty-ok.json",
-        &case(&bad),
-        "case a: empty acceptable-effort set",
-    );
-}
-
-#[test]
-fn rejects_duplicate_ids() {
-    assert_rejected(
-        "dup.json",
-        &case(&format!("{VALID},{VALID}")),
-        "duplicate case id a",
-    );
-}
-
-#[test]
-fn rejects_unknown_field() {
-    let bad = VALID.replace(r#""id":"a""#, r#""id":"a","extra":1"#);
-    assert_rejected("unknown.json", &case(&bad), "unknown field `extra`");
-}
-
-#[test]
-fn rejects_non_boolean_holdout() {
-    let bad = VALID.replace(r#""id":"a""#, r#""id":"a","holdout":"yes""#);
-    assert_rejected("holdout.json", &case(&bad), "expected a boolean");
-}
-
-#[test]
-fn rejects_out_of_order_efforts() {
-    let bad = VALID.replace(r#""ok":["low"]"#, r#""ok":["medium","low"]"#);
-    assert_rejected(
-        "order.json",
-        &case(&bad),
-        "case a: acceptable efforts must be listed low to xhigh without repeats",
-    );
-}
-
-#[test]
-fn rejects_repeated_efforts() {
-    let bad = VALID.replace(r#""ok":["low"]"#, r#""ok":["low","low"]"#);
-    assert_rejected("repeat.json", &case(&bad), "without repeats");
-}
-
-#[test]
-fn accepts_ordered_efforts() {
-    let good = VALID.replace(r#""ok":["low"]"#, r#""ok":["low","high","xhigh"]"#);
-    let path = temp_file("ordered.json", &case(&good));
-    let out = run(&["dataset", "inspect", path.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn rejects_empty_id() {
+    let bad = VALID.replace(r#""id":"c001""#, r#""id":"""#);
+    assert_rejected("empty-id.json", &dataset(&bad), "case with empty id");
 }
