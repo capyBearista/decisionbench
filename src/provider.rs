@@ -5,6 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::cost::Price;
 use crate::dataset::Case;
 use crate::grade::Target;
 use crate::instructions::JudgeInstructions;
@@ -58,7 +59,7 @@ pub fn request_url(provider: Provider) -> String {
 }
 
 /// A Decision Model reached through one Provider Route; configured as a `[[candidate]]` table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
     /// The user's label for this Candidate; unique in the config.
@@ -68,6 +69,9 @@ pub struct Candidate {
     pub provider: Provider,
     /// The model id sent on the wire.
     pub model: String,
+    /// Manual price (`[candidate.price]`); without one the cost is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<Price>,
 }
 
 #[derive(Deserialize)]
@@ -85,6 +89,11 @@ pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, String> {
             .any(|c| c.name == candidate.name)
         {
             return Err(format!("duplicate candidate name `{}`", candidate.name));
+        }
+        if let Some(price) = &candidate.price {
+            price
+                .validate()
+                .map_err(|e| format!("candidate `{}` price: {e}", candidate.name))?;
         }
     }
     Ok(config.candidate)
@@ -166,14 +175,30 @@ pub fn now_unix_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Sends one POST. The key goes only in the Authorization header; any echo of it is redacted.
-pub fn send(url: &str, key: Option<&str>, body: &Value) -> Attempt {
-    // shortcut: fixed 60 s timeout, configurable in #8
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+/// An HTTP agent whose requests give up after `timeout`; build once and share across workers.
+pub fn agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(60)))
+        .timeout_global(Some(timeout))
         .build()
-        .into();
+        .into()
+}
+
+/// Whether a failed Attempt is worth another try: a transport error or a transient HTTP status.
+/// Any answered reply is final, even one whose effort turns out invalid.
+pub fn retryable(attempt: &Attempt) -> bool {
+    match attempt.disposition {
+        Disposition::Answered => false,
+        Disposition::TransportError => true,
+        Disposition::ProviderError => matches!(
+            attempt.http_status,
+            Some(408 | 429 | 500 | 502 | 503 | 504 | 524 | 529)
+        ),
+    }
+}
+
+/// Sends one POST. The key goes only in the Authorization header; any echo of it is redacted.
+pub fn send(agent: &ureq::Agent, url: &str, key: Option<&str>, body: &Value) -> Attempt {
     let started_unix_ms = now_unix_ms();
     let clock = Instant::now();
     let mut request = agent.post(url).header("content-type", "application/json");
@@ -286,5 +311,85 @@ mod tests {
         let one = "[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n";
         let err = parse_candidates(&format!("{one}{one}")).unwrap_err();
         assert!(err.contains("duplicate candidate name `a`"), "{err}");
+    }
+
+    fn failed(disposition: Disposition, http_status: Option<u16>) -> Attempt {
+        Attempt {
+            started_unix_ms: 0,
+            latency_ms: 0,
+            disposition,
+            http_status,
+            raw_response: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn retries_transport_errors_and_transient_statuses_only() {
+        assert!(retryable(&failed(Disposition::TransportError, None)));
+        // A transport error may still carry a status when the body could not be read.
+        assert!(retryable(&failed(Disposition::TransportError, Some(200))));
+        for status in [408, 429, 500, 502, 503, 504, 524, 529] {
+            assert!(
+                retryable(&failed(Disposition::ProviderError, Some(status))),
+                "{status}"
+            );
+        }
+        for status in [400, 401, 402, 403, 404, 413, 501, 505] {
+            assert!(
+                !retryable(&failed(Disposition::ProviderError, Some(status))),
+                "{status}"
+            );
+        }
+        assert!(!retryable(&failed(Disposition::ProviderError, None)));
+        assert!(!retryable(&failed(Disposition::Answered, Some(200))));
+        // Never retried even when the answer is later graded invalid.
+        assert!(!retryable(&failed(Disposition::Answered, Some(503))));
+    }
+
+    const PRICED: &str = "[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n";
+
+    #[test]
+    fn parses_a_candidate_price_with_and_without_optional_fields() {
+        let full = parse_candidates(&format!(
+            "{PRICED}[candidate.price]\ninput_per_million = 0.04\noutput_per_million = 0.08\nper_request = 0.001\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            full[0].price,
+            Some(Price {
+                input_per_million: 0.04,
+                output_per_million: 0.08,
+                per_request: 0.001
+            })
+        );
+        let minimal = parse_candidates(&format!(
+            "{PRICED}[candidate.price]\ninput_per_million = 0.04\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            minimal[0].price,
+            Some(Price {
+                input_per_million: 0.04,
+                output_per_million: 0.0,
+                per_request: 0.0
+            })
+        );
+        assert_eq!(parse_candidates(PRICED).unwrap()[0].price, None);
+    }
+
+    #[test]
+    fn rejects_bad_prices_naming_the_candidate() {
+        let unknown =
+            format!("{PRICED}[candidate.price]\ninput_per_million = 1\ncurrency = \"EUR\"\n");
+        assert!(parse_candidates(&unknown).is_err());
+        let missing_input = format!("{PRICED}[candidate.price]\noutput_per_million = 1\n");
+        assert!(parse_candidates(&missing_input).is_err());
+        let negative = format!("{PRICED}[candidate.price]\ninput_per_million = -1\n");
+        let err = parse_candidates(&negative).unwrap_err();
+        assert!(
+            err.contains("candidate `a`") && err.contains("input_per_million"),
+            "{err}"
+        );
     }
 }

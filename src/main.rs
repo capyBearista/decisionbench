@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use decisionbench::dataset::{BUNDLED_CASES, Case, parse_cases, summarize};
@@ -9,8 +10,8 @@ use decisionbench::instructions::{
     BUNDLED_NAME, BUNDLED_TEXT, JudgeInstructions, parse_instructions,
 };
 use decisionbench::provider::{
-    Candidate, Disposition, env_nonempty, normalize, now_unix_ms, parse_candidates, request_body,
-    request_url, send,
+    Candidate, Disposition, agent, env_nonempty, normalize, now_unix_ms, parse_candidates,
+    request_body, request_url, send,
 };
 use decisionbench::sha256_hex;
 
@@ -213,7 +214,12 @@ fn evaluate(args: &Evaluation) -> Result<ExitCode, String> {
     let (file, path) = evidence::create(&out, &id)?;
     let request = request_body(&candidate.model, &instructions, case, args.target);
     let url = request_url(candidate.provider);
-    let attempt = send(&url, key.as_deref(), &request);
+    let attempt = send(
+        &agent(Duration::from_secs(60)),
+        &url,
+        key.as_deref(),
+        &request,
+    );
     let created_unix_ms = now_unix_ms();
     let prediction = (attempt.disposition == Disposition::Answered)
         .then(|| normalize(attempt.raw_response.as_deref().unwrap_or_default()));
