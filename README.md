@@ -117,8 +117,8 @@ A predictions file is a JSON array such as `[{"case":"c001","target":"sonnet","e
 
 - **Rust** benchmark engine shared by a **headless CLI** and **Ratatui TUI**.
 - Initial provider routes: **OpenCode Zen** and **OpenRouter Decisions API**; the same underlying model exposed through different routes is compared as a distinct candidate.
-- One versioned dataset (`datasets/cases.json`, 71 Cases) converted from the effortless benchmark cases.
-- Independent, human-reviewed acceptable effort ranges per Target Model, such as `"low-high"`. Today only Sonnet (67) and Opus (8) have labels; drafts for the other slots are pending review. Missing labels remain **unscored**. Each Trial is one API request that asks about every selected model, with three logical trials per combination by default.
+- One versioned dataset (`datasets/cases.json`, 66 Cases) converted from the effortless benchmark cases.
+- Independent, human-reviewed acceptable effort ranges per Target Model, such as `"low-high"`. Every Case has a label for all four targets today; a missing label would grade as **unscored**. Each Trial is one API request that asks about every selected model, with three logical trials per combination by default.
 - Accuracy and under/over-selection, reliability, latency, consistency, history and manually configured per-route cost reported **separately**. No composite leaderboard score.
 - Raw predictions and confidence retained separately from any future production fallback/retention policy. **Current effort is not supplied as a judging anchor.**
 - Local TOML configuration and versioned JSON/JSONL evidence. No web UI, mandatory service, Docker runtime, or coding-agent harness dependency.

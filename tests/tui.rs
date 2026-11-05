@@ -107,7 +107,7 @@ fn every_screen_renders_at_80x24_and_60x16() {
         });
     let expected = [
         (Screen::Candidates, "cost unknown"),
-        (Screen::Dataset, "unlabelled"),
+        (Screen::Dataset, "cases ·"),
         (Screen::Setup, "repetitions"),
         (Screen::Run, "no run yet"),
         (Screen::Results, "complete"),

@@ -23,7 +23,7 @@ The benchmarkable pairing of a Decision Model and a Provider Route, including th
 A named instruction text, with a description for each effort level, sent with every Decisions request. Each set is a Markdown file identified by its name and the hash of its content, so an edited file is a new revision. Judge Instructions are selected, not part of the Candidate, so the same Candidate can be compared across instruction sets. Avoid: prompt (alone), task.
 
 **Case**  
-A task message with any relevant conversation context, identified by a stable ID that is never changed or reused. One Case can have separately reviewed labels for one or more Target Models.
+A task message with any relevant conversation context, identified by a stable ID that does not change once the dataset is released. One Case can have separately reviewed labels for one or more Target Models.
 
 **Context**  
 Conversation material relevant to interpreting a Case, such as the preceding assistant question. Context is distinct from the Target Model and from historical session effort.

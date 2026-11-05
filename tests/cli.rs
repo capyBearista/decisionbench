@@ -10,11 +10,11 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 const EXPECTED_COUNTS: &str = "\
-cases: 71
-haiku labels: 0 (71 unscored)
-sonnet labels: 67 (4 unscored)
-opus labels: 8 (63 unscored)
-fable labels: 0 (71 unscored)
+cases: 66
+haiku labels: 66 (0 unscored)
+sonnet labels: 66 (0 unscored)
+opus labels: 66 (0 unscored)
+fable labels: 66 (0 unscored)
 ";
 
 fn run(args: &[&str]) -> Output {
@@ -874,7 +874,10 @@ fn answered_hit_prints_the_summary_and_saves_jsonl_evidence() {
     assert_eq!(trial["targets"], json!(["opus"]));
     assert!(trial.get("target").is_none() && trial.get("label").is_none());
     assert_eq!(trial["repetition"], 1);
-    assert_eq!(trial["labels"], json!({"sonnet": "low", "opus": "low"}));
+    assert_eq!(
+        trial["labels"],
+        json!({"haiku": "low", "sonnet": "low", "opus": "low", "fable": "low"})
+    );
     assert_eq!(trial["instructions"]["name"], "neutral");
     assert!(trial["instructions"].get("text").is_none());
     assert!(trial["request"]["questions"]["effort_opus"].is_object());

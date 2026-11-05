@@ -90,7 +90,7 @@ fn show(file: &Path) -> String {
 }
 
 /// An App whose config already holds one keyless Zen candidate, set up to ask only about opus
-/// (8 labelled cases) once.
+/// (66 labelled cases) once.
 fn new_app(name: &str) -> (App, PathBuf) {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
@@ -135,7 +135,7 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
     until(&mut app, "the run to complete", |a| {
         a.run.done == a.run.planned && !a.run.active()
     });
-    assert_eq!((app.run.planned, app.run.errors), (8, 0));
+    assert_eq!((app.run.planned, app.run.errors), (66, 0));
     let file = only_file(&out);
     assert!(show(&file).contains("state: complete"));
 
@@ -170,7 +170,7 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
     let text = show(&file);
     assert!(text.contains("partial (cancelled"), "{text}");
     assert!(
-        text.contains(&format!("trials: {} recorded of 8 planned", app.run.done)),
+        text.contains(&format!("trials: {} recorded of 66 planned", app.run.done)),
         "{text}"
     );
     press(&mut app, KeyCode::Enter);

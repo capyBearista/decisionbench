@@ -70,11 +70,11 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 ### 3. Dataset and ground truth
 
 - The benchmark owns **one dataset file**, `datasets/cases.json` (see [ADR-0003](adr/0003-owned-per-target-effort-ranges.md)). It was converted once from the MIT-licensed effortless benchmark cases, and the effortless copyright notice and license accompany it. The upstream file is not kept or tracked, and Cases carry no source identifiers.
-- Each Case has a plain, stable **ID** (`c001`, `c002`, …) that never changes and is never reused, a task **message**, optional conversation **context**, and **labels** keyed by Target Model (`haiku`, `sonnet`, `opus`, `fable`); every Case has at least one label.
+- Each Case has a plain, stable **ID** (`c001`…`c066`, contiguous) that does not change once the dataset is released, a task **message**, optional conversation **context**, and **labels** keyed by Target Model (`haiku`, `sonnet`, `opus`, `fable`); every Case has at least one label.
 - A label is a **contiguous range of acceptable efforts**, written as one level (`"max"`) or as `"from-to"` (`"low-high"` means `low`, `medium` and `high`). `from` may not be above `to`. Every effort in the range is equally acceptable.
 - A Target Model may be absent from a Case; that combination is **unscored**. Omitting the target's key is the only way to leave it unscored; a `null` label is rejected. Do not synthesize missing labels.
 - Cases carry **no session state** (no current model, no current effort) and no category or holdout markers.
-- The dataset has **71 Cases** (four identical message/context pairs were merged) with **67 Sonnet**, **8 Opus**, **0 Haiku** and **0 Fable** labels. Drafts for the missing slots are in `datasets/label-drafts.json`; a draft is not a label and does not count until the user approves it and it is merged into `cases.json` (a new Dataset Revision). These counts change then.
+- The dataset has **66 Cases** (four identical message/context pairs were merged; five Swedish Cases were removed and their IDs refilled by moving the last five Cases into the gaps, so the IDs have no gaps), each with a label for all four targets: **66 Haiku**, **66 Sonnet**, **66 Opus** and **66 Fable**.
 - Any change to Cases or labels produces a new **Dataset Revision**, identified by the file's content hash.
 
 ### 4. Evaluation requests and independence
@@ -114,7 +114,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 - Otherwise **under** means the predicted effort is below the range, and **over** means above it. Ranges are contiguous, so there is no other kind of miss.
 - **Unscored** means there is no reviewed label. **Invalid** means a response did not yield a valid choice. **Provider failure** means the request failed. All are distinct from valid scored misses. A target with no label is unscored whatever the response; invalid applies only to labelled targets.
 - Report accuracy among **valid, scored predictions**, alongside eligible-case counts, invalid/unanswered counts, coverage, failure counts and run completion. Do not hide failures through denominator selection.
-- Always break out performance by **Target Model** (with each target's sample size; the labels are heavily Sonnet-weighted) and by **candidate/provider route** and **Judge Instructions** (name and hash), so instruction sets can be compared side by side. No overall micro-average is reported.
+- Always break out performance by **Target Model** (with each target's sample size) and by **candidate/provider route** and **Judge Instructions** (name and hash), so instruction sets can be compared side by side. No overall micro-average is reported.
 - Report **median and p95 latency** with clear definitions, include reliability, under/over counts, and repeat-to-repeat consistency. No arbitrary quality/latency/cost composite score. As implemented:
   - **Latency** uses nearest-rank percentiles (the value at rank ceil(p × n / 100)) and is reported twice: over the answered Attempts' `latency_ms`, and over the `elapsed_ms` of answered Trials (all Attempts plus pauses). It shows `n/a (n=0)` with no samples.
   - **Consistency**, per Candidate × Judge Instructions × Target Model: a Case counts when it has at least two valid efforts across repetitions, and is consistent when all of them are equal. Reported as consistent Cases out of counted Cases.
