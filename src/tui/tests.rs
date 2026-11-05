@@ -634,6 +634,47 @@ fn each_row_ends_with_its_key_status_without_being_clipped() {
     }
 }
 
+/// The row of the one Candidate `add_candidate` makes, drawn at `width`x`height`.
+fn candidate_row(name: &str, width: u16, height: u16) -> String {
+    let (mut app, _) = app();
+    add_candidate(&mut app, name, "a-rather-long-model-identifier", ["", ""]);
+    let rows = draw(&app, width, height);
+    let head: String = name.chars().take(8).collect();
+    rows.into_iter()
+        .find(|r| r.contains(&head))
+        .unwrap_or_else(|| panic!("no row for {name} at {width}x{height}"))
+}
+
+#[test]
+fn a_long_candidate_name_is_not_cut_at_twelve_characters() {
+    for (w, h) in [(120, 40), (80, 24)] {
+        let row = candidate_row("decider-flash-v.1.2", w, h);
+        assert!(row.contains("decider-flash-v.1.2 "), "{w}x{h}: {row:?}");
+    }
+}
+
+#[test]
+fn a_long_candidate_name_leaves_the_model_and_key_status_readable_at_60_columns() {
+    use crate::provider::Provider;
+    let row = candidate_row("decider-flash-v.1.2", 60, 16);
+    // `add_candidate` makes a Zen candidate; its key status depends on the host's environment.
+    let key = Provider::Zen.key_source(&std::env::temp_dir().join("no-such-credentials.toml"));
+    let key = super::candidates::key_text(Provider::Zen, key, false);
+    assert!(
+        row.contains("a-rather")
+            && row.contains("cost unknown")
+            && row.contains(key.content.as_ref()),
+        "{row:?}"
+    );
+}
+
+#[test]
+fn a_candidate_name_over_24_characters_is_cut_with_an_ellipsis() {
+    let row = candidate_row("abcdefghijklmnopqrstuvwxyz0123", 120, 40);
+    assert!(row.contains("abcdefghijklmnopqrstuvw… "), "{row:?}");
+    assert!(!row.contains("abcdefghijklmnopqrstuvwx"), "{row:?}");
+}
+
 #[test]
 fn key_status_wording() {
     use super::candidates::key_text;
