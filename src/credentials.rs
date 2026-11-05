@@ -79,6 +79,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::batch::temp_files_in;
     use crate::provider::Provider;
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -171,20 +172,51 @@ mod tests {
         save_key(&path, Provider::Zen, "zen-1").unwrap();
         assert_eq!(mode(&path), 0o600);
         assert_eq!(load(&path).unwrap().zen.as_deref(), Some("zen-1"));
-        assert!(!path.with_file_name("credentials.toml.tmp").exists());
+        assert_eq!(temp_files_in(path.parent().unwrap()), Vec::<String>::new());
     }
 
     #[test]
-    fn saving_makes_a_stale_world_readable_file_and_temp_file_private() {
+    fn saving_makes_a_stale_world_readable_file_private() {
         let path = file("zen = \"old\"\n");
-        let stale = path.with_file_name("credentials.toml.tmp");
-        std::fs::write(&stale, "").unwrap();
-        for stale_file in [&path, &stale] {
-            std::fs::set_permissions(stale_file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         save_key(&path, Provider::Zen, "new").unwrap();
         assert_eq!(mode(&path), 0o600);
         assert_eq!(load(&path).unwrap().zen.as_deref(), Some("new"));
+    }
+
+    /// A symlink or stale file at the old fixed temp name must not receive the key or lend its mode.
+    #[test]
+    fn saving_ignores_a_planted_symlink_and_a_stale_world_readable_temp_file() {
+        for plant_symlink in [true, false] {
+            let path = file("zen = \"old\"\n");
+            let dir = path.parent().unwrap();
+            let (planted, victim) = (dir.join("credentials.toml.tmp"), dir.join("victim"));
+            if plant_symlink {
+                std::os::unix::fs::symlink(&victim, &planted).unwrap();
+            } else {
+                std::fs::write(&planted, "stale").unwrap();
+                std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            save_key(&path, Provider::Zen, "new").unwrap();
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(load(&path).unwrap().zen.as_deref(), Some("new"));
+            assert!(!victim.exists());
+            if plant_symlink {
+                assert!(std::fs::symlink_metadata(&planted).unwrap().is_symlink());
+            } else {
+                assert_eq!(std::fs::read_to_string(&planted).unwrap(), "stale");
+                assert_eq!(mode(&planted), 0o644);
+            }
+            assert_eq!(temp_files_in(dir), ["credentials.toml.tmp"]);
+        }
+    }
+
+    #[test]
+    fn consecutive_saves_leave_no_temp_file() {
+        let path = file("");
+        save_key(&path, Provider::Zen, "zen-1").unwrap();
+        save_key(&path, Provider::OpenRouter, "or-1").unwrap();
+        assert_eq!(temp_files_in(path.parent().unwrap()), Vec::<String>::new());
     }
 
     #[test]

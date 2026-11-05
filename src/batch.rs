@@ -44,20 +44,27 @@ pub fn resolve_links(path: &Path) -> Result<PathBuf, String> {
     Err(format!("too many symlinks at {}", path.display()))
 }
 
-/// Writes `text` to a temp file beside `path`, then renames it over `path`: a failed write never
-/// leaves a half-written file, and a failed attempt removes its temp file. The temp file is made
-/// private (0600) before any text goes in, because a stale temp file would keep its own mode;
-/// `permissions` are applied to the finished file.
+/// Writes `text` to a new temp file beside `path`, then renames it over `path`: a failed write
+/// never leaves a half-written file, and a failed attempt removes its temp file. Every call gets
+/// its own temp name (process id and a process-wide counter) and creates it exclusively, so it never
+/// reuses or follows a file or symlink already there, and concurrent writes never share one. The
+/// temp file is private (0600) before any text goes in; `permissions` are applied to the finished
+/// file.
 pub fn write_atomic(path: &Path, text: &str, permissions: Permissions) -> std::io::Result<()> {
+    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
     let mut temp = path.to_path_buf().into_os_string();
-    temp.push(".tmp");
+    temp.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    // O_EXCL: if this fails the name is not ours, so nothing is removed.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
     let write = || {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp)?;
         file.set_permissions(Permissions::from_mode(0o600))?;
         file.write_all(text.as_bytes())?;
         file.set_permissions(permissions)?;
@@ -459,21 +466,111 @@ impl Prepared {
     }
 }
 
+/// Names in `dir` that end in `.tmp`, sorted: what a write should not leave behind.
+#[cfg(test)]
+pub fn temp_files_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    names.sort();
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::time::Duration;
 
+    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    /// A fresh, empty directory of its own.
+    fn fresh_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "decisionbench-atomic-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
     fn a_failed_atomic_write_removes_its_temp_file() {
-        let dir = std::env::temp_dir().join(format!("decisionbench-atomic-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = fresh_dir();
         // The target is a directory, so the final rename fails after the temp file was written.
-        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::create_dir(dir.join("target")).unwrap();
         let result = write_atomic(&dir.join("target"), "secret", Permissions::from_mode(0o600));
         assert!(result.is_err());
-        assert!(!dir.join("target.tmp").exists());
+        assert_eq!(temp_files_in(&dir), Vec::<String>::new());
+    }
+
+    #[test]
+    fn consecutive_atomic_writes_leave_no_temp_file() {
+        let dir = fresh_dir();
+        let target = dir.join("target");
+        for text in ["one", "two"] {
+            write_atomic(&target, text, Permissions::from_mode(0o640)).unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), text);
+            assert_eq!(mode(&target), 0o640);
+            assert_eq!(temp_files_in(&dir), Vec::<String>::new());
+        }
+    }
+
+    /// A symlink or stale file at the old fixed temp name is neither followed nor reused.
+    #[test]
+    fn an_atomic_write_ignores_a_planted_symlink_and_a_stale_world_readable_temp_file() {
+        let dir = fresh_dir();
+        let victim = dir.join("victim");
+        std::os::unix::fs::symlink(&victim, dir.join("linked.tmp")).unwrap();
+        std::fs::write(dir.join("stale.tmp"), "stale").unwrap();
+        std::fs::set_permissions(dir.join("stale.tmp"), Permissions::from_mode(0o644)).unwrap();
+        for name in ["linked", "stale"] {
+            write_atomic(&dir.join(name), "secret", Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), "secret");
+            assert_eq!(mode(&dir.join(name)), 0o600);
+        }
+        assert!(!victim.exists());
+        assert!(
+            std::fs::symlink_metadata(dir.join("linked.tmp"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("stale.tmp")).unwrap(),
+            "stale"
+        );
+        assert_eq!(mode(&dir.join("stale.tmp")), 0o644);
+        // Only the two planted files are left.
+        assert_eq!(temp_files_in(&dir), ["linked.tmp", "stale.tmp"]);
+    }
+
+    /// Writers racing on one target never share a temp file, so none of them fails.
+    #[test]
+    fn concurrent_atomic_writes_to_one_target_never_fail_and_leave_one_file() {
+        let dir = fresh_dir();
+        let target = dir.join("target");
+        std::thread::scope(|scope| {
+            for text in ["first", "second"] {
+                let target = &target;
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        write_atomic(target, text, Permissions::from_mode(0o600)).unwrap();
+                    }
+                });
+            }
+        });
+        let saved = std::fs::read_to_string(&target).unwrap();
+        assert!(saved == "first" || saved == "second", "{saved}");
+        assert_eq!(temp_files_in(&dir), Vec::<String>::new());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 
     /// A write error mid-run (the evidence file is /dev/full, which refuses every write) fails the

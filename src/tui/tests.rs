@@ -243,20 +243,38 @@ fn quitting_a_run_with_unsaved_candidate_edits_takes_two_presses() {
 }
 
 #[test]
-fn saving_writes_a_temp_file_then_renames_it_over_the_config() {
+fn saving_leaves_no_temp_file_behind() {
     let (mut app, dir) = app();
     add_candidate(&mut app, "alpha", "m", ["", ""]);
     press(&mut app, KeyCode::Char('s'));
-    let config = dir.join("config.toml");
-    let first = std::fs::read_to_string(&config).unwrap();
-    assert!(!dir.join("config.toml.tmp").exists());
-    // A blocked temp path makes the save fail and leaves the existing config untouched.
-    std::fs::create_dir(dir.join("config.toml.tmp")).unwrap();
     add_candidate(&mut app, "beta", "m", ["", ""]);
     press(&mut app, KeyCode::Char('s'));
-    assert!(app.message.contains("cannot write"), "{}", app.message);
-    assert!(app.candidates.dirty);
-    assert_eq!(std::fs::read_to_string(&config).unwrap(), first);
+    assert_eq!(app.message, format!("saved {}", app.config.display()));
+    assert!(
+        std::fs::read_to_string(dir.join("config.toml"))
+            .unwrap()
+            .contains("beta")
+    );
+    assert_eq!(crate::batch::temp_files_in(&dir), Vec::<String>::new());
+}
+
+#[test]
+fn saving_ignores_a_planted_symlink_at_the_old_temp_name() {
+    let (mut app, dir) = app();
+    std::fs::create_dir_all(&dir).unwrap();
+    let (planted, victim) = (dir.join("config.toml.tmp"), dir.join("victim"));
+    std::os::unix::fs::symlink(&victim, &planted).unwrap();
+    add_candidate(&mut app, "alpha", "m", ["", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.message, format!("saved {}", app.config.display()));
+    assert!(
+        std::fs::read_to_string(dir.join("config.toml"))
+            .unwrap()
+            .contains("alpha")
+    );
+    assert!(!victim.exists());
+    assert!(std::fs::symlink_metadata(&planted).unwrap().is_symlink());
+    assert_eq!(crate::batch::temp_files_in(&dir), ["config.toml.tmp"]);
 }
 
 #[test]
@@ -302,7 +320,10 @@ fn saving_through_a_symlinked_config_keeps_the_link() {
         saved.contains("# mine") && saved.contains("beta"),
         "{saved}"
     );
-    assert!(!dir.join("real/config.toml.tmp").exists());
+    assert_eq!(
+        crate::batch::temp_files_in(&dir.join("real")),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -348,7 +369,7 @@ fn saving_keeps_the_configs_permissions_and_creates_new_ones_private() {
         |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     let (mut app, dir) = app();
     let config = dir.join("config.toml");
-    // A stale, world-readable temp file from an earlier failed save must not lend its mode.
+    // A stale, world-readable file at the old temp name is neither reused nor lends its mode.
     let stale = dir.join("config.toml.tmp");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(&stale, "").unwrap();
@@ -356,6 +377,8 @@ fn saving_keeps_the_configs_permissions_and_creates_new_ones_private() {
     add_candidate(&mut app, "alpha", "m", ["", ""]);
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(mode(&config), 0o600);
+    assert_eq!(std::fs::read_to_string(&stale).unwrap(), "");
+    assert_eq!(mode(&stale), 0o644);
     for existing in [0o600, 0o640] {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(existing)).unwrap();
         add_candidate(&mut app, &format!("n{existing}"), "m", ["", ""]);
