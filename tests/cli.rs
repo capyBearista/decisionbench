@@ -1217,10 +1217,19 @@ fn provider_failure_exits_3_and_keeps_the_raw_body() {
 
 #[test]
 fn transport_failure_exits_3_and_saves_evidence() {
+    // A server that accepts and hangs up without answering: a transport error that does not depend
+    // on how the host treats connections to a closed port (some sandboxes drop them silently).
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            drop(stream);
+        }
+    });
     let eval = Eval::new(
         "transport",
         &candidate_toml("jev-openrouter", "openrouter", "m"),
-        "http://127.0.0.1:1",
+        &url,
     );
     let out = eval.run(
         &args_with(&C002_OPUS, &["--retries", "0"]),
