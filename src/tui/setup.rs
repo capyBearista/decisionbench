@@ -136,11 +136,11 @@ pub(super) fn args(app: &App) -> Result<RunArgs, String> {
     }
     Ok(RunArgs {
         candidates,
-        instructions: if state.instructions.is_empty() {
-            Vec::new()
+        instructions: vec![if state.instructions.is_empty() {
+            None
         } else {
-            vec![PathBuf::from(&state.instructions)]
-        },
+            Some(PathBuf::from(&state.instructions))
+        }],
         cases: app.dataset.marked.iter().cloned().collect(),
         targets: state.targets.iter().copied().collect(),
         settings: Settings {

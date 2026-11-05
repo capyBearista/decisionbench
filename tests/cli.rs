@@ -1608,6 +1608,44 @@ fn custom_instructions_are_sent_and_recorded_by_name_and_hash() {
 }
 
 #[test]
+fn every_instructions_flag_adds_an_instruction_set_to_the_plan() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("two-sets", &stub);
+    let dir = fresh_dir("two-sets-prompts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+    std::fs::write(&a, custom()).unwrap();
+    std::fs::write(&b, custom().replace("low desc", "other desc")).unwrap();
+    let args = args_with(
+        &C002_OPUS,
+        &[
+            "--instructions",
+            a.to_str().unwrap(),
+            "--instructions",
+            b.to_str().unwrap(),
+        ],
+    );
+    let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(
+            "planned: 1 candidate × 2 instruction sets × 1 case (0 unlabelled skipped) × 1 repetition = 2 trials, up to 4 requests"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let manifest = eval.manifest();
+    assert_eq!(manifest["planned_trials"], 2);
+    let names: Vec<_> = manifest["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("a"), json!("b")]);
+}
+
+#[test]
 fn default_instructions_are_recorded_as_neutral() {
     let stub = stub(200, OPENROUTER_REPLY);
     let eval = openrouter_eval("neutral", &stub);

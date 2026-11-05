@@ -134,7 +134,11 @@ fn main() -> ExitCode {
             out,
         } => run_batch(&RunArgs {
             candidates,
-            instructions,
+            instructions: if instructions.is_empty() {
+                vec![None]
+            } else {
+                instructions.into_iter().map(Some).collect()
+            },
             cases,
             targets,
             settings: Settings {

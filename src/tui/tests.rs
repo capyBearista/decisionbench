@@ -97,7 +97,7 @@ fn a_candidate_without_prices_is_added_with_unknown_cost_and_saved() {
     assert!(!app.candidates.dirty);
     let saved = std::fs::read_to_string(dir.join("config.toml")).unwrap();
     assert_eq!(
-        crate::provider::parse_candidates(&saved).unwrap(),
+        crate::provider::parse_config(&saved).unwrap().candidates,
         app.candidates.items
     );
     // A fresh App reads it back.
