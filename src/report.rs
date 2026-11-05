@@ -283,8 +283,7 @@ pub fn cell_parts(cell: Option<&Cell>) -> CellText {
     }
 }
 
-const POOLED_NOTE: &str =
-    "pooled = all candidates and targets together over valid scored predictions; it is not a score";
+const POOLED_NOTE: &str = "pooled = rows present in every column, all candidates and targets together, over valid scored predictions; it is not a score";
 const DELTA_NOTE: &str = "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)";
 
 pub struct MatrixRow {
@@ -299,7 +298,8 @@ pub struct MatrixRow {
 pub struct Matrix {
     pub columns: Vec<Column>,
     pub rows: Vec<MatrixRow>,
-    /// Per column: every row added together; `None` when the column has no cells.
+    /// Per column: the rows present in every column added together, so all columns cover the same
+    /// candidate x target rows; `None` when no row is present in every column.
     pub pooled: Vec<Option<Cell>>,
 }
 
@@ -439,6 +439,7 @@ impl Matrix {
             .map(|(j, (r, _))| {
                 let cells: Vec<&Cell> = rows
                     .iter()
+                    .filter(|row| row.cells.iter().all(Option::is_some))
                     .filter_map(|row| row.cells[j].as_ref())
                     .collect();
                 if cells.is_empty() {
@@ -494,7 +495,7 @@ impl Matrix {
         table
     }
 
-    /// Every row added together; `None` when there is nothing to pool.
+    /// The rows present in every column added together; `None` when there is nothing to pool.
     pub fn pooled_row(&self) -> Option<Vec<CellText>> {
         self.pooled.iter().any(Option::is_some).then(|| {
             [CellText::plain("pooled"), CellText::plain("all")]
@@ -1377,6 +1378,36 @@ mod tests {
     }
 
     #[test]
+    fn matrix_pools_only_rows_present_in_every_column() {
+        // `d` was only asked in Y1, so its hits must not lift Y1's pooled rate above X1's.
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "low")]);
+        let y = run_of(
+            "Y1",
+            1,
+            &[("q", "b")],
+            &["c", "d"],
+            &[("c", 0, "c1", 1, "low"), ("d", 0, "c1", 1, "high")],
+        );
+        let m = Matrix::from_runs(&[x, y]);
+        // The row itself still shows everything.
+        assert_eq!(m.rows[1].cells[1].as_ref().unwrap().tally.hit, 1);
+        let (b, v) = (m.pooled[0].as_ref().unwrap(), m.pooled[1].as_ref().unwrap());
+        assert_eq!((b.tally.hit, b.tally.under), (0, 1));
+        assert_eq!((v.tally.hit, v.tally.under), (0, 1));
+        assert_eq!(v.delta, delta(0, 0, true));
+    }
+
+    #[test]
+    fn matrix_without_a_row_in_every_column_has_no_pooled_row() {
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let y = run_of("Y1", 1, &[("q", "b")], &["d"], &[("d", 0, "c1", 1, "high")]);
+        let m = Matrix::from_runs(&[x, y]);
+        assert!(m.pooled.iter().all(Option::is_none));
+        assert!(m.pooled_row().is_none());
+        assert!(!m.to_string().contains("pooled"), "{m}");
+    }
+
+    #[test]
     fn matrix_from_one_run_with_three_prompts_has_three_columns() {
         let m = paired(1, &[("a", Some("high"), Some("high"))]);
         assert_eq!(labels(&m), ["p", "q"]);
@@ -1430,7 +1461,7 @@ mod tests {
                 "c sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~",
                 "d sonnet 1/1 (100.0%) n/a (0 valid scored)",
                 "pooled all 2/3 (66.7%) 2/2 (100.0%) +1 -0 ~",
-                "pooled = all candidates and targets together over valid scored predictions; it is not a score",
+                "pooled = rows present in every column, all candidates and targets together, over valid scored predictions; it is not a score",
                 "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)",
             ]
         );
