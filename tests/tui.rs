@@ -40,7 +40,7 @@ fn fixture_lines() -> Vec<Value> {
                "request": {}, "attempts": attempts, "started_unix_ms": 0, "elapsed_ms": 150})
     };
     vec![
-        json!({"type": "run", "schema_version": 3, "id": "fixture-1", "created_unix_ms": 1000,
+        json!({"type": "run", "schema_version": 4, "id": "fixture-1", "created_unix_ms": 1000,
                "dataset": {"name": "ds.json", "sha256": "b".repeat(64)},
                "instructions": [{"name": "neutral", "sha256": sha, "text": "t"}],
                "grading_revision": 2,

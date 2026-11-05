@@ -28,7 +28,6 @@ model = "typesafe/jev-1.13"        # the model id sent on the wire
 [candidate.price]                  # optional; USD, captured with each run
 input_per_million = 0.04           # required in the table
 output_per_million = 0.0           # optional, default 0
-per_request = 0.0                  # optional fixed fee, default 0
 
 [[candidate]]
 name = "jev-zen-free"
@@ -37,7 +36,7 @@ provider = "zen"
 model = "jev-1.13-free"
 ```
 
-Credentials come from environment variables only and are never written to evidence: `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent when it is unset or empty). Requests always go to the provider's own URL and honour the standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` environment variables. The tests redirect every request, API key included, to a local stub with `DECISIONBENCH_TEST_BASE_URL`; never set it outside tests.
+API keys come from the environment variables `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent without a key). A non-empty variable wins; otherwise the key saved in `credentials.toml`, next to the config file, is used (an empty value counts as unset). Save a key with `K` (Shift-k) on the TUI Candidates screen, or write the file by hand as `openrouter = "..."` and/or `zen = "..."`. The TUI creates the file with mode 0600; a hand-written one is read as is, so make it private yourself. A key is never written to the config or to evidence. An unreadable or invalid `credentials.toml` stops runs even when an environment key is set; the Candidates row then shows `file error`. Requests always go to the provider's own URL and honour the standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` environment variables. The tests redirect every request, API key included, to a local stub with `DECISIONBENCH_TEST_BASE_URL`; never set it outside tests.
 
 ### Running a benchmark
 
@@ -62,7 +61,7 @@ A reply that arrives is never retried, even when its effort is invalid. A Trial'
 
 **Exit codes:** `0` complete and every Trial answered (an effort may still grade as invalid); `3` complete, but some Trial ended in a provider or transport failure; `130` cancelled (partial); `1` bad config, input or missing key (nothing sent or saved), or the run failed on an internal error such as an evidence write; `2` usage error.
 
-**Evidence:** one append-only JSONL file per run under `$XDG_DATA_HOME/decisionbench/runs` (default `~/.local/share/decisionbench/runs`, or `--out DIR`), private to your user. The first line is the run manifest (settings, Candidates with their price snapshot, Judge Instructions, dataset revision); then one line per finished Trial with all its Attempts; then an end line with the state `complete`, `partial` or `failed`. The format is schema version 3; older files are not readable. Grades and costs are recomputed when reading, never stored.
+**Evidence:** one append-only JSONL file per run under `$XDG_DATA_HOME/decisionbench/runs` (default `~/.local/share/decisionbench/runs`, or `--out DIR`), private to your user. The first line is the run manifest (settings, Candidates with their price snapshot, Judge Instructions, dataset revision); then one line per finished Trial with all its Attempts; then an end line with the state `complete`, `partial` or `failed`. The format is schema version 4; older files are not readable. Grades and costs are recomputed when reading, never stored.
 
 ### Reading results
 
@@ -74,9 +73,9 @@ The two cross-model metrics sit next to the per-target numbers and never replace
 
 ### Terminal UI
 
-`decisionbench tui` (also takes `--config FILE` and `--out DIR`) opens the same engine and reports in a terminal. It has five screens: Candidates, Dataset, Run setup, Run and Results/History. Switch screens with `Tab` or `1`-`5`, move with the arrow keys or `h`/`j`/`k`/`l`, select with `Enter`, go back with `Esc` and quit with `q`. On the Run screen, press `c` to cancel (stop starting Trials) and `c` again to stop waiting for Trials in flight. On the Dataset screen, `Space` marks or unmarks the highlighted Case (`[x]`) and `x` clears all marks; Run setup then shows `cases: all eligible` or `cases: N selected (...)`, the same selection as `--case`. If the evidence file cannot be written during a Run, the Run screen says so and the unsaved Trials are printed to stderr as JSON lines when you quit. Details may change while the TUI is being built.
+`decisionbench tui` (also takes `--config FILE` and `--out DIR`) opens the same engine and reports in a terminal. It has five screens: Candidates, Dataset, Run setup, Run and Results/History. Switch screens with `Tab` or `1`-`5`, move with the arrow keys or `h`/`j`/`k`/`l`, select with `Enter`, go back with `Esc` and quit with `q`. On the Candidates screen, `K` asks for the API key of the highlighted Candidate's provider and saves it at once to `credentials.toml`; each row shows `key: env`, `key: saved` or `key: missing`. On the Run screen, press `c` to cancel (stop starting Trials) and `c` again to stop waiting for Trials in flight. On the Dataset screen, `Space` marks or unmarks the highlighted Case (`[x]`) and `x` clears all marks; Run setup then shows `cases: all eligible` or `cases: N selected (...)`, the same selection as `--case`. If the evidence file cannot be written during a Run, the Run screen says so and the unsaved Trials are printed to stderr as JSON lines when you quit. Details may change while the TUI is being built.
 
-**Cost:** each answered Attempt costs `input_tokens × input rate + output_tokens × output rate + per-request fee`, using the price captured in the run, not the current config. A failed Attempt (error reply or transport failure before a success status) is counted as costing nothing, on the assumption that providers do not bill failed requests; the summary says how many were counted this way. A Candidate without a price, or an answer without the needed usage counters, shows as unknown, never as zero. OpenRouter's own `usage.cost` is kept in the raw reply but not used.
+**Cost:** each answered Attempt costs `input_tokens × input rate + output_tokens × output rate`, using the price captured in the run, not the current config. A failed Attempt (error reply or transport failure before a success status) is counted as costing nothing, on the assumption that providers do not bill failed requests; the summary says how many were counted this way. A Candidate without a price, or an answer without the needed usage counters, shows as unknown, never as zero. OpenRouter's own `usage.cost` is kept in the raw reply but not used.
 
 **Evidence files contain the full prompt text, the Case message and context, and the raw provider reply.** Review them before sharing.
 

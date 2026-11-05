@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod cost;
+pub mod credentials;
 pub mod dataset;
 pub mod evidence;
 pub mod grade;

@@ -116,7 +116,9 @@ impl App {
     /// True while a text field takes the keys, so letters are not commands.
     pub fn editing(&self) -> bool {
         match self.screen {
-            Screen::Candidates => self.candidates.form.is_some(),
+            Screen::Candidates => {
+                self.candidates.form.is_some() || self.candidates.key_prompt.is_some()
+            }
             Screen::Setup => self.setup.editing.is_some(),
             _ => false,
         }

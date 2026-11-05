@@ -19,7 +19,7 @@ use crate::grade::{Grade, Tally, Target, grade};
 use crate::provider::{Attempt, Candidate, Disposition, normalize};
 use crate::run::Settings;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 /// Bump when grading semantics change, so old evidence stays interpretable.
 pub const GRADING_REVISION: u32 = 2;
 
@@ -703,10 +703,11 @@ mod tests {
     }
 
     #[test]
-    fn only_schema_3_is_read() {
+    fn only_schema_4_is_read() {
         for first in [
             r#"{"type":"run","schema_version":1}"#,
             r#"{"type":"run","schema_version":2}"#,
+            r#"{"type":"run","schema_version":3}"#,
             r#"{"schema_version":99}"#,
             r#"{"type":"run"}"#,
         ] {

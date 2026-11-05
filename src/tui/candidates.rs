@@ -1,7 +1,6 @@
 //! Candidate management: the config's `[[candidate]]` tables, with their manual prices.
 
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -10,25 +9,26 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::{App, block, cut, edit, list_lines, nav, step, theme};
+use crate::batch::{resolve_links, write_atomic};
 use crate::cost::{Price, fmt_usd};
-use crate::provider::{Candidate, Provider, candidates_toml};
+use crate::credentials;
+use crate::provider::{Candidate, KeySource, Provider, candidates_toml};
 
-pub const HINTS: &str = "a add · e/Enter edit · d delete · s save · j/k move · q quit";
+pub const HINTS: &str = "a add · e/Enter edit · d delete · s save · K key · q quit";
 const FORM_HINTS: &str =
     "Tab/Down next field · Up previous · Space/Left/Right provider · Enter apply · Esc cancel";
 
-const LABELS: [&str; 6] = [
+const LABELS: [&str; 5] = [
     "name",
     "provider",
     "model",
     "input $ per million tokens",
     "output $ per million tokens",
-    "$ per request",
 ];
 const PROVIDER: usize = 1;
 
 pub struct Form {
-    pub(super) fields: [String; 6],
+    pub(super) fields: [String; 5],
     focus: usize,
     /// Index being edited; `None` for a new Candidate.
     editing: Option<usize>,
@@ -49,7 +49,6 @@ impl Form {
                 from.map_or_else(String::new, |c| c.model.clone()),
                 price(|p| p.input_per_million),
                 price(|p| p.output_per_million),
-                price(|p| p.per_request),
             ],
             focus: 0,
             editing,
@@ -67,8 +66,7 @@ impl Form {
     /// Validates like the config loader: a unique name, a model, and a non-negative price.
     /// Blank price fields mean no price, so the cost stays unknown.
     fn candidate(&self, items: &[Candidate]) -> Result<Candidate, String> {
-        let [name, provider, model, input, output, per_request] =
-            &self.fields.each_ref().map(|f| f.trim());
+        let [name, provider, model, input, output] = &self.fields.each_ref().map(|f| f.trim());
         if name.is_empty() || model.is_empty() {
             return Err("name and model are required".into());
         }
@@ -87,17 +85,14 @@ impl Form {
                     .map_err(|_| format!("{label} must be a number, got `{text}`"))
             }
         };
-        let price = if [input, output, per_request].iter().all(|f| f.is_empty()) {
+        let price = if [input, output].iter().all(|f| f.is_empty()) {
             None
         } else if input.is_empty() {
-            return Err(
-                "a price needs input $ per million tokens (blank all three for none)".into(),
-            );
+            return Err("a price needs input $ per million tokens (blank both for none)".into());
         } else {
             let price = Price {
                 input_per_million: number("input", input)?,
                 output_per_million: number("output", output)?,
-                per_request: number("per request", per_request)?,
             };
             price.validate()?;
             Some(price)
@@ -118,10 +113,18 @@ impl Form {
 
 pub struct State {
     pub items: Vec<Candidate>,
-    selected: usize,
+    pub(super) selected: usize,
     /// Edits not yet written to the config file.
     pub dirty: bool,
     pub form: Option<Form>,
+    pub key_prompt: Option<KeyPrompt>,
+}
+
+/// The one-field prompt for a provider's API key. The text is only ever drawn as bullets, and the
+/// type has no `Debug`, so the key cannot reach a log or a panic message.
+pub struct KeyPrompt {
+    provider: Provider,
+    pub(super) text: String,
 }
 
 impl State {
@@ -131,11 +134,16 @@ impl State {
             selected: 0,
             dirty: false,
             form: None,
+            key_prompt: None,
         }
     }
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    if app.candidates.key_prompt.is_some() {
+        key_prompt_key(app, key);
+        return;
+    }
     if app.candidates.form.is_some() {
         form_key(app, key);
         return;
@@ -161,30 +169,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 Err(e) => e,
             };
         }
+        KeyCode::Char('K') => match state.items.get(state.selected) {
+            Some(c) => {
+                state.key_prompt = Some(KeyPrompt {
+                    provider: c.provider,
+                    text: String::new(),
+                });
+            }
+            None => app.message = "no candidate: press a to add one".into(),
+        },
         _ => {
             if let Some(nav) = nav(key) {
                 state.selected = step(state.selected, state.items.len(), nav);
             }
         }
     }
-}
-
-/// Follows symlinks by hand so a dangling link still resolves to its (missing) target.
-fn resolve_links(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let mut path = path.to_path_buf();
-    for _ in 0..40 {
-        let is_link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink());
-        if !is_link {
-            return Ok(path);
-        }
-        let link = std::fs::read_link(&path)
-            .map_err(|e| format!("cannot read link {}: {e}", path.display()))?;
-        path = match path.parent() {
-            Some(parent) => parent.join(link),
-            None => link,
-        };
-    }
-    Err(format!("too many symlinks at {}", path.display()))
 }
 
 fn save(app: &mut App) -> Result<(), String> {
@@ -200,25 +199,62 @@ fn save(app: &mut App) -> Result<(), String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    // Write beside the config, then rename: a failed write never leaves a half-written config.
-    let mut temp = config.clone().into_os_string();
-    temp.push(".tmp");
-    // An existing config keeps its mode; a new one is private. Set it explicitly: a stale temp file keeps its own mode.
+    // An existing config keeps its mode; a new one is private.
     let permissions = std::fs::metadata(&config)
         .map(|m| m.permissions())
         .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temp)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .and_then(|()| std::fs::set_permissions(&temp, permissions))
-        .and_then(|()| std::fs::rename(&temp, &config))
+    write_atomic(&config, &text, permissions)
         .map_err(|e| format!("cannot write {}: {e}", app.config.display()))?;
     app.candidates.dirty = false;
     Ok(())
+}
+
+/// Typing goes into the prompt; Enter saves a non-empty key at once (it is not a config edit, so
+/// it ignores `dirty` and `s`), Esc cancels.
+fn key_prompt_key(app: &mut App, key: KeyEvent) {
+    let Some(prompt) = app.candidates.key_prompt.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => app.candidates.key_prompt = None,
+        KeyCode::Enter => {
+            let (provider, secret) = (prompt.provider, prompt.text.trim().to_string());
+            app.candidates.key_prompt = None;
+            app.message = if secret.is_empty() {
+                "empty: nothing saved".into()
+            } else {
+                store_key(
+                    &app.config,
+                    provider,
+                    &secret,
+                    std::env::var(provider.key_env()).ok(),
+                )
+            };
+        }
+        _ => edit(&mut prompt.text, key),
+    }
+}
+
+/// Saves the key and returns the message to show: the path, never the key. `env` is the
+/// provider's environment value, which outranks the saved key when it is non-empty.
+pub(super) fn store_key(
+    config: &std::path::Path,
+    provider: Provider,
+    secret: &str,
+    env: Option<String>,
+) -> String {
+    let path = credentials::path_for(config);
+    if let Err(e) = credentials::save_key(&path, provider, secret) {
+        return e;
+    }
+    let mut message = format!("saved {} key to {}", provider.name(), path.display());
+    if env.is_some_and(|value| !value.is_empty()) {
+        message.push_str(&format!(
+            " ({} is set and overrides it)",
+            provider.key_env()
+        ));
+    }
+    message
 }
 
 fn form_key(app: &mut App, key: KeyEvent) {
@@ -264,19 +300,35 @@ fn form_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Prices read as input / output per million tokens / per request.
+/// Prices read as input / output per million tokens.
 fn price_text(price: Option<&Price>) -> Span<'static> {
     match price {
         None => theme::status(theme::Status::Unknown, "cost unknown"),
         Some(p) => Span::styled(
             format!(
-                "{} / {} / {}",
+                "{} / {}",
                 fmt_usd(p.input_per_million),
-                fmt_usd(p.output_per_million),
-                fmt_usd(p.per_request)
+                fmt_usd(p.output_per_million)
             ),
             theme::base(),
         ),
+    }
+}
+
+/// Where the provider's key comes from. Zen's is optional, so no key is not a warning. `wide`
+/// picks the long wording with the `key: ` prefix; narrow rows drop it to leave room for the model.
+pub(super) fn key_text(provider: Provider, source: KeySource, wide: bool) -> Span<'static> {
+    let prefix = if wide { "key: " } else { "" };
+    let warn = |word: &str| theme::status(theme::Status::Warn, &format!("{prefix}{word}"));
+    match (source, provider) {
+        (KeySource::Invalid, _) => warn("file error"),
+        (KeySource::Env, _) => Span::styled(format!("{prefix}env"), theme::base()),
+        (KeySource::Saved, _) => Span::styled(format!("{prefix}saved"), theme::base()),
+        (KeySource::Missing, Provider::Zen) => Span::styled(
+            format!("{prefix}none{}", if wide { " (free ok)" } else { "" }),
+            theme::dim(),
+        ),
+        (KeySource::Missing, Provider::OpenRouter) => warn("missing"),
     }
 }
 
@@ -291,6 +343,28 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             ""
         }
     );
+    if let Some(prompt) = &state.key_prompt {
+        let lines = vec![
+            Line::from(Span::styled("Enter save · Esc cancel", theme::dim())),
+            Line::from(""),
+            Line::from(format!(
+                "{} API key  {}▏",
+                prompt.provider.name(),
+                "•".repeat(prompt.text.chars().count())
+            ))
+            .style(theme::focus()),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "saved to {} (mode 0600); the key is never shown",
+                    credentials::path_for(&app.config).display()
+                ),
+                theme::dim(),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines).block(block("api key")), area);
+        return;
+    }
     if let Some(form) = &state.form {
         let mut lines = vec![
             Line::from(Span::styled(FORM_HINTS, theme::dim())),
@@ -320,10 +394,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let height = area.height.saturating_sub(2) as usize;
-    // Name, provider and price keep their columns; the model takes what is left.
+    // Name, provider, price and key status keep their widths (the longest price text is 14, the
+    // key status 19 in the long wording, 12 in the short); the model takes what is left. Below 80
+    // columns the provider column is dropped (the form still shows it) so the model stays readable.
+    let wide = area.width >= 80;
+    let (provider_width, key_width) = if wide { (11, 19) } else { (0, 12) };
     let model_width = (area.width as usize)
-        .saturating_sub(2 + 2 + 12 + 1 + 10 + 1 + 1 + 16)
-        .max(4);
+        .saturating_sub(2 + 2 + 12 + 1 + provider_width + 1 + 14 + 2 + key_width)
+        .max(1);
+    let credentials = credentials::path_for(&app.config);
     let rows: Vec<Line> = if state.items.is_empty() {
         vec![Line::from(Span::styled(
             "no candidates: press a to add one",
@@ -336,12 +415,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .map(|c| {
                 Line::from(vec![
                     Span::raw(format!(
-                        "{:<12} {:<10} {:<model_width$} ",
+                        "{:<12} {}{:<model_width$} ",
                         cut(&c.name, 12),
-                        c.provider.name(),
+                        if wide {
+                            format!("{:<10} ", c.provider.name())
+                        } else {
+                            String::new()
+                        },
                         cut(&c.model, model_width)
                     )),
                     price_text(c.price.as_ref()),
+                    Span::raw("  "),
+                    key_text(c.provider, c.provider.key_source(&credentials), wide),
                 ])
             })
             .collect()

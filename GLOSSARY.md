@@ -82,6 +82,9 @@ Immutable records of the Run configuration, Attempts, Raw Responses and provenan
 **Pricing Snapshot**  
 Manually entered rates for each Candidate's Provider Route, captured with a Run so estimated costs can be reproduced without fetching current prices.
 
+**Credentials File**  
+The per-user `credentials.toml` beside the config file that holds one API key per Provider (`openrouter`, `zen`). An environment variable for the same Provider takes precedence. It is private to the user (mode 0600), never part of the config, and never written to Evidence.
+
 ## Relationships
 
 - A **Candidate** identifies one **Decision Model** accessed through one **Provider Route**.

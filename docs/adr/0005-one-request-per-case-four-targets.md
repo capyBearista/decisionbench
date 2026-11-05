@@ -32,7 +32,7 @@ Effortless asks only Haiku, Sonnet and Opus today. Fable is asked here on the as
 ## Consequences
 
 - One request covers every selected target, so the answers for one Trial are not independent of each other. Repetitions remain independent.
-- Evidence schema is now **3** and the grading revision is **2**. Older evidence (schema 2) is not readable; there is no compatibility layer.
-- Labels for Haiku and Fable, and the missing Sonnet and Opus slots, are drafted in `datasets/label-drafts.json`. A draft is not a label until the user approves it, and approved entries go into `datasets/cases.json`, which creates a new Dataset Revision. Until then the counts are 67 Sonnet, 8 Opus, 0 Haiku and 0 Fable.
+- Evidence schema is now **4** and the grading revision is **2**. Older evidence (schemas 2 and 3) is not readable; there is no compatibility layer.
+- Labels for all four targets were drafted, reviewed and approved by the user, then merged into `datasets/cases.json` (a new Dataset Revision). The dataset now has 66 English Cases, each labelled for Haiku, Sonnet, Opus and Fable. The five Swedish Cases (c006, c014, c028, c034, c040) were removed, and their IDs were refilled by moving the last five Cases (c071, c070, c069, c068, c067) into the gaps, so the IDs run c001 to c066.
 - `--target` chooses which questions are asked. A Case is planned when at least one selected target has a label, unless `--include-unscored` is set.
 - Fable's criteria in `effortless.md` are a draft. Results from it are a measurement of that draft, not of effortless.

@@ -852,7 +852,7 @@ fn answered_hit_prints_the_summary_and_saves_jsonl_evidence() {
     assert_eq!(lines.len(), 3);
     let manifest = &lines[0];
     assert_eq!(manifest["type"], "run");
-    assert_eq!(manifest["schema_version"], 3);
+    assert_eq!(manifest["schema_version"], 4);
     assert_eq!(manifest["dataset"]["name"], "bundled cases");
     assert_eq!(manifest["planned_trials"], 1);
     assert_eq!(manifest["candidates"][0]["name"], "jev-openrouter");
@@ -905,6 +905,76 @@ fn evidence_never_holds_the_key() {
     assert!(!file.contains(TEST_KEY));
     assert!(!stdout(&out).contains(TEST_KEY) && !stderr(&out).contains(TEST_KEY));
     assert!(!file.to_lowercase().contains("authorization"));
+}
+
+/// An OpenRouter Eval whose config sits alone in its own directory, so the `credentials.toml`
+/// beside it belongs to this test only.
+fn eval_with_credentials(test: &str, credentials: &str, stub: &Stub) -> Eval {
+    let dir = fresh_dir(test);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        candidate_toml("jev-openrouter", "openrouter", "typesafe/jev-1.13"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("credentials.toml"), credentials).unwrap();
+    Eval {
+        out_dir: dir.join("out"),
+        config: dir.join("config.toml"),
+        url: stub.url.clone(),
+    }
+}
+
+#[test]
+fn a_saved_key_beside_the_config_is_sent_unless_the_environment_has_one_and_stays_out_of_evidence()
+{
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = eval_with_credentials(
+        "saved-key",
+        &format!("openrouter = \"{TEST_KEY}\"\n"),
+        &stub,
+    );
+    let out = eval.run(&C002_OPUS, &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stub.next().header("authorization"),
+        Some(format!("Bearer {TEST_KEY}"))
+    );
+    let file = std::fs::read_to_string(eval.file()).unwrap();
+    assert!(!file.contains(TEST_KEY));
+    assert!(!stdout(&out).contains(TEST_KEY) && !stderr(&out).contains(TEST_KEY));
+
+    // A non-empty environment variable wins; an empty one does not.
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", "env-key")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stub.next().header("authorization"),
+        Some("Bearer env-key".to_string())
+    );
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", "")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stub.next().header("authorization"),
+        Some(format!("Bearer {TEST_KEY}"))
+    );
+}
+
+#[test]
+fn a_bad_credentials_file_exits_1_naming_it_without_a_request_or_the_key() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = eval_with_credentials(
+        "bad-credentials",
+        &format!("typo = \"{TEST_KEY}\"\n"),
+        &stub,
+    );
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", "env-key")]);
+    assert_eq!(out.status.code(), Some(1));
+    let message = stderr(&out);
+    let path = eval.config.with_file_name("credentials.toml");
+    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(!message.contains(TEST_KEY), "{message}");
+    assert!(files_in(&eval.out_dir).is_empty());
+    assert!(stub.requests.try_recv().is_err(), "no request was sent");
 }
 
 #[test]
@@ -1179,8 +1249,12 @@ fn missing_openrouter_key_exits_1_without_a_request_or_file() {
     let eval = openrouter_eval("no-key", &stub);
     let out = eval.run(&C002_OPUS, &[]);
     assert_eq!(out.status.code(), Some(1));
+    let credentials = eval.config.with_file_name("credentials.toml");
     assert!(
-        stderr(&out).contains("OPENROUTER_API_KEY"),
+        stderr(&out).contains(&format!(
+            "OPENROUTER_API_KEY is not set (and no openrouter key in {})",
+            credentials.display()
+        )),
         "{}",
         stderr(&out)
     );
@@ -2496,7 +2570,7 @@ fn cost_uses_the_price_captured_in_the_run_and_counts_failed_attempts_as_unbille
     assert!(stdout(&out).contains(cost), "{}", stdout(&out));
     assert_eq!(
         eval.manifest()["candidates"][0]["price"],
-        json!({"input_per_million": 0.04, "output_per_million": 0.08, "per_request": 0.0})
+        json!({"input_per_million": 0.04, "output_per_million": 0.08})
     );
 
     // A later config edit must not change what an old run cost.
@@ -2642,7 +2716,7 @@ fn manifest_line(
     planned: usize,
 ) -> Value {
     json!({
-        "type": "run", "schema_version": 3, "id": id, "created_unix_ms": created,
+        "type": "run", "schema_version": 4, "id": id, "created_unix_ms": created,
         "dataset": {"name": "ds.json", "sha256": dataset_sha},
         "instructions": instructions.iter()
             .map(|(n, s)| json!({"name": n, "sha256": s, "text": "t"})).collect::<Vec<_>>(),
@@ -2863,7 +2937,7 @@ fn show_prints_the_full_report_for_a_partial_run() {
     assert_has_line(&out, "trials: 7 recorded of 9 planned");
     assert_has_line(&out, "dataset: ds.json sha256 0123456789ab");
     assert_has_line(&out, "grading revision: 2");
-    assert_has_line(&out, "schema: 3");
+    assert_has_line(&out, "schema: 4");
 
     // Accuracy per target, hand-counted over the 5 answered trials (T0 T1 T2 T3 T6):
     //   haiku:  hit(T0) over(T1) unscored(T2 T3 T6) -> 1 hit of 2 valid scored, n=5

@@ -1,6 +1,7 @@
 //! Provider routes and Candidates: how one Decisions request is built, sent and read (SPEC §4a).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use serde_json::{Map, Value, json};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TomlError};
 
 use crate::cost::Price;
+use crate::credentials::{self, Credentials};
 use crate::dataset::Case;
 use crate::grade::Target;
 use crate::instructions::JudgeInstructions;
@@ -34,21 +36,64 @@ impl Provider {
         }
     }
 
-    fn key_env(self) -> &'static str {
+    pub fn key_env(self) -> &'static str {
         match self {
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::Zen => "OPENCODE_API_KEY",
         }
     }
 
-    /// The API key from the environment; an empty value counts as unset. Free Zen models need none.
-    pub fn key(self) -> Result<Option<String>, String> {
-        let key = env_nonempty(self.key_env());
-        if key.is_none() && self == Self::OpenRouter {
-            return Err(format!("{} is not set", self.key_env()));
-        }
-        Ok(key)
+    /// The API key: a non-empty environment variable, else the one saved in the `credentials`
+    /// file. Free Zen models need none.
+    pub fn key(self, credentials: &Path) -> Result<Option<String>, String> {
+        self.key_with(std::env::var(self.key_env()).ok(), credentials)
     }
+
+    /// Where `key` would come from. A credentials file that cannot be read or parsed is `Invalid`
+    /// whatever the environment holds, because `key` fails on it too.
+    pub fn key_source(self, credentials: &Path) -> KeySource {
+        let Ok(saved) = credentials::load(credentials) else {
+            return KeySource::Invalid;
+        };
+        let env = std::env::var(self.key_env()).ok();
+        self.pick(env, &saved)
+            .map_or(KeySource::Missing, |(source, _)| source)
+    }
+
+    fn key_with(self, env: Option<String>, credentials: &Path) -> Result<Option<String>, String> {
+        let saved = credentials::load(credentials)?;
+        match self.pick(env, &saved) {
+            Some((_, key)) => Ok(Some(key)),
+            None if self == Self::OpenRouter => Err(format!(
+                "{} is not set (and no {} key in {})",
+                self.key_env(),
+                self.name(),
+                credentials.display()
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// The environment value wins over the saved one; an empty value counts as unset.
+    fn pick(self, env: Option<String>, saved: &Credentials) -> Option<(KeySource, String)> {
+        let saved = saved.get(self).map(str::to_string);
+        env.filter(|key| !key.is_empty())
+            .map(|key| (KeySource::Env, key))
+            .or_else(|| {
+                saved
+                    .filter(|key| !key.is_empty())
+                    .map(|key| (KeySource::Saved, key))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    Env,
+    Saved,
+    Missing,
+    /// The credentials file exists but cannot be read or parsed.
+    Invalid,
 }
 
 pub fn env_nonempty(name: &str) -> Option<String> {
@@ -388,6 +433,75 @@ mod tests {
 
     const OPENROUTER_200: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort_sonnet":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79},"effort_opus":{"type":"choice","choice":"high"}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"id":"gen-dec-1793762009-oxb0hWCuUBlv6AKzC6ON","provider":"TypeSafe"}"#;
 
+    /// A credentials file with the given text in a fresh temp directory.
+    fn credentials_file(text: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "decisionbench-key-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn some(text: &str) -> Option<String> {
+        Some(text.to_string())
+    }
+
+    #[test]
+    fn a_nonempty_environment_key_wins_over_a_saved_one() {
+        let path = credentials_file("openrouter = \"saved\"\n");
+        let key = Provider::OpenRouter.key_with(some("from-env"), &path);
+        assert_eq!(key, Ok(some("from-env")));
+        let saved = crate::credentials::load(&path).unwrap();
+        let (source, _) = Provider::OpenRouter.pick(some("from-env"), &saved).unwrap();
+        assert_eq!(source, KeySource::Env);
+    }
+
+    #[test]
+    fn an_empty_environment_key_falls_through_to_the_saved_one() {
+        let path = credentials_file("zen = \"saved\"\n");
+        assert_eq!(Provider::Zen.key_with(some(""), &path), Ok(some("saved")));
+        let saved = crate::credentials::load(&path).unwrap();
+        let (source, _) = Provider::Zen.pick(some(""), &saved).unwrap();
+        assert_eq!(source, KeySource::Saved);
+        // An empty saved key counts as unset too.
+        let empty = credentials_file("zen = \"\"\n");
+        assert_eq!(Provider::Zen.key_with(None, &empty), Ok(None));
+    }
+
+    #[test]
+    fn the_other_providers_saved_key_is_not_used() {
+        let path = credentials_file("zen = \"zen-key\"\n");
+        assert!(Provider::OpenRouter.key_with(None, &path).is_err());
+        let path = credentials_file("openrouter = \"or-key\"\n");
+        assert_eq!(Provider::Zen.key_with(None, &path), Ok(None));
+    }
+
+    #[test]
+    fn no_key_anywhere_is_an_error_for_openrouter_and_fine_for_zen() {
+        let path = std::env::temp_dir().join("decisionbench-key-absent/credentials.toml");
+        assert_eq!(
+            Provider::OpenRouter.key_with(None, &path),
+            Err(format!(
+                "OPENROUTER_API_KEY is not set (and no openrouter key in {})",
+                path.display()
+            ))
+        );
+        assert_eq!(Provider::Zen.key_with(None, &path), Ok(None));
+    }
+
+    #[test]
+    fn a_broken_credentials_file_is_an_error_even_when_the_environment_has_a_key() {
+        let path = credentials_file("typo = \"x\"\n");
+        let error = Provider::Zen.key_with(some("from-env"), &path).unwrap_err();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
     #[test]
     fn candidates_round_trip_through_the_config_text() {
         let text = "[[candidate]]\nname = \"a\"\ndecision_model = \"jev\"\nprovider = \"zen\"\nmodel = \"m\"\n\n[candidate.price]\ninput_per_million = 1.5\n\n[[candidate]]\nname = \"b\"\nprovider = \"openrouter\"\nmodel = \"n\"\n";
@@ -606,15 +720,14 @@ mod tests {
     #[test]
     fn parses_a_candidate_price_with_and_without_optional_fields() {
         let full = parse_candidates(&format!(
-            "{PRICED}[candidate.price]\ninput_per_million = 0.04\noutput_per_million = 0.08\nper_request = 0.001\n"
+            "{PRICED}[candidate.price]\ninput_per_million = 0.04\noutput_per_million = 0.08\n"
         ))
         .unwrap();
         assert_eq!(
             full[0].price,
             Some(Price {
                 input_per_million: 0.04,
-                output_per_million: 0.08,
-                per_request: 0.001
+                output_per_million: 0.08
             })
         );
         let minimal = parse_candidates(&format!(
@@ -625,11 +738,18 @@ mod tests {
             minimal[0].price,
             Some(Price {
                 input_per_million: 0.04,
-                output_per_million: 0.0,
-                per_request: 0.0
+                output_per_million: 0.0
             })
         );
         assert_eq!(parse_candidates(PRICED).unwrap()[0].price, None);
+    }
+
+    #[test]
+    fn rejects_the_removed_per_request_fee() {
+        let text =
+            format!("{PRICED}[candidate.price]\ninput_per_million = 1\nper_request = 0.001\n");
+        let err = parse_candidates(&text).unwrap_err();
+        assert!(err.contains("unknown field `per_request`"), "{err}");
     }
 
     #[test]

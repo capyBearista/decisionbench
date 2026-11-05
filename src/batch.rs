@@ -2,11 +2,15 @@
 //! them, writing the evidence file and running the Trials. The CLI and the TUI both call it.
 
 use std::collections::HashSet;
+use std::fs::Permissions;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 use crate::cost::plural;
+use crate::credentials;
 use crate::dataset::{BUNDLED_CASES, Case, parse_cases};
 use crate::evidence::{
     self, CandidateRecord, EndRecord, GRADING_REVISION, Hashed, InstructionsRecord, Line, Manifest,
@@ -20,6 +24,50 @@ use crate::sha256_hex;
 
 pub fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// Follows symlinks by hand so a dangling link still resolves to its (missing) target.
+pub fn resolve_links(path: &Path) -> Result<PathBuf, String> {
+    let mut path = path.to_path_buf();
+    for _ in 0..40 {
+        let is_link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink());
+        if !is_link {
+            return Ok(path);
+        }
+        let link = std::fs::read_link(&path)
+            .map_err(|e| format!("cannot read link {}: {e}", path.display()))?;
+        path = match path.parent() {
+            Some(parent) => parent.join(link),
+            None => link,
+        };
+    }
+    Err(format!("too many symlinks at {}", path.display()))
+}
+
+/// Writes `text` to a temp file beside `path`, then renames it over `path`: a failed write never
+/// leaves a half-written file, and a failed attempt removes its temp file. The temp file is made
+/// private (0600) before any text goes in, because a stale temp file would keep its own mode;
+/// `permissions` are applied to the finished file.
+pub fn write_atomic(path: &Path, text: &str, permissions: Permissions) -> std::io::Result<()> {
+    let mut temp = path.to_path_buf().into_os_string();
+    temp.push(".tmp");
+    let write = || {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp)?;
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        file.write_all(text.as_bytes())?;
+        file.set_permissions(permissions)?;
+        std::fs::rename(&temp, path)
+    };
+    let result = write();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// The dataset's display name, SHA-256 of its bytes (its revision) and Cases.
@@ -219,9 +267,10 @@ pub fn prepare(args: &RunArgs) -> Result<Prepared, String> {
         }
     }
 
+    let credentials = credentials::path_for(&config);
     let keys: Vec<Option<String>> = candidates
         .iter()
-        .map(|c| c.provider.key())
+        .map(|c| c.provider.key(&credentials))
         .collect::<Result<_, _>>()?;
     let plan = run::plan(
         candidates.len(),
@@ -415,6 +464,17 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::time::Duration;
+
+    #[test]
+    fn a_failed_atomic_write_removes_its_temp_file() {
+        let dir = std::env::temp_dir().join(format!("decisionbench-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The target is a directory, so the final rename fails after the temp file was written.
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        let result = write_atomic(&dir.join("target"), "secret", Permissions::from_mode(0o600));
+        assert!(result.is_err());
+        assert!(!dir.join("target.tmp").exists());
+    }
 
     /// A write error mid-run (the evidence file is /dev/full, which refuses every write) fails the
     /// Run, and every Trial from the failing one on is handed to the caller as unsaved.
