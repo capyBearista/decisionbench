@@ -73,6 +73,15 @@ Among answered Trials where at least two selected Target Models are labelled and
 **Gap Agreement**  
 For a pair of selected Target Models whose label ranges do not overlap (so one is expected to need more effort), the two valid predictions keep that strict order. Counted over eligible pairs.
 
+**Variant**  
+One column of a comparison: a Judge Instructions set as run in one Run. A Run with several prompts gives several Variants; the same prompt in two Runs gives two. Variants are labelled by prompt name, with a content hash or Run id added only when names collide.
+
+**Baseline**  
+The first Variant of a comparison. Every other Variant is measured against it with a paired delta (`+g -l`): the paired Trials (Case × repetition) the Variant gained and lost relative to the Baseline. A net change of one Case's repetitions or less is marked as within noise.
+
+**Pooled Row**  
+The row of a comparison matrix that sums valid scored predictions over all Candidates and Targets for each Variant. It exists only to compare Variants at a glance, is always labelled, and is not a score.
+
 **Consistency**  
 For one Candidate × Judge Instructions × Case × Target Model with at least two valid efforts across repetitions: all of them are the same effort.
 

@@ -9,7 +9,7 @@ cargo run -- grade PREDICTIONS.json     # grade against the bundled dataset (or 
 cargo run -- run --candidate jev-openrouter --case c002 --target opus --repetitions 1   # smoke test
 cargo run -- run --candidate jev-openrouter --candidate jev-zen-free                     # full run
 cargo run -- show ~/.local/share/decisionbench/runs/FILE.jsonl      # full report of one run
-cargo run -- compare RUN1.jsonl RUN2.jsonl                          # runs side by side
+cargo run -- compare RUN1.jsonl RUN2.jsonl                          # prompts and runs side by side
 cargo run -- history                                                # saved runs
 cargo run -- tui                                                    # terminal UI
 ```
@@ -19,6 +19,8 @@ cargo run -- tui                                                    # terminal U
 A Candidate pairs a Decision Model with a Provider Route. Define Candidates in `$XDG_CONFIG_HOME/decisionbench/config.toml` (default `~/.config/decisionbench/config.toml`, or pass `--config FILE`):
 
 ```toml
+# prompts_dir = "prompts"          # optional, top level: a folder of Judge Instructions files for the TUI
+
 [[candidate]]
 name = "jev-openrouter"            # your label; must be unique
 decision_model = "jev-1.13"        # optional: the underlying model
@@ -36,6 +38,8 @@ provider = "zen"
 model = "jev-1.13-free"
 ```
 
+The only top-level key besides `[[candidate]]` is the optional `prompts_dir` (see [Judge Instructions](#judge-instructions)); any other unknown key is rejected. A config with no `[[candidate]]` tables loads as an empty list.
+
 API keys come from the environment variables `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent without a key). A non-empty variable wins; otherwise the key saved in `credentials.toml`, next to the config file, is used (an empty value counts as unset). Save a key with `K` (Shift-k) on the TUI Candidates screen, or write the file by hand as `openrouter = "..."` and/or `zen = "..."`. The TUI creates the file with mode 0600; a hand-written one is read as is, so make it private yourself. A key is never written to the config or to evidence. An unreadable or invalid `credentials.toml` stops runs even when an environment key is set; the Candidates row then shows `file error`. Requests always go to the provider's own URL and honour the standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` environment variables. The tests redirect every request, API key included, to a local stub with `DECISIONBENCH_TEST_BASE_URL`; never set it outside tests.
 
 ### Running a benchmark
@@ -45,7 +49,7 @@ API keys come from the environment variables `OPENROUTER_API_KEY` (required for 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--candidate NAME` | required | Candidate from the config; repeatable |
-| `--instructions PATH` | bundled `neutral` | Judge Instructions file; repeatable |
+| `--instructions PATH` | bundled `neutral` | Judge Instructions file; repeatable, with distinct names. Any given path replaces the bundled set |
 | `--case ID` | every Case | repeatable |
 | `--target haiku\|sonnet\|opus\|fable` | all four | which questions to ask; repeatable. The instructions file must have a section for each |
 | `--repetitions N` | 3 | independent Trials per combination |
@@ -65,15 +69,15 @@ A reply that arrives is never retried, even when its effort is invalid. A Trial'
 
 ### Reading results
 
-- `show FILE` prints the full report of one run: accuracy (hit, under, over, invalid and unscored counts per Candidate × Judge Instructions × target, with the denominator), cross-model metrics, consistency, coverage and validity, reliability, latency (median and p95), cost and warnings. A ratio with nothing to divide by prints as `n/a`, not 0%.
-- `compare FILE…` (two or more) prints accuracy per run side by side, after a list of everything that makes the runs not directly comparable: dataset, grading revision, schema, targets, instructions content, provider route, case selection, repetitions, unscored inclusion, candidates, or a run that is not complete.
+- `show FILE` prints the full report of one run. After the run header comes a summary: the table described under `compare`, for this run alone, with one column per prompt. The rest is accuracy (hit, under, over, invalid and unscored counts per Candidate × Judge Instructions × target, with the denominator), cross-model metrics, consistency, coverage and validity, reliability, latency (median and p95), cost and warnings. A ratio with nothing to divide by prints as `n/a`, not 0%.
+- `compare FILE…` (two or more) first lists everything that makes the runs not directly comparable: dataset, grading revision, schema, targets, provider route, case selection, repetitions, unscored inclusion, candidates, or a run that is not complete. Timeout, concurrency and retries are listed apart as `settings differ`. Different prompts are not a difference: they are the columns. It then prints one table with a row per candidate × target and a column per prompt in each run; the first column is the baseline. A column is named after its prompt, with the first 12 characters of its hash added when two prompts share a name but not content, and ` in <run id>` when the same prompt appears in two runs. Each cell after the first shows its hit count and `+g -l`: the trials (case × repetition) that the baseline missed and this prompt hit, and the reverse. A net change of at most one case's worth of repetitions is marked `~` (within noise); this is a rule of thumb, not a significance test. A `pooled` row adds all candidates and targets together over valid scored predictions; it is not a score.
 - `history [DIR]` lists saved runs by creation time (default: the evidence folder above) with state, recorded and planned Trials, Candidates and dataset hash. Unreadable files are listed as such.
 
 The two cross-model metrics sit next to the per-target numbers and never replace them. **Joint hit** is the share of Trials, among those with at least two labelled targets that all gave a valid effort, where every labelled target hit. **Gap agreement** is the share of eligible target pairs that keep the expected order: when two labels do not overlap, the target with the higher range must get a strictly higher effort.
 
 ### Terminal UI
 
-`decisionbench tui` (also takes `--config FILE` and `--out DIR`) opens the same engine and reports in a terminal. It has five screens: Candidates, Dataset, Run setup, Run and Results/History. Switch screens with `Tab` or `1`-`5`, move with the arrow keys or `h`/`j`/`k`/`l`, select with `Enter`, go back with `Esc` and quit with `q`. On the Candidates screen, `K` asks for the API key of the highlighted Candidate's provider and saves it at once to `credentials.toml`; each row shows `key: env`, `key: saved` or `key: missing`. On the Run screen, press `c` to cancel (stop starting Trials) and `c` again to stop waiting for Trials in flight. On the Dataset screen, `Space` marks or unmarks the highlighted Case (`[x]`) and `x` clears all marks; Run setup then shows `cases: all eligible` or `cases: N selected (...)`, the same selection as `--case`. If the evidence file cannot be written during a Run, the Run screen says so and the unsaved Trials are printed to stderr as JSON lines when you quit. Details may change while the TUI is being built.
+`decisionbench tui` (also takes `--config FILE` and `--out DIR`) opens the same engine and reports in a terminal. It has five screens: Candidates, Dataset, Run setup, Run and Results/History. Switch screens with `Tab` or `1`-`5`, move with the arrow keys or `h`/`j`/`k`/`l`, select with `Enter`, go back with `Esc` and quit with `q`. On the Candidates screen, `K` asks for the API key of the highlighted Candidate's provider and saves it at once to `credentials.toml`; each row shows `key: env`, `key: saved` or `key: missing`. On the Run setup screen, prompts are a list: the bundled `neutral` is chosen by default, `Space` toggles a prompt, `a` adds a prompt file by path (checked on entry, relative to the folder you started the TUI from) and `d` removes an added one, so one run can use several prompts. The `prompt folder` row sets `prompts_dir` in the config file; its `*.md` files are listed too, and `r` rescans the folder. A dim `plan:` line above Start shows candidates × prompts × cases × repetitions = trials, and the most requests that could take. On the Run screen, press `c` to cancel (stop starting Trials) and `c` again to stop waiting for Trials in flight; `Enter` opens the finished run in Results. On the Dataset screen, `Space` marks or unmarks the highlighted Case (`[x]`) and `x` clears all marks; Run setup then shows `cases: all eligible` or `cases: N selected (...)`, the same selection as `--case`. The Dataset screen draws each labelled target's acceptable range as a bar across the five effort levels. Results opens a run on a summary table, and `[` and `]` switch between it and the full report, which is the text `show` prints (`compare` for marked runs). Mark runs with `Space` and press `m` or `Enter` to compare; marks show as `[1]`, `[2]`… in the order you set them, and the first is the baseline. If the evidence file cannot be written during a Run, the Run screen says so and the unsaved Trials are printed to stderr as JSON lines when you quit. Details may change while the TUI is being built.
 
 **Cost:** each answered Attempt costs `input_tokens × input rate + output_tokens × output rate`, using the price captured in the run, not the current config. A failed Attempt (error reply or transport failure before a success status) is counted as costing nothing, on the assumption that providers do not bill failed requests; the summary says how many were counted this way. A Candidate without a price, or an answer without the needed usage counters, shows as unknown, never as zero. OpenRouter's own `usage.cost` is kept in the raw reply but not used.
 
@@ -86,7 +90,7 @@ The task text, per-model instructions and per-effort descriptions sent with ever
 - [`prompts/neutral.md`](prompts/neutral.md), the default, uses the same neutral criteria for every model and has no effortless policy rules.
 - [`prompts/effortless.md`](prompts/effortless.md), selected with `--instructions prompts/effortless.md`, mirrors effortless's text for Haiku, Sonnet and Opus, plus a **drafted Fable section** that has not been measured.
 
-Pass another file with `--instructions PATH`; the file name without `.md` is the set's name. The format is an intro (sent as `state.task`), then one `## <target>` section per model in the order `haiku`, `sonnet`, `opus`, `fable`. Each section is an instructions paragraph followed by exactly five lines in the order `low`, `medium`, `high`, `xhigh`, `max`, none empty:
+Pass another file with `--instructions PATH`; the file name without `.md` is the set's name. Repeat the flag to put several sets in one run (names must be distinct); `compare` then lines the sets up side by side, and also across runs. With no flag the run uses `neutral`; with any flag it uses only the files given, so add `prompts/neutral.md` to include the default. In the TUI, the config key `prompts_dir = "<folder>"` names a folder whose `*.md` files appear in the Run setup list (not subfolders; a relative path is relative to the config file's folder, and `~` is not expanded; the TUI writes the key when you set the folder). The command line does not read it. A file that does not parse, or whose name repeats a listed prompt, is shown but cannot be chosen. The format is an intro (sent as `state.task`), then one `## <target>` section per model in the order `haiku`, `sonnet`, `opus`, `fable`. Each section is an instructions paragraph followed by exactly five lines in the order `low`, `medium`, `high`, `xhigh`, `max`, none empty:
 
 ```markdown
 Choose the reasoning effort ... for each model asked about.
