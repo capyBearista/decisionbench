@@ -18,7 +18,7 @@ use crate::evidence::{RunFile, RunState, RunSummary};
 use crate::report;
 
 pub const HINTS: &str =
-    "j/k move · Space mark · Enter open · m compare · [ ] panel · Esc back · q quit";
+    "j/k move · Space mark · Enter open · m compare · [ ] panel · c columns · Esc back · q quit";
 
 struct Entry {
     name: String,
@@ -55,6 +55,10 @@ struct View {
     summary: Vec<Row>,
     /// The text `show` or `compare` prints.
     full: Vec<Row>,
+    /// The Runs the panels are built from, and the axis their columns are on (never `Auto`); the
+    /// axis is `None` for a view of text that is not a report, which has no columns to toggle.
+    runs: Vec<RunFile>,
+    axis: Option<report::Axis>,
     scroll: usize,
     /// Columns cut off the left of every table line, so wide lines can be read to their end.
     hscroll: usize,
@@ -179,10 +183,41 @@ impl View {
             panel: Panel::Summary,
             summary,
             full: plain_rows(full, false),
+            runs: Vec::new(),
+            axis: None,
             scroll: 0,
             hscroll: 0,
             width: Cell::new(usize::MAX),
         }
+    }
+
+    /// Opens on the summary of `runs`, with the columns `Auto` picks.
+    fn of_runs(title: String, runs: Vec<RunFile>) -> Self {
+        let mut view = Self::new(title, Vec::new(), "");
+        view.runs = runs;
+        view.show_columns(report::Axis::Auto);
+        view
+    }
+
+    /// Builds both panels from `self.runs` with the columns on `axis`.
+    fn show_columns(&mut self, axis: report::Axis) {
+        let matrix = report::Matrix::from_runs(&self.runs, axis);
+        let full = match self.runs.as_slice() {
+            [run] => report::report(run, matrix.axis).to_string(),
+            runs => report::Comparison(runs, matrix.axis).to_string(),
+        };
+        self.summary = summary(&self.runs, &matrix);
+        self.full = plain_rows(&full, false);
+        self.axis = Some(matrix.axis);
+    }
+
+    /// Swaps prompts and candidates as the columns, keeping the scroll where the new text still has it.
+    fn toggle_columns(&mut self) {
+        let Some(axis) = self.axis else { return };
+        self.show_columns(axis.toggled());
+        let rows = self.display(self.width.get()).len();
+        self.scroll = self.scroll.min(rows.saturating_sub(1));
+        self.hscroll = self.hscroll.min(self.widest().saturating_sub(1));
     }
 
     fn lines(&self) -> &[Row] {
@@ -197,7 +232,12 @@ impl View {
             Panel::Summary => "summary",
             Panel::Full => "full report",
         };
-        format!("{} · {panel}", self.title)
+        match (self.panel, self.axis) {
+            (Panel::Summary, Some(axis)) => {
+                format!("{} · {panel} (columns: {})", self.title, axis.name())
+            }
+            _ => format!("{} · {panel}", self.title),
+        }
     }
 
     /// Shows `panel` from its top left; the panel already shown stays where it is.
@@ -221,20 +261,24 @@ impl View {
             .collect()
     }
 
+    /// The width of the widest table line of the panel shown; sideways scroll stops inside it.
+    fn widest(&self) -> usize {
+        self.lines()
+            .iter()
+            .filter(|r| !r.prose)
+            .map(|r| columns(&r.line))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Moves the view: vertical keys scroll rows (wrapped prose counts every row it takes),
     /// Left/Right shift table lines by `HSTEP` columns, kept between 0 and the widest one.
     fn scroll(&mut self, nav: Nav) {
         let rows = self.display(self.width.get()).len();
-        let widest = self
-            .lines()
-            .iter()
-            .filter(|r| !r.prose)
-            .map(|r| columns(&r.line))
-            .max();
         match nav {
             Nav::Left => self.hscroll = self.hscroll.saturating_sub(HSTEP),
             Nav::Right => {
-                self.hscroll = (self.hscroll + HSTEP).min(widest.unwrap_or(0).saturating_sub(1));
+                self.hscroll = (self.hscroll + HSTEP).min(self.widest().saturating_sub(1));
             }
             // A resize can leave `scroll` past the last row: start from the last one.
             _ => self.scroll = step(self.scroll.min(rows.saturating_sub(1)), rows, nav),
@@ -304,11 +348,12 @@ fn matrix_lines(matrix: &report::Matrix, pooled: bool) -> Vec<Row> {
 }
 
 /// What the summary panel shows for `runs`: for a comparison, first whether the Runs compare;
-/// then the matrix. A single Run pools its rows only when it has several, as its report does.
-fn summary(runs: &[RunFile]) -> Vec<Row> {
+/// then the matrix built from them. A single Run pools its rows only when it has several, as its
+/// report does.
+fn summary(runs: &[RunFile], matrix: &report::Matrix) -> Vec<Row> {
     let mut lines = Vec::new();
     if runs.len() > 1 {
-        let (incomparable, head) = report::comparability(runs);
+        let (incomparable, head) = report::comparability(runs, matrix.axis);
         let style = if incomparable {
             theme::base().fg(theme::STATUS_WARN)
         } else {
@@ -320,9 +365,8 @@ fn summary(runs: &[RunFile]) -> Vec<Row> {
         );
         lines.push(Row::prose(Line::default()));
     }
-    let matrix = report::Matrix::from_runs(runs);
     lines.extend(matrix_lines(
-        &matrix,
+        matrix,
         runs.len() > 1 || matrix.rows.len() > 1,
     ));
     lines
@@ -392,11 +436,7 @@ impl State {
         // Read again so the text is what `show` prints for the file as it is now.
         let title = format!("report {}", entry.name);
         self.view = Some(match load_run(&dir.join(&entry.name)) {
-            Ok(run) => View::new(
-                title,
-                summary(std::slice::from_ref(&run)),
-                &report::report(&run).to_string(),
-            ),
+            Ok(run) => View::of_runs(title, vec![run]),
             Err(e) => View::new(title, plain_rows(&e, true), &e),
         });
     }
@@ -410,11 +450,7 @@ impl State {
         if runs.len() < 2 {
             return Err("mark two or more readable runs with Space to compare".into());
         }
-        self.view = Some(View::new(
-            format!("compare {} runs", runs.len()),
-            summary(&runs),
-            &report::Comparison(&runs).to_string(),
-        ));
+        self.view = Some(View::of_runs(format!("compare {} runs", runs.len()), runs));
         Ok(())
     }
 }
@@ -429,6 +465,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             view.select(Panel::Summary);
         } else if key.code == KeyCode::Char(']') {
             view.select(Panel::Full);
+        } else if key.code == KeyCode::Char('c') {
+            view.toggle_columns();
         } else if let Some(n) = nav(key) {
             view.scroll(n);
         }
@@ -604,13 +642,15 @@ mod tests {
 
     /// The summary's lines, without whether each is prose.
     fn summary_lines(runs: &[RunFile]) -> Vec<Line<'static>> {
-        summary(runs).into_iter().map(|r| r.line).collect()
+        let matrix = report::Matrix::from_runs(runs, report::Axis::Auto);
+        summary(runs, &matrix).into_iter().map(|r| r.line).collect()
     }
 
     #[test]
     fn the_summary_rows_read_as_the_matrix_the_report_prints() {
         let run = moving_run();
-        let shown = report::Matrix::from_runs(std::slice::from_ref(&run)).to_string();
+        let shown =
+            report::Matrix::from_runs(std::slice::from_ref(&run), report::Axis::Auto).to_string();
         // The engine's two lines before the table repeat the header row; its rows are indented.
         let expected: Vec<&str> = shown
             .lines()
@@ -695,7 +735,77 @@ mod tests {
         let mut run = moving_run();
         run.manifest.instructions.clear();
         run.trials.clear();
-        assert!(summary(&[run]).is_empty());
+        assert!(summary_lines(&[run]).is_empty());
+    }
+
+    /// The text of a panel's rows.
+    fn texts(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(|r| plain(&r.line)).collect()
+    }
+
+    /// The summary's header row without its padding.
+    fn header(view: &View) -> String {
+        let line = plain(&view.summary[0].line);
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn toggling_the_columns_rebuilds_both_panels_from_the_same_engine() {
+        let mut view = View::of_runs("report x".into(), vec![moving_run()]);
+        assert_eq!(view.title(), "report x · summary (columns: prompts)");
+        assert_eq!(header(&view), "candidate target p (baseline) q");
+        view.select(Panel::Full);
+        // Only the summary panel names the columns.
+        assert_eq!(view.title(), "report x · full report");
+        assert_eq!(
+            view.full[0].line.spans[0].content, "== Run ==",
+            "the full report is the one `show` prints"
+        );
+
+        view.toggle_columns();
+        let expected = report::report(&moving_run(), report::Axis::Candidate).to_string();
+        assert_eq!(
+            texts(&view.full),
+            expected.lines().map(String::from).collect::<Vec<_>>()
+        );
+        view.select(Panel::Summary);
+        assert_eq!(view.title(), "report x · summary (columns: candidates)");
+        assert_eq!(header(&view), "prompt target c (baseline) d e");
+
+        view.toggle_columns();
+        assert_eq!(view.title(), "report x · summary (columns: prompts)");
+        assert_eq!(
+            texts(&view.full),
+            report::report(&moving_run(), report::Axis::Auto)
+                .to_string()
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn toggling_the_columns_clamps_the_scroll_only_when_it_is_past_the_new_text() {
+        let mut view = View::of_runs("t".into(), vec![moving_run()]);
+        view.width.set(200);
+        view.select(Panel::Full);
+        view.scroll = 3;
+        view.hscroll = 2;
+        view.toggle_columns();
+        assert_eq!((view.scroll, view.hscroll), (3, 2));
+        view.scroll = 10_000;
+        view.hscroll = 10_000;
+        view.toggle_columns();
+        assert_eq!(view.scroll, view.display(200).len() - 1);
+        assert_eq!(view.hscroll, view.widest() - 1);
+    }
+
+    #[test]
+    fn a_view_without_runs_has_no_columns_to_toggle() {
+        let mut view = View::new("t".into(), plain_rows("a", false), "b");
+        view.toggle_columns();
+        assert_eq!(view.title(), "t · summary");
+        assert_eq!(texts(&view.summary), ["a"]);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use decisionbench::cost::plural;
 use decisionbench::dataset::summarize;
 use decisionbench::evidence::{self, Line, RunFile, RunState};
 use decisionbench::grade::{Tally, Target, grade_all, parse_predictions};
-use decisionbench::report;
+use decisionbench::report::{self, Axis};
 use decisionbench::run::Settings;
 
 #[derive(Parser)]
@@ -76,11 +76,19 @@ enum Command {
         out: Option<PathBuf>,
     },
     /// Print the full report of a saved run file (offline).
-    Show { file: PathBuf },
+    Show {
+        file: PathBuf,
+        /// What the summary table has as columns; auto picks prompts or candidates, whichever differ.
+        #[arg(long, value_enum, default_value_t = Axis::Auto)]
+        columns: Axis,
+    },
     /// Put several saved run files side by side and list what makes them not comparable (offline).
     Compare {
         #[arg(required = true, num_args = 2..)]
         files: Vec<PathBuf>,
+        /// What the table has as columns; auto picks prompts or candidates, whichever differ.
+        #[arg(long, value_enum, default_value_t = Axis::Auto)]
+        columns: Axis,
     },
     /// Open the terminal UI: manage candidates, inspect the dataset, run, and read results.
     Tui {
@@ -152,8 +160,8 @@ fn main() -> ExitCode {
             dataset,
             out,
         }),
-        Command::Show { file } => show(&file).map(|()| ExitCode::SUCCESS),
-        Command::Compare { files } => compare(&files).map(|()| ExitCode::SUCCESS),
+        Command::Show { file, columns } => show(&file, columns).map(|()| ExitCode::SUCCESS),
+        Command::Compare { files, columns } => compare(&files, columns).map(|()| ExitCode::SUCCESS),
         Command::Tui { config, out } => {
             decisionbench::tui::run(config, out).map(|()| ExitCode::SUCCESS)
         }
@@ -229,12 +237,12 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
     })
 }
 
-fn show(path: &Path) -> Result<(), String> {
-    print!("{}", report::report(&load_run(path)?));
+fn show(path: &Path, columns: Axis) -> Result<(), String> {
+    print!("{}", report::report(&load_run(path)?, columns));
     Ok(())
 }
 
-fn compare(paths: &[PathBuf]) -> Result<(), String> {
+fn compare(paths: &[PathBuf], columns: Axis) -> Result<(), String> {
     let runs: Vec<RunFile> = paths
         .iter()
         .map(|p| load_run(p))
@@ -242,7 +250,7 @@ fn compare(paths: &[PathBuf]) -> Result<(), String> {
     for warning in runs.iter().flat_map(|r| &r.warnings) {
         eprintln!("warning: {warning}");
     }
-    print!("{}", report::Comparison(&runs));
+    print!("{}", report::Comparison(&runs, columns));
     Ok(())
 }
 

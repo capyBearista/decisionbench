@@ -27,3 +27,13 @@ The user wants to try several prompts in one Run and across Runs, and to see at 
 - A cell is `-` where a Run did not ask that Candidate, Target Model or prompt. A row whose baseline cell is `-` shows no deltas.
 - More prompts multiply the requests in a Run: one more factor in the Trial count, as ADR-0004 already noted. The Setup `plan:` line shows the total before Start.
 - The CLI does not read `prompts_dir`; it takes `--instructions` as before. A config with no `[[candidate]]` tables now loads as an empty list.
+
+## Addendum: candidates as the columns (2026-11-05)
+
+The matrix has a second axis. Comparing candidates on the same prompt needs candidates as columns, which the prompt axis cannot show without a half-empty table (each Run asks different candidates). `show` and `compare` take `--columns auto|prompt|candidate`.
+
+- **Candidate axis.** A variant is a Candidate in a Run. Columns are Candidates (named after the Candidate, plus ` in <run id>` when two columns share a name; the first is the baseline) and rows are prompt × Target Model (the prompt name, plus ` (<12-character SHA-256>)` only when two rows share a name with different content; prompts in first-seen order across the Runs). Cells, the paired delta (against the baseline column, for the same prompt and Target Model), the noise rule, the pooled row (over rows present in every column) and `-` cells work as before.
+- **Auto.** The default picks the prompt axis when the Runs between them hold more than one distinct prompt (name and content), otherwise the candidate axis when they hold more than one distinct Candidate name, otherwise the prompt axis. Counting distinct prompts, not columns, means one prompt run against different Candidates in two Runs gets candidate columns rather than the same prompt twice. A Run with several prompts and several Candidates stays on the prompt axis: the user can ask for the other.
+- **Comparability.** Candidates are the columns, so Candidates present in only some Runs are not a difference on that axis, as prompts are not on the prompt axis. Provider Route differences and everything else are still listed. The axis `comparability` uses is the resolved one, so it follows the TUI toggle.
+- **Text.** The `columns:` line ends with `(prompts)` or `(candidates)`, the `compare` heading says `per prompt` or `per candidate`, the pooled note names the pooled rows' prompts or candidates, and the header row starts `candidate target` or `prompt target`.
+- **TUI Results.** The Summary panel title shows the columns, and `c` swaps the axes in both panels; the Full report stays the text the CLI prints with the same `--columns`. A newly opened report starts on `auto`.

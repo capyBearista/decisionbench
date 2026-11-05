@@ -206,7 +206,8 @@ fn the_results_pane_opens_on_the_summary_and_the_full_report_is_what_show_prints
     press(&mut app, KeyCode::Enter);
 
     let run = evidence::read_run(&std::fs::read(&file).unwrap()).unwrap();
-    let matrix = report::Matrix::from_runs(std::slice::from_ref(&run)).to_string();
+    let matrix =
+        report::Matrix::from_runs(std::slice::from_ref(&run), report::Axis::Auto).to_string();
     let rows = draw(&app, 200, 30);
     assert!(contains(&rows, "report fixture-1.jsonl · summary"));
     assert!(!contains(&rows, "== Run =="), "{}", rows.join("\n"));
@@ -219,7 +220,7 @@ fn the_results_pane_opens_on_the_summary_and_the_full_report_is_what_show_prints
     }
 
     press(&mut app, KeyCode::Char(']'));
-    let expected = report::report(&run).to_string();
+    let expected = report::report(&run, report::Axis::Auto).to_string();
     let shown = String::from_utf8(
         Command::new(env!("CARGO_BIN_EXE_decisionbench"))
             .args(["show", file.to_str().unwrap()])
@@ -295,7 +296,7 @@ fn marked_runs_are_numbered_in_mark_order_and_the_first_is_the_baseline() {
         .iter()
         .map(|n| evidence::read_run(&std::fs::read(file.with_file_name(n)).unwrap()).unwrap())
         .collect();
-    let matrix = report::Matrix::from_runs(&runs).to_string();
+    let matrix = report::Matrix::from_runs(&runs, report::Axis::Auto).to_string();
     let height = 40;
     let rows = draw(&app, 200, height);
     assert!(
@@ -314,7 +315,7 @@ fn marked_runs_are_numbered_in_mark_order_and_the_first_is_the_baseline() {
     }
 
     press(&mut app, KeyCode::Char(']'));
-    let expected = report::Comparison(&runs).to_string();
+    let expected = report::Comparison(&runs, report::Axis::Auto).to_string();
     let rows = draw(&app, 200, height);
     assert!(contains(&rows, "compare 2 runs · full report"));
     for line in expected.lines().filter(|l| !l.is_empty()) {
@@ -363,9 +364,9 @@ fn inner_text(rows: &[String]) -> String {
 #[test]
 fn summary_prose_wraps_to_a_narrow_pane_and_stays_whole() {
     let (app, runs) = comparing("tui-wrap");
-    let mut prose: Vec<String> = report::comparability(&runs).1;
+    let mut prose: Vec<String> = report::comparability(&runs, report::Axis::Auto).1;
     prose.extend(
-        report::Matrix::from_runs(&runs)
+        report::Matrix::from_runs(&runs, report::Axis::Auto)
             .notes(true)
             .iter()
             .map(|n| n.to_string()),
@@ -389,7 +390,7 @@ fn summary_prose_wraps_to_a_narrow_pane_and_stays_whole() {
 #[test]
 fn table_rows_are_not_wrapped_and_still_scroll_sideways() {
     let (mut app, runs) = comparing("tui-table");
-    let header = report::Matrix::from_runs(&runs).to_string();
+    let header = report::Matrix::from_runs(&runs, report::Axis::Auto).to_string();
     let header = matrix_rows(&header)[0].to_string();
     let before = draw(&app, 60, 40);
     assert!(contains(&before, &header), "{}", before.join("\n"));
@@ -397,7 +398,9 @@ fn table_rows_are_not_wrapped_and_still_scroll_sideways() {
     let shifted = draw(&app, 60, 40);
     assert!(contains(&shifted, &header[8..]) && !contains(&shifted, &header));
     // The prose does not move with the table.
-    let notes = report::Matrix::from_runs(&runs).notes(true).join(" ");
+    let notes = report::Matrix::from_runs(&runs, report::Axis::Auto)
+        .notes(true)
+        .join(" ");
     let notes = notes.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(inner_text(&shifted).contains(&notes));
 }
@@ -405,9 +408,9 @@ fn table_rows_are_not_wrapped_and_still_scroll_sideways() {
 #[test]
 fn scrolling_to_the_end_reaches_the_last_wrapped_row_also_after_a_resize() {
     let (mut app, runs) = comparing("tui-wrap-scroll");
-    let notes = report::Matrix::from_runs(&runs).notes(true);
+    let notes = report::Matrix::from_runs(&runs, report::Axis::Auto).notes(true);
     let last = notes.last().unwrap().split_whitespace().last().unwrap();
-    let first = report::comparability(&runs).1[0].clone();
+    let first = report::comparability(&runs, report::Axis::Auto).1[0].clone();
     let first = first.split_whitespace().next().unwrap();
     // The notes take several rows at 60 columns, so the last row is far below the first.
     assert!(!contains(&draw(&app, 60, 16)[..4], last));
@@ -445,4 +448,159 @@ fn the_setup_title_fits_a_narrow_terminal_with_many_cases_marked() {
         "{}",
         rows[1]
     );
+}
+
+/// Opens the fixture run's report on the Results screen.
+fn opened(test: &str) -> (App, PathBuf, evidence::RunFile) {
+    let (mut app, file) = app_with_fixture(test);
+    app.screen = Screen::Results;
+    press(&mut app, KeyCode::Enter);
+    let run = evidence::read_run(&std::fs::read(&file).unwrap()).unwrap();
+    (app, file, run)
+}
+
+fn show_columns(file: &std::path::Path, axis: &str) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_decisionbench"))
+        .args(["show", file.to_str().unwrap(), "--columns", axis])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn c_toggles_the_columns_of_both_panels_and_the_full_report_is_what_show_prints() {
+    let (mut app, file, run) = opened("tui-columns");
+    // One prompt and one candidate: Auto reads as prompts.
+    assert!(contains(
+        &draw(&app, 200, 30),
+        "report fixture-1.jsonl · summary (columns: prompts)"
+    ));
+    press(&mut app, KeyCode::Char('c'));
+    let rows = draw(&app, 200, 30);
+    assert!(
+        contains(&rows, "· summary (columns: candidates)"),
+        "{}",
+        rows.join("\n")
+    );
+    let matrix =
+        report::Matrix::from_runs(std::slice::from_ref(&run), report::Axis::Candidate).to_string();
+    let header = matrix_rows(&matrix)[0]
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    assert_eq!(header.join(" "), "prompt target alpha (baseline)");
+    for line in matrix_rows(&matrix) {
+        assert!(
+            contains(&rows, line),
+            "lacks {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    press(&mut app, KeyCode::Char(']'));
+    let expected = show_columns(&file, "candidate");
+    assert_eq!(
+        expected,
+        report::report(&run, report::Axis::Candidate).to_string()
+    );
+    let rows = draw(&app, 200, 60);
+    assert!(contains(&rows, "report fixture-1.jsonl · full report"));
+    for line in expected.lines().filter(|l| !l.is_empty()) {
+        assert!(
+            contains(&rows, line),
+            "missing {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    // c again goes back, on the panel shown; the other panel followed.
+    press(&mut app, KeyCode::Char('c'));
+    let rows = draw(&app, 200, 60);
+    assert!(inner_text(&rows).contains("candidate target neutral (baseline)"));
+    press(&mut app, KeyCode::Char('['));
+    assert!(contains(
+        &draw(&app, 200, 60),
+        "· summary (columns: prompts)"
+    ));
+}
+
+#[test]
+fn a_new_view_starts_on_auto_whatever_the_last_one_toggled_to() {
+    let (mut app, _, _) = opened("tui-columns-reset");
+    press(&mut app, KeyCode::Char('c'));
+    assert!(contains(&draw(&app, 200, 30), "(columns: candidates)"));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Enter);
+    assert!(contains(&draw(&app, 200, 30), "(columns: prompts)"));
+}
+
+#[test]
+fn c_toggles_a_comparison_and_its_full_text_is_what_compare_prints() {
+    let (mut app, runs) = comparing("tui-columns-compare");
+    assert!(contains(
+        &draw(&app, 200, 40),
+        "compare 2 runs · summary (columns: prompts)"
+    ));
+    press(&mut app, KeyCode::Char('c'));
+    let rows = draw(&app, 200, 40);
+    assert!(
+        contains(&rows, "compare 2 runs · summary (columns: candidates)"),
+        "{}",
+        rows.join("\n")
+    );
+    let matrix = report::Matrix::from_runs(&runs, report::Axis::Candidate).to_string();
+    for line in matrix_rows(&matrix) {
+        assert!(
+            contains(&rows, line),
+            "lacks {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+    assert!(contains(&rows, "alpha in fixture-1 (baseline)"));
+
+    press(&mut app, KeyCode::Char(']'));
+    let expected = report::Comparison(&runs, report::Axis::Candidate).to_string();
+    let rows = draw(&app, 200, 40);
+    for line in expected.lines().filter(|l| !l.is_empty()) {
+        assert!(
+            contains(&rows, line),
+            "missing {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+}
+
+#[test]
+fn c_on_a_comparison_of_candidates_toggles_the_comparability_lines_with_the_axis() {
+    let (mut app, file) = app_with_fixture("tui-columns-candidates");
+    // The same prompt under another candidate: Auto puts the candidates in the columns.
+    let text: String = run_lines("fixture-3", 3000, "neutral", "max")
+        .iter()
+        .map(|l| format!("{}\n", l.to_string().replace("alpha", "beta")))
+        .collect();
+    std::fs::write(file.with_file_name("fixture-3.jsonl"), text).unwrap();
+    app.screen = Screen::Results;
+    press(&mut app, KeyCode::Char('r'));
+    // Newest first (fixture-3, fixture-1); mark fixture-1 first so it is the baseline.
+    for key in ['g', 'j', ' ', 'k', ' ', 'm'] {
+        press(&mut app, KeyCode::Char(key));
+    }
+    let rows = draw(&app, 200, 40);
+    assert!(
+        contains(&rows, "compare 2 runs · summary (columns: candidates)"),
+        "{}",
+        app.message
+    );
+    assert!(contains(&rows, "no differences found in:"));
+    assert!(!contains(&rows, "is not in"), "{}", rows.join("\n"));
+
+    press(&mut app, KeyCode::Char('c'));
+    let rows = draw(&app, 200, 40);
+    assert!(contains(&rows, "(columns: prompts)"));
+    assert!(contains(&rows, "candidate `beta` is not in fixture-1"));
+
+    press(&mut app, KeyCode::Char('c'));
+    let rows = draw(&app, 200, 40);
+    assert!(contains(&rows, "(columns: candidates)"));
+    assert!(!contains(&rows, "is not in"), "{}", rows.join("\n"));
 }
