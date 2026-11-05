@@ -12,6 +12,7 @@ use super::{App, block, cut, list_lines, nav, step, theme};
 use crate::batch::load_dataset;
 use crate::dataset::{Case, Effort, EffortRange, Summary, summarize};
 use crate::grade::Target;
+use crate::run::eligible;
 
 /// Heavy and light horizontal lines: one thin line with a thicker span for the acceptable efforts.
 const BAR_ON: char = '━';
@@ -41,6 +42,15 @@ impl State {
             selected: 0,
             marked: BTreeSet::new(),
         })
+    }
+
+    /// Cases a Run would plan: the marked ones, else all, less those no selected Target labels.
+    pub fn planned(&self, targets: &[Target], include_unscored: bool) -> usize {
+        self.cases
+            .iter()
+            .filter(|c| self.marked.is_empty() || self.marked.contains(&c.id))
+            .filter(|c| eligible(c, targets, include_unscored))
+            .count()
     }
 
     /// The Run setup's summary of the case choice.

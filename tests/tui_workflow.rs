@@ -191,4 +191,42 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
     until(&mut app, "the marked run to end", |a| !a.run.active());
     assert_eq!(app.run.planned, 1);
     assert!(show(&only_file(&out)).contains("state: complete"));
+
+    // The bundled prompt plus a second one added on the Setup screen: two trials for the one case.
+    let (mut app, out) = new_app("tui-workflow-prompts");
+    let second = out.with_file_name("second.md");
+    std::fs::copy("prompts/neutral.md", &second).unwrap();
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char(' ')); // the candidate
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Char('j')); // past the targets, onto the bundled prompt
+    }
+    press(&mut app, KeyCode::Char('a'));
+    for c in second.display().to_string().chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        screen_text(&app).contains("[x] prompt second"),
+        "{}",
+        app.message
+    );
+    assert!(screen_text(&app).contains("plan: 1 candidate × 2 prompts × 1 case"));
+    press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.screen, Screen::Run, "{}", app.message);
+    until(&mut app, "the two-prompt run to end", |a| !a.run.active());
+    assert_eq!(app.run.planned, 2);
+    let run = decisionbench::batch::load_run(&only_file(&out)).unwrap();
+    let names: Vec<_> = run
+        .manifest
+        .instructions
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect();
+    assert_eq!(names, ["neutral", "second"]);
+    assert_eq!(run.trials.len(), 2);
 }

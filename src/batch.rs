@@ -422,7 +422,7 @@ impl Prepared {
             plural(settings.repetitions as usize, "repetition", "repetitions"),
             plural(planned, "trial", "trials"),
             plural(
-                planned * (1 + settings.retries as usize),
+                run::request_count(planned, settings.retries),
                 "request",
                 "requests"
             ),

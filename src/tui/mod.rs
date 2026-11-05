@@ -107,6 +107,7 @@ impl App {
             config,
             out,
         };
+        setup::rescan(&mut app);
         app.refresh_results();
         Ok(app)
     }
@@ -178,6 +179,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Effect {
         };
         if let Some(screen) = screen {
             app.screen = screen;
+            if screen == Screen::Setup {
+                setup::rescan(app);
+            }
             return Effect::None;
         }
     }
