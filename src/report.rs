@@ -194,6 +194,288 @@ fn table(indent: &str, rows: &[Vec<String>]) -> String {
         .collect()
 }
 
+/// One prompt in one Run: a column of the matrix. The first column is the baseline.
+pub struct Column {
+    pub label: String,
+    pub run_id: String,
+    pub ins: InsId,
+}
+
+/// Cases gained and lost against the baseline in paired trials. `noise`: the net change is at most
+/// one Case's worth of repetitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delta {
+    pub gained: usize,
+    pub lost: usize,
+    pub noise: bool,
+}
+
+impl Delta {
+    fn new(gained: usize, lost: usize, repetitions: u32) -> Self {
+        Self {
+            gained,
+            lost,
+            noise: gained.abs_diff(lost) <= repetitions as usize || gained == lost,
+        }
+    }
+}
+
+pub struct Cell {
+    pub tally: Tally,
+    /// `None` for the baseline column and when no trial pairs with the baseline's.
+    pub delta: Option<Delta>,
+}
+
+pub struct MatrixRow {
+    pub candidate: String,
+    pub target: Target,
+    /// `None` when that column's Run did not ask this candidate, target or prompt.
+    pub cells: Vec<Option<Cell>>,
+}
+
+/// Accuracy per (candidate, target) row and per prompt column, with paired deltas against the first
+/// column.
+pub struct Matrix {
+    pub columns: Vec<Column>,
+    pub rows: Vec<MatrixRow>,
+    /// Per column: every row added together; `None` when the column has no cells.
+    pub pooled: Vec<Option<Cell>>,
+}
+
+/// The name; plus the hash when another column shares the name with other content; plus the Run
+/// when it still collides (same prompt in several Runs).
+fn column_labels(sources: &[(usize, InsId)], runs: &[RunFile]) -> Vec<String> {
+    let rival = |i: usize, same: &dyn Fn(&InsId) -> bool| {
+        (0..sources.len()).any(|j| j != i && same(&sources[j].1))
+    };
+    let hashed: Vec<String> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, (_, ins))| {
+            if rival(i, &|o| o.0 == ins.0 && o.1 != ins.1) {
+                label(ins)
+            } else {
+                ins.0.clone()
+            }
+        })
+        .collect();
+    hashed
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if hashed.iter().enumerate().any(|(j, o)| j != i && o == l) {
+                format!("{l} in {}", runs[sources[i].0].manifest.id)
+            } else {
+                l.clone()
+            }
+        })
+        .collect()
+}
+
+/// The valid scored grade of the target's prediction in each (case, repetition) Trial.
+fn scored<'a>(
+    run: &'a RunFile,
+    candidate: &str,
+    ins: &InsId,
+    target: Target,
+) -> BTreeMap<(&'a str, u32), Grade> {
+    group(run, candidate, ins)
+        .into_iter()
+        .filter_map(|t| {
+            let (_, grade) = t.grades()?.into_iter().find(|(x, _)| *x == target)?;
+            matches!(grade, Grade::Hit | Grade::Under | Grade::Over)
+                .then(|| ((t.case_id.as_str(), t.repetition), grade))
+        })
+        .collect()
+}
+
+impl Matrix {
+    pub fn from_runs(runs: &[RunFile]) -> Matrix {
+        let sources: Vec<(usize, InsId)> = runs
+            .iter()
+            .enumerate()
+            .flat_map(|(r, run)| instruction_ids(run).into_iter().map(move |ins| (r, ins)))
+            .collect();
+        let columns: Vec<Column> = column_labels(&sources, runs)
+            .into_iter()
+            .zip(&sources)
+            .map(|(label, (r, ins))| Column {
+                label,
+                run_id: runs[*r].manifest.id.clone(),
+                ins: ins.clone(),
+            })
+            .collect();
+        let reps = |r: usize| runs[r].manifest.settings.repetitions;
+        let Some(base) = sources.first() else {
+            return Matrix {
+                columns,
+                rows: Vec::new(),
+                pooled: Vec::new(),
+            };
+        };
+        let mut candidates: Vec<&str> = Vec::new();
+        let mut targets: Vec<Target> = Vec::new();
+        for run in runs {
+            for c in &run.manifest.candidates {
+                if !candidates.contains(&c.candidate.name.as_str()) {
+                    candidates.push(&c.candidate.name);
+                }
+            }
+            targets.extend(&run.manifest.targets);
+        }
+        targets.sort();
+        targets.dedup();
+
+        let mut rows = Vec::new();
+        for candidate in candidates {
+            for target in &targets {
+                let mut cells: Vec<Option<Cell>> = sources
+                    .iter()
+                    .map(|(r, ins)| {
+                        let run = &runs[*r];
+                        let asked = run
+                            .manifest
+                            .candidates
+                            .iter()
+                            .any(|c| c.candidate.name == candidate)
+                            && instruction_ids(run).contains(ins)
+                            && run.manifest.targets.contains(target);
+                        asked.then(|| Cell {
+                            tally: tally(&group(run, candidate, ins), *target),
+                            delta: None,
+                        })
+                    })
+                    .collect();
+                if cells[0].is_some() {
+                    let before = scored(&runs[base.0], candidate, &base.1, *target);
+                    for (j, (r, ins)) in sources.iter().enumerate().skip(1) {
+                        let Some(cell) = cells[j].as_mut() else {
+                            continue;
+                        };
+                        let after = scored(&runs[*r], candidate, ins, *target);
+                        let (mut gained, mut lost, mut pairs) = (0, 0, 0);
+                        for (key, was) in &before {
+                            let Some(now) = after.get(key) else { continue };
+                            pairs += 1;
+                            gained += usize::from(*was != Grade::Hit && *now == Grade::Hit);
+                            lost += usize::from(*was == Grade::Hit && *now != Grade::Hit);
+                        }
+                        cell.delta = (pairs > 0)
+                            .then(|| Delta::new(gained, lost, reps(base.0).max(reps(*r))));
+                    }
+                }
+                rows.push(MatrixRow {
+                    candidate: candidate.to_string(),
+                    target: *target,
+                    cells,
+                });
+            }
+        }
+
+        let pooled = sources
+            .iter()
+            .enumerate()
+            .map(|(j, (r, _))| {
+                let cells: Vec<&Cell> = rows
+                    .iter()
+                    .filter_map(|row| row.cells[j].as_ref())
+                    .collect();
+                if cells.is_empty() {
+                    return None;
+                }
+                let mut tally = Tally::default();
+                let (mut gained, mut lost, mut any) = (0, 0, false);
+                for cell in &cells {
+                    tally.hit += cell.tally.hit;
+                    tally.under += cell.tally.under;
+                    tally.over += cell.tally.over;
+                    tally.invalid += cell.tally.invalid;
+                    tally.unscored += cell.tally.unscored;
+                    if let Some(d) = &cell.delta {
+                        (gained, lost, any) = (gained + d.gained, lost + d.lost, true);
+                    }
+                }
+                Some(Cell {
+                    tally,
+                    delta: any.then(|| Delta::new(gained, lost, reps(base.0).max(reps(*r)))),
+                })
+            })
+            .collect();
+        Matrix {
+            columns,
+            rows,
+            pooled,
+        }
+    }
+
+    /// The table text; the pooled row only when asked for and there is something to pool.
+    fn render(&self, pooled: bool) -> String {
+        let text = |cell: &Option<Cell>| match cell {
+            None => "-".to_string(),
+            Some(c) => {
+                let mut text = accuracy_cell(&c.tally);
+                if let Some(d) = &c.delta {
+                    let noise = if d.noise { " ~" } else { "" };
+                    text += &format!("  +{} -{}{noise}", d.gained, d.lost);
+                }
+                text
+            }
+        };
+        let mut header = vec!["candidate".to_string(), "target".to_string()];
+        header.extend(self.columns.iter().enumerate().map(|(i, c)| {
+            if i == 0 {
+                format!("{} (baseline)", c.label)
+            } else {
+                c.label.clone()
+            }
+        }));
+        let mut table_rows = vec![header];
+        for row in &self.rows {
+            table_rows.push(
+                [row.candidate.clone(), row.target.to_string()]
+                    .into_iter()
+                    .chain(row.cells.iter().map(text))
+                    .collect(),
+            );
+        }
+        let pooled = pooled && self.pooled.iter().any(Option::is_some);
+        if pooled {
+            table_rows.push(
+                ["pooled".to_string(), "all".to_string()]
+                    .into_iter()
+                    .chain(self.pooled.iter().map(text))
+                    .collect(),
+            );
+        }
+        let labels: Vec<&str> = self.columns.iter().map(|c| c.label.as_str()).collect();
+        let Some(baseline) = labels.first() else {
+            return String::new();
+        };
+        let mut out = format!(
+            "  baseline: {baseline}\n  columns: {}\n{}",
+            labels.join(", "),
+            table("  ", &table_rows)
+        );
+        if pooled {
+            out += "  pooled = all candidates and targets together over valid scored predictions; it is not a score\n";
+        }
+        if self
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().flatten().any(|c| c.delta.is_some()))
+        {
+            out += "  +g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)\n";
+        }
+        out
+    }
+}
+
+impl fmt::Display for Matrix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render(true))
+    }
+}
+
 fn duplicate_hash_warnings(ids: &[InsId]) -> Vec<String> {
     let mut names: Vec<&str> = Vec::new();
     for (name, _) in ids {
@@ -243,6 +525,10 @@ impl fmt::Display for Report<'_> {
         )?;
         writeln!(f, "grading revision: {}", m.grading_revision)?;
         writeln!(f, "schema: {}", m.schema_version)?;
+
+        writeln!(f, "\n== Summary ==")?;
+        let summary = Matrix::from_runs(std::slice::from_ref(run));
+        write!(f, "{}", summary.render(summary.rows.len() > 1))?;
 
         writeln!(
             f,
@@ -536,33 +822,6 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
                 only_in(&first.id, &theirs, &ours),
             ));
         }
-        for i in &m.instructions {
-            if let Some(j) = first.instructions.iter().find(|j| j.name == i.name)
-                && j.sha256 != i.sha256
-            {
-                found.push(format!(
-                    "{}: instructions `{}` differ in content ({} vs {})",
-                    m.id,
-                    i.name,
-                    short(&i.sha256),
-                    short(&j.sha256)
-                ));
-            }
-        }
-        let missing_instructions = |from: &Manifest, other: &Manifest| {
-            from.instructions
-                .iter()
-                .filter(|i| !other.instructions.iter().any(|j| j.name == i.name))
-                .map(|i| {
-                    format!(
-                        "{}: instructions `{}` is not in {}",
-                        from.id, i.name, other.id
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        found.extend(missing_instructions(m, first));
-        found.extend(missing_instructions(first, m));
         let missing = |from: &Manifest, other: &Manifest| {
             from.candidates
                 .iter()
@@ -648,7 +907,7 @@ impl fmt::Display for Comparison<'_> {
         if found.is_empty() {
             writeln!(
                 f,
-                "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, instructions, candidates and routes"
+                "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, candidates and routes"
             )?;
         } else {
             writeln!(f, "Not directly comparable:")?;
@@ -666,54 +925,8 @@ impl fmt::Display for Comparison<'_> {
                 writeln!(f, "  - {line}")?;
             }
         }
-        writeln!(f, "\nAccuracy: hit / valid scored per Run")?;
-        let mut keys: Vec<(String, InsId)> = Vec::new();
-        let mut targets: Vec<Target> = Vec::new();
-        for run in runs {
-            for c in &run.manifest.candidates {
-                for i in instruction_ids(run) {
-                    let key = (c.candidate.name.clone(), i);
-                    if !keys.contains(&key) {
-                        keys.push(key);
-                    }
-                }
-            }
-            targets.extend(&run.manifest.targets);
-        }
-        targets.sort();
-        targets.dedup();
-        let mut rows = vec![
-            ["candidate", "instructions", "target"]
-                .map(String::from)
-                .into_iter()
-                .chain(runs.iter().map(|r| r.manifest.id.clone()))
-                .collect::<Vec<_>>(),
-        ];
-        for (name, ins) in &keys {
-            for target in &targets {
-                let cells = runs.iter().map(|run| {
-                    let asked = run
-                        .manifest
-                        .candidates
-                        .iter()
-                        .any(|c| &c.candidate.name == name)
-                        && instruction_ids(run).contains(ins)
-                        && run.manifest.targets.contains(target);
-                    if asked {
-                        accuracy_cell(&tally(&group(run, name, ins), *target))
-                    } else {
-                        "-".to_string()
-                    }
-                });
-                rows.push(
-                    [name.clone(), label(ins), target.to_string()]
-                        .into_iter()
-                        .chain(cells)
-                        .collect(),
-                );
-            }
-        }
-        write!(f, "{}", table("  ", &rows))
+        writeln!(f, "\nAccuracy: hit / valid scored per prompt")?;
+        write!(f, "{}", Matrix::from_runs(runs))
     }
 }
 
@@ -841,6 +1054,323 @@ mod tests {
         let mut invalid = all("low", "max", "low");
         invalid[1].1 = None;
         assert_eq!(cross_model(&t, &invalid), (None, 0, 0));
+    }
+
+    /// A Run of target `sonnet` (label high) built through the file reader. Each trial is
+    /// (candidate, instruction index, case, repetition, effort); "-" is an unanswered Trial.
+    fn run_of(
+        id: &str,
+        repetitions: u32,
+        instructions: &[(&str, &str)],
+        candidates: &[&str],
+        trials: &[(&str, usize, &str, u32, &str)],
+    ) -> RunFile {
+        let mut lines = vec![json!({
+            "type": "run", "schema_version": crate::evidence::SCHEMA_VERSION, "id": id,
+            "created_unix_ms": 1, "dataset": {"name": "d", "sha256": "d"},
+            "instructions": instructions.iter()
+                .map(|(n, s)| json!({"name": n, "sha256": s, "text": "t"})).collect::<Vec<_>>(),
+            "grading_revision": crate::evidence::GRADING_REVISION,
+            "candidates": candidates.iter()
+                .map(|c| json!({"name": c, "provider": "zen", "model": "m", "url": "u"}))
+                .collect::<Vec<_>>(),
+            "cases": ["c1"], "targets": ["sonnet"],
+            "settings": {"repetitions": repetitions, "concurrency": 1, "timeout_secs": 60,
+                "retries": 0, "include_unscored": false},
+            "planned_trials": trials.len(),
+        })];
+        for (seq, (candidate, ins, case, repetition, effort)) in trials.iter().enumerate() {
+            let attempt = if *effort == "-" {
+                json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "provider_error",
+                    "http_status": 503, "raw_response": "busy", "error": null})
+            } else {
+                let body =
+                    json!({"answers": {"effort_sonnet": {"type": "choice", "choice": effort}}});
+                json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "answered",
+                    "http_status": 200, "raw_response": body.to_string(), "error": null})
+            };
+            lines.push(json!({
+                "type": "trial", "seq": seq, "candidate": candidate,
+                "instructions": {"name": instructions[*ins].0, "sha256": instructions[*ins].1},
+                "case_id": case, "targets": ["sonnet"], "repetition": repetition,
+                "labels": {"sonnet": "high"}, "request": {}, "attempts": [attempt],
+                "started_unix_ms": 0, "elapsed_ms": 1,
+            }));
+        }
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        crate::evidence::read_run(text.as_bytes()).unwrap()
+    }
+
+    fn labels(m: &Matrix) -> Vec<&str> {
+        m.columns.iter().map(|c| c.label.as_str()).collect()
+    }
+
+    fn delta(gained: usize, lost: usize, noise: bool) -> Option<Delta> {
+        Some(Delta {
+            gained,
+            lost,
+            noise,
+        })
+    }
+
+    #[test]
+    fn matrix_columns_are_prompts_with_the_first_as_baseline() {
+        let x = run_of(
+            "X1",
+            1,
+            &[("neutral", "aaa"), ("effortless", "bbb")],
+            &["c"],
+            &[],
+        );
+        let y = run_of("Y1", 1, &[("terse", "ccc")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y]);
+        assert_eq!(labels(&m), ["neutral", "effortless", "terse"]);
+        assert_eq!(m.columns[0].run_id, "X1");
+        assert_eq!(m.columns[2].run_id, "Y1");
+        assert_eq!(m.columns[0].ins, ("neutral".to_string(), "aaa".to_string()));
+    }
+
+    #[test]
+    fn matrix_labels_stay_unique_when_names_collide() {
+        // Same name, different content: the hash tells them apart.
+        let x = run_of("X1", 1, &[("neutral", "aaaaaaaaaaaaaaaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "bbbbbbbbbbbbbbbb")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y]);
+        assert_eq!(
+            labels(&m),
+            ["neutral (aaaaaaaaaaaa)", "neutral (bbbbbbbbbbbb)"]
+        );
+        // Same content in two runs: the run id tells them apart.
+        let x = run_of("X1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y]);
+        assert_eq!(labels(&m), ["neutral in X1", "neutral in Y1"]);
+        // Both rules at once: only the colliding pair gets the run id.
+        let x = run_of("X1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let z = run_of("Z1", 1, &[("neutral", "bbb")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y, z]);
+        assert_eq!(
+            labels(&m),
+            [
+                "neutral (aaa) in X1",
+                "neutral (aaa) in Y1",
+                "neutral (bbb)"
+            ]
+        );
+    }
+
+    #[test]
+    fn matrix_marks_what_a_run_did_not_ask_and_counts_what_it_did() {
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let y = run_of(
+            "Y1",
+            1,
+            &[("q", "b")],
+            &["c", "d"],
+            &[("d", 0, "c1", 1, "low"), ("c", 0, "c1", 1, "max")],
+        );
+        let m = Matrix::from_runs(&[x, y]);
+        let rows: Vec<_> = m.rows.iter().map(|r| r.candidate.as_str()).collect();
+        assert_eq!(rows, ["c", "d"]);
+        // Different prompts in different runs: every cell is its own, `d` was not asked in X1.
+        assert_eq!(m.rows[0].cells[0].as_ref().unwrap().tally.hit, 1);
+        assert_eq!(m.rows[0].cells[1].as_ref().unwrap().tally.over, 1);
+        assert!(m.rows[1].cells[0].is_none());
+        assert_eq!(m.rows[1].cells[1].as_ref().unwrap().tally.under, 1);
+        assert!(m.rows[0].cells[0].as_ref().unwrap().delta.is_none());
+        // `d` has no baseline cell, so no delta either.
+        assert!(m.rows[1].cells[1].as_ref().unwrap().delta.is_none());
+    }
+
+    /// Baseline `p` and variant `q` in one run, one candidate, repetition 1.
+    /// (case, baseline effort, variant effort); a missing side is `None`.
+    fn paired(repetitions: u32, cases: &[(&str, Option<&str>, Option<&str>)]) -> Matrix {
+        let mut trials = Vec::new();
+        for (case, base, variant) in cases {
+            for (ins, effort) in [(0, base), (1, variant)] {
+                if let Some(effort) = effort {
+                    trials.push(("c", ins, *case, 1, *effort));
+                }
+            }
+        }
+        Matrix::from_runs(&[run_of(
+            "X1",
+            repetitions,
+            &[("p", "a"), ("q", "b")],
+            &["c"],
+            &trials,
+        )])
+    }
+
+    #[test]
+    fn matrix_delta_counts_only_pairs_of_valid_scored_predictions() {
+        let m = paired(
+            1,
+            &[
+                ("a", Some("high"), Some("high")), // hit -> hit: no change
+                ("b", Some("low"), Some("high")),  // gained
+                ("c", Some("max"), Some("high")),  // gained
+                ("d", Some("high"), Some("low")),  // lost
+                ("e", Some("?"), Some("high")),    // invalid baseline: ignored
+                ("f", Some("high"), Some("-")),    // unanswered variant: ignored
+                ("g", Some("high"), None),         // missing from the variant: ignored
+                ("h", None, Some("high")),         // missing from the baseline: ignored
+                ("i", Some("low"), Some("max")),   // miss -> miss: no change
+            ],
+        );
+        let cell = m.rows[0].cells[1].as_ref().unwrap();
+        assert_eq!(cell.delta, delta(2, 1, true));
+        // The baseline column never carries a delta.
+        assert!(m.rows[0].cells[0].as_ref().unwrap().delta.is_none());
+    }
+
+    #[test]
+    fn matrix_delta_has_none_without_pairs() {
+        let m = paired(1, &[("a", Some("high"), None), ("b", None, Some("high"))]);
+        assert!(m.rows[0].cells[1].as_ref().unwrap().delta.is_none());
+    }
+
+    #[test]
+    fn matrix_noise_is_a_net_change_of_at_most_one_case_of_repetitions() {
+        let gains = |n: usize, losses: usize, repetitions: u32| {
+            let ids: Vec<String> = (0..n + losses).map(|i| format!("k{i}")).collect();
+            let cases: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let (b, v) = if i < n {
+                        ("low", "high")
+                    } else {
+                        ("high", "low")
+                    };
+                    (id.as_str(), Some(b), Some(v))
+                })
+                .collect();
+            paired(repetitions, &cases).rows[0].cells[1]
+                .as_ref()
+                .unwrap()
+                .delta
+                .clone()
+        };
+        assert_eq!(gains(3, 1, 2), delta(3, 1, true)); // net 2 <= 2
+        assert_eq!(gains(4, 1, 2), delta(4, 1, false)); // net 3 > 2
+        assert_eq!(gains(2, 0, 1), delta(2, 0, false));
+        assert_eq!(gains(1, 0, 1), delta(1, 0, true));
+        assert_eq!(gains(1, 3, 2), delta(1, 3, true)); // a net loss counts the same
+        assert_eq!(gains(0, 0, 1), None);
+    }
+
+    #[test]
+    fn matrix_pools_every_row_per_column() {
+        let base = run_of(
+            "X1",
+            1,
+            &[("p", "a")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "high"),
+                ("c", 0, "c2", 1, "low"),
+                ("d", 0, "c1", 1, "low"),
+                ("d", 0, "c2", 1, "?"),
+            ],
+        );
+        let variant = run_of(
+            "Y1",
+            1,
+            &[("q", "b")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "low"),  // c1: lost
+                ("c", 0, "c2", 1, "high"), // c2: gained
+                ("d", 0, "c1", 1, "high"), // gained
+                ("d", 0, "c2", 1, "high"), // baseline invalid: ignored
+            ],
+        );
+        let m = Matrix::from_runs(&[base, variant]);
+        let (b, v) = (m.pooled[0].as_ref().unwrap(), m.pooled[1].as_ref().unwrap());
+        assert_eq!((b.tally.hit, b.tally.under, b.tally.invalid), (1, 2, 1));
+        assert_eq!((v.tally.hit, v.tally.under), (3, 1));
+        assert!(b.delta.is_none());
+        assert_eq!(v.delta, delta(2, 1, true));
+    }
+
+    #[test]
+    fn matrix_from_one_run_with_three_prompts_has_three_columns() {
+        let m = paired(1, &[("a", Some("high"), Some("high"))]);
+        assert_eq!(labels(&m), ["p", "q"]);
+        let x = run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b"), ("r", "c")],
+            &["c"],
+            &[
+                ("c", 0, "c1", 1, "low"),
+                ("c", 1, "c1", 1, "high"),
+                ("c", 2, "c1", 1, "low"),
+            ],
+        );
+        let m = Matrix::from_runs(&[x]);
+        assert_eq!(labels(&m), ["p", "q", "r"]);
+        let deltas: Vec<_> = m.rows[0]
+            .cells
+            .iter()
+            .map(|c| c.as_ref().unwrap().delta.clone())
+            .collect();
+        assert_eq!(deltas, [None, delta(1, 0, true), delta(0, 0, true)]);
+    }
+
+    #[test]
+    fn matrix_text_has_the_baseline_columns_deltas_and_pooled_row() {
+        let x = run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "low"),
+                ("c", 1, "c1", 1, "high"),
+                ("c", 0, "c2", 1, "high"),
+                ("c", 1, "c2", 1, "high"),
+                ("d", 0, "c1", 1, "high"),
+            ],
+        );
+        let text = Matrix::from_runs(&[x]).to_string();
+        let lines: Vec<String> = text
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "baseline: p",
+                "columns: p, q",
+                "candidate target p (baseline) q",
+                "c sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~",
+                "d sonnet 1/1 (100.0%) n/a (0 valid scored)",
+                "pooled all 2/3 (66.7%) 2/2 (100.0%) +1 -0 ~",
+                "pooled = all candidates and targets together over valid scored predictions; it is not a score",
+                "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)",
+            ]
+        );
+    }
+
+    #[test]
+    fn matrix_of_a_run_with_no_prompts_is_empty() {
+        let m = Matrix::from_runs(&[run_of("X1", 1, &[], &["c"], &[])]);
+        assert!(m.columns.is_empty() && m.rows.is_empty() && m.pooled.is_empty());
+        assert_eq!(m.to_string(), "");
+    }
+
+    #[test]
+    fn matrix_text_without_a_delta_has_no_legend() {
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let text = Matrix::from_runs(&[x]).to_string();
+        assert!(!text.contains("+g -l"), "{text}");
+        assert!(
+            text.contains("\n  c          sonnet  1/1 (100.0%)\n"),
+            "{text}"
+        );
     }
 
     #[test]
