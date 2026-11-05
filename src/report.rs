@@ -226,6 +226,67 @@ pub struct Cell {
     pub delta: Option<Delta>,
 }
 
+/// How a delta reads: more gained than lost, more lost than gained, or noise (which includes no
+/// net change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaKind {
+    Gained,
+    Lost,
+    Noise,
+}
+
+/// A matrix cell as text: the counts, and the paired delta (`+g -l`, then ` ~` for noise) when
+/// there is one. `Display` joins them as `Display for Matrix` prints them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellText {
+    pub counts: String,
+    pub delta: Option<(String, DeltaKind)>,
+}
+
+impl CellText {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            counts: text.into(),
+            delta: None,
+        }
+    }
+}
+
+impl fmt::Display for CellText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.counts)?;
+        if let Some((delta, _)) = &self.delta {
+            write!(f, "  {delta}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The text of one matrix cell; `-` when the Run did not ask it.
+pub fn cell_parts(cell: Option<&Cell>) -> CellText {
+    let Some(cell) = cell else {
+        return CellText::plain("-");
+    };
+    CellText {
+        counts: accuracy_cell(&cell.tally),
+        delta: cell.delta.as_ref().map(|d| {
+            let kind = if d.noise || d.gained == d.lost {
+                DeltaKind::Noise
+            } else if d.gained > d.lost {
+                DeltaKind::Gained
+            } else {
+                DeltaKind::Lost
+            };
+            let noise = if d.noise { " ~" } else { "" };
+            (format!("+{} -{}{noise}", d.gained, d.lost), kind)
+        }),
+    }
+}
+
+const POOLED_NOTE: &str =
+    "pooled = all candidates and targets together over valid scored predictions; it is not a score";
+const DELTA_NOTE: &str = "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)";
+
 pub struct MatrixRow {
     pub candidate: String,
     pub target: Target,
@@ -408,63 +469,78 @@ impl Matrix {
         }
     }
 
-    /// The table text; the pooled row only when asked for and there is something to pool.
-    fn render(&self, pooled: bool) -> String {
-        let text = |cell: &Option<Cell>| match cell {
-            None => "-".to_string(),
-            Some(c) => {
-                let mut text = accuracy_cell(&c.tally);
-                if let Some(d) = &c.delta {
-                    let noise = if d.noise { " ~" } else { "" };
-                    text += &format!("  +{} -{}{noise}", d.gained, d.lost);
-                }
-                text
-            }
-        };
-        let mut header = vec!["candidate".to_string(), "target".to_string()];
+    /// The header, then one row per (candidate, target); see `pooled_row` for the last row.
+    pub fn table(&self) -> Vec<Vec<CellText>> {
+        let mut header = vec![CellText::plain("candidate"), CellText::plain("target")];
         header.extend(self.columns.iter().enumerate().map(|(i, c)| {
-            if i == 0 {
+            CellText::plain(if i == 0 {
                 format!("{} (baseline)", c.label)
             } else {
                 c.label.clone()
-            }
+            })
         }));
-        let mut table_rows = vec![header];
+        let mut table = vec![header];
         for row in &self.rows {
-            table_rows.push(
-                [row.candidate.clone(), row.target.to_string()]
-                    .into_iter()
-                    .chain(row.cells.iter().map(text))
-                    .collect(),
+            table.push(
+                [
+                    CellText::plain(&row.candidate),
+                    CellText::plain(row.target.to_string()),
+                ]
+                .into_iter()
+                .chain(row.cells.iter().map(|c| cell_parts(c.as_ref())))
+                .collect(),
             );
         }
-        let pooled = pooled && self.pooled.iter().any(Option::is_some);
+        table
+    }
+
+    /// Every row added together; `None` when there is nothing to pool.
+    pub fn pooled_row(&self) -> Option<Vec<CellText>> {
+        self.pooled.iter().any(Option::is_some).then(|| {
+            [CellText::plain("pooled"), CellText::plain("all")]
+                .into_iter()
+                .chain(self.pooled.iter().map(|c| cell_parts(c.as_ref())))
+                .collect()
+        })
+    }
+
+    /// The lines under the table: what the pooled row (when shown) and the deltas mean.
+    pub fn notes(&self, pooled: bool) -> Vec<&'static str> {
+        let mut notes = Vec::new();
         if pooled {
-            table_rows.push(
-                ["pooled".to_string(), "all".to_string()]
-                    .into_iter()
-                    .chain(self.pooled.iter().map(text))
-                    .collect(),
-            );
-        }
-        let labels: Vec<&str> = self.columns.iter().map(|c| c.label.as_str()).collect();
-        let Some(baseline) = labels.first() else {
-            return String::new();
-        };
-        let mut out = format!(
-            "  baseline: {baseline}\n  columns: {}\n{}",
-            labels.join(", "),
-            table("  ", &table_rows)
-        );
-        if pooled {
-            out += "  pooled = all candidates and targets together over valid scored predictions; it is not a score\n";
+            notes.push(POOLED_NOTE);
         }
         if self
             .rows
             .iter()
             .any(|row| row.cells.iter().flatten().any(|c| c.delta.is_some()))
         {
-            out += "  +g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)\n";
+            notes.push(DELTA_NOTE);
+        }
+        notes
+    }
+
+    /// The table text; the pooled row only when asked for and there is something to pool.
+    fn render(&self, pooled: bool) -> String {
+        let labels: Vec<&str> = self.columns.iter().map(|c| c.label.as_str()).collect();
+        let Some(baseline) = labels.first() else {
+            return String::new();
+        };
+        let mut cells = self.table();
+        let pooled = pooled.then(|| self.pooled_row()).flatten();
+        let shown = pooled.is_some();
+        cells.extend(pooled);
+        let text: Vec<Vec<String>> = cells
+            .iter()
+            .map(|row| row.iter().map(ToString::to_string).collect())
+            .collect();
+        let mut out = format!(
+            "  baseline: {baseline}\n  columns: {}\n{}",
+            labels.join(", "),
+            table("  ", &text)
+        );
+        for note in self.notes(shown) {
+            out += &format!("  {note}\n");
         }
         out
     }
@@ -900,20 +976,25 @@ fn setting_differences(runs: &[RunFile]) -> Vec<String> {
         .collect()
 }
 
+/// What a comparison opens with: whether the Runs are not directly comparable, and the lines that
+/// say so (or that nothing differs).
+pub fn comparability(runs: &[RunFile]) -> (bool, Vec<String>) {
+    let found = mismatches(runs);
+    if found.is_empty() {
+        let none = "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, candidates and routes";
+        return (false, vec![none.to_string()]);
+    }
+    let lines = std::iter::once("Not directly comparable:".to_string())
+        .chain(found.into_iter().map(|line| format!("  - {line}")))
+        .collect();
+    (true, lines)
+}
+
 impl fmt::Display for Comparison<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let runs = self.0;
-        let found = mismatches(runs);
-        if found.is_empty() {
-            writeln!(
-                f,
-                "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, candidates and routes"
-            )?;
-        } else {
-            writeln!(f, "Not directly comparable:")?;
-            for line in found {
-                writeln!(f, "  - {line}")?;
-            }
+        for line in comparability(runs).1 {
+            writeln!(f, "{line}")?;
         }
         let settings = setting_differences(runs);
         if !settings.is_empty() {
@@ -1353,6 +1434,86 @@ mod tests {
                 "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)",
             ]
         );
+    }
+
+    #[test]
+    fn cell_parts_split_the_counts_from_a_delta_and_say_how_to_read_it() {
+        let cell = |d| Cell {
+            tally: Tally {
+                hit: 1,
+                ..Tally::default()
+            },
+            delta: d,
+        };
+        let parts = |d| cell_parts(Some(&cell(d)));
+        assert_eq!(cell_parts(None), CellText::plain("-"));
+        assert_eq!(parts(None), CellText::plain("1/1 (100.0%)"));
+        let read = |p: CellText| p.delta.unwrap();
+        assert_eq!(
+            read(parts(delta(2, 1, false))),
+            ("+2 -1".into(), DeltaKind::Gained)
+        );
+        assert_eq!(
+            read(parts(delta(1, 2, false))),
+            ("+1 -2".into(), DeltaKind::Lost)
+        );
+        assert_eq!(
+            read(parts(delta(3, 1, true))),
+            ("+3 -1 ~".into(), DeltaKind::Noise)
+        );
+        // No net change is noise even when the engine did not flag it.
+        assert_eq!(
+            read(parts(delta(2, 2, false))),
+            ("+2 -2".into(), DeltaKind::Noise)
+        );
+        assert_eq!(parts(delta(2, 1, false)).to_string(), "1/1 (100.0%)  +2 -1");
+    }
+
+    #[test]
+    fn matrix_table_is_the_text_the_display_prints() {
+        let x = run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b")],
+            &["c"],
+            &[("c", 0, "c1", 1, "low"), ("c", 1, "c1", 1, "high")],
+        );
+        let m = Matrix::from_runs(&[x]);
+        let rows: Vec<Vec<String>> = m
+            .table()
+            .iter()
+            .chain(m.pooled_row().iter())
+            .map(|r| r.iter().map(ToString::to_string).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                vec!["candidate", "target", "p (baseline)", "q"],
+                vec!["c", "sonnet", "0/1 (0.0%)", "1/1 (100.0%)  +1 -0 ~"],
+                vec!["pooled", "all", "0/1 (0.0%)", "1/1 (100.0%)  +1 -0 ~"],
+            ]
+        );
+        assert_eq!(m.notes(true).len(), 2);
+        assert_eq!(m.notes(false), [DELTA_NOTE]);
+    }
+
+    #[test]
+    fn comparability_is_the_text_the_comparison_opens_with() {
+        let complete = |id, repetitions| {
+            let mut run = run_of(id, repetitions, &[("p", "a")], &["c"], &[]);
+            run.end = Some(crate::evidence::EndRecord {
+                state: RunState::Complete,
+                finished_unix_ms: 9,
+            });
+            run
+        };
+        let (incomparable, lines) = comparability(&[complete("X1", 1), complete("Y1", 1)]);
+        assert!(!incomparable);
+        assert!(lines.len() == 1 && lines[0].starts_with("no differences found in: "));
+        let (incomparable, lines) = comparability(&[complete("X1", 1), complete("Y1", 2)]);
+        assert!(incomparable);
+        assert_eq!(lines[0], "Not directly comparable:");
+        assert!(lines[1].starts_with("  - Y1: repetitions differs from X1"));
     }
 
     #[test]

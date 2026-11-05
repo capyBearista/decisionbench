@@ -25,30 +25,31 @@ fn reply(choice: &str) -> String {
     format!(r#"{{"answers":{{{}}}}}"#, answers.join(","))
 }
 
-/// A complete one-candidate run: two Trials that hit and miss, one failed Trial, no price.
-fn fixture_lines() -> Vec<Value> {
-    let sha = "a".repeat(64);
+/// A complete one-candidate run of one prompt: two Trials that hit and miss (the first answers
+/// `first`), one failed Trial, no price.
+fn run_lines(id: &str, created: u64, prompt: &str, first: &str) -> Vec<Value> {
+    let sha = prompt[..1].repeat(64);
     let attempt = |disposition: &str, status: Value, body: String| {
         json!({"started_unix_ms": 0, "latency_ms": 120, "disposition": disposition,
                "http_status": status, "raw_response": body, "error": null})
     };
     let trial = |seq: usize, case: &str, attempts: Vec<Value>| {
         json!({"type": "trial", "seq": seq, "candidate": "alpha",
-               "instructions": {"name": "neutral", "sha256": sha},
+               "instructions": {"name": prompt, "sha256": sha},
                "case_id": case, "targets": ["sonnet", "opus"], "repetition": 1,
                "labels": {"sonnet": "low", "opus": "low-medium"},
                "request": {}, "attempts": attempts, "started_unix_ms": 0, "elapsed_ms": 150})
     };
     vec![
-        json!({"type": "run", "schema_version": 4, "id": "fixture-1", "created_unix_ms": 1000,
+        json!({"type": "run", "schema_version": 4, "id": id, "created_unix_ms": created,
                "dataset": {"name": "ds.json", "sha256": "b".repeat(64)},
-               "instructions": [{"name": "neutral", "sha256": sha, "text": "t"}],
+               "instructions": [{"name": prompt, "sha256": sha, "text": "t"}],
                "grading_revision": 2,
                "candidates": [{"name": "alpha", "provider": "zen", "model": "m", "url": "http://stub"}],
                "cases": ["c1", "c2", "c3"], "targets": ["sonnet", "opus"],
                "settings": {"repetitions": 1, "concurrency": 1, "timeout_secs": 60, "retries": 1, "include_unscored": false},
                "planned_trials": 3}),
-        trial(0, "c1", vec![attempt("answered", json!(200), reply("low"))]),
+        trial(0, "c1", vec![attempt("answered", json!(200), reply(first))]),
         trial(1, "c2", vec![attempt("answered", json!(200), reply("max"))]),
         trial(
             2,
@@ -57,6 +58,19 @@ fn fixture_lines() -> Vec<Value> {
         ),
         json!({"type": "end", "state": "complete", "finished_unix_ms": 9}),
     ]
+}
+
+fn fixture_lines() -> Vec<Value> {
+    run_lines("fixture-1", 1000, "neutral", "low")
+}
+
+/// A newer run of another prompt that misses the case the fixture run hits.
+fn second_run(file: &std::path::Path) {
+    let text: String = run_lines("fixture-2", 2000, "terse", "max")
+        .iter()
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(file.with_file_name("fixture-2.jsonl"), text).unwrap();
 }
 
 /// An evidence directory holding the fixture run, and an App over it.
@@ -178,8 +192,13 @@ fn a_too_small_terminal_gets_a_message_not_a_panic() {
     assert!(contains(&draw(&app, 59, 16), "terminal too small"));
 }
 
+/// The rows of a matrix's text without the `baseline:` and `columns:` lines and the indent.
+fn matrix_rows(text: &str) -> Vec<&str> {
+    text.lines().skip(2).map(str::trim).collect()
+}
+
 #[test]
-fn the_results_pane_shows_exactly_what_show_prints() {
+fn the_results_pane_opens_on_the_summary_and_the_full_report_is_what_show_prints() {
     let (mut app, file) = app_with_fixture("tui-agreement");
     // The History list shows the run, then Enter opens its report.
     app.screen = Screen::Results;
@@ -187,6 +206,19 @@ fn the_results_pane_shows_exactly_what_show_prints() {
     press(&mut app, KeyCode::Enter);
 
     let run = evidence::read_run(&std::fs::read(&file).unwrap()).unwrap();
+    let matrix = report::Matrix::from_runs(std::slice::from_ref(&run)).to_string();
+    let rows = draw(&app, 200, 30);
+    assert!(contains(&rows, "report fixture-1.jsonl · summary"));
+    assert!(!contains(&rows, "== Run =="), "{}", rows.join("\n"));
+    for line in matrix_rows(&matrix) {
+        assert!(
+            contains(&rows, line),
+            "summary lacks {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    press(&mut app, KeyCode::Char(']'));
     let expected = report::report(&run).to_string();
     let shown = String::from_utf8(
         Command::new(env!("CARGO_BIN_EXE_decisionbench"))
@@ -201,6 +233,7 @@ fn the_results_pane_shows_exactly_what_show_prints() {
     let height = expected.lines().count() as u16 + 6;
     let width = expected.lines().map(|l| l.chars().count()).max().unwrap() as u16 + 4;
     let rows = draw(&app, width.max(80), height.max(24));
+    assert!(contains(&rows, "report fixture-1.jsonl · full report"));
     for line in expected.lines().filter(|l| !l.is_empty()) {
         assert!(
             contains(&rows, line),
@@ -208,13 +241,18 @@ fn the_results_pane_shows_exactly_what_show_prints() {
             rows.join("\n")
         );
     }
+
+    // `[` goes back to the summary.
+    press(&mut app, KeyCode::Char('['));
+    assert!(contains(&draw(&app, 200, 30), "· summary"));
 }
 
 #[test]
-fn right_and_left_scroll_the_report_sideways_without_changing_its_text() {
+fn right_and_left_scroll_the_full_report_sideways_without_changing_its_text() {
     let (mut app, _) = app_with_fixture("tui-hscroll");
     app.screen = Screen::Results;
     press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char(']'));
     let before = draw(&app, 100, 40);
     let line = before
         .iter()
@@ -233,32 +271,66 @@ fn right_and_left_scroll_the_report_sideways_without_changing_its_text() {
 }
 
 #[test]
-fn marking_two_runs_shows_the_compare_text() {
+fn marked_runs_are_numbered_in_mark_order_and_the_first_is_the_baseline() {
     let (mut app, file) = app_with_fixture("tui-compare");
-    // A second run: the same file under another name and id.
-    let second = std::fs::read_to_string(&file)
-        .unwrap()
-        .replace("fixture-1", "fixture-2")
-        .replace("1000", "2000");
-    std::fs::write(file.with_file_name("fixture-2.jsonl"), second).unwrap();
+    second_run(&file);
     press(&mut app, KeyCode::Char('5'));
     press(&mut app, KeyCode::Char('r'));
+    // The list is newest first (fixture-2, fixture-1); mark it the other way round.
     press(&mut app, KeyCode::Char('g'));
-    press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Char(' '));
+    let rows = draw(&app, 100, 30);
+    assert!(
+        contains(&rows, "[1] fixture-1.jsonl"),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(contains(&rows, "[2] fixture-2.jsonl"));
     press(&mut app, KeyCode::Char('m'));
 
-    let runs: Vec<_> = ["fixture-2.jsonl", "fixture-1.jsonl"] // newest first, like the list
+    let runs: Vec<_> = ["fixture-1.jsonl", "fixture-2.jsonl"] // mark order
         .iter()
         .map(|n| evidence::read_run(&std::fs::read(file.with_file_name(n)).unwrap()).unwrap())
         .collect();
+    let matrix = report::Matrix::from_runs(&runs).to_string();
+    let height = 40;
+    let rows = draw(&app, 200, height);
+    assert!(
+        contains(&rows, "compare 2 runs · summary"),
+        "{}",
+        app.message
+    );
+    assert!(contains(&rows, "neutral (baseline)") && !contains(&rows, "terse (baseline)"));
+    assert!(contains(&rows, "no differences found in:"));
+    for line in matrix_rows(&matrix) {
+        assert!(
+            contains(&rows, line),
+            "summary lacks {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    press(&mut app, KeyCode::Char(']'));
     let expected = report::Comparison(&runs).to_string();
-    let rows = draw(&app, 200, (expected.lines().count() as u16 + 6).max(24));
-    assert!(contains(&rows, "compare 2 runs"), "{}", app.message);
+    let rows = draw(&app, 200, height);
+    assert!(contains(&rows, "compare 2 runs · full report"));
     for line in expected.lines().filter(|l| !l.is_empty()) {
         assert!(contains(&rows, line), "missing compare line {line:?}");
     }
+
+    // Esc closes the view; unmarking the first run makes the second the one left.
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char(' '));
+    let rows = draw(&app, 100, 30);
+    assert!(
+        contains(&rows, "[1] fixture-2.jsonl"),
+        "{}",
+        rows.join("\n")
+    );
 }
 
 #[test]

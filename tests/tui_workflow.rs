@@ -139,9 +139,11 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
     let file = only_file(&out);
     assert!(show(&file).contains("state: complete"));
 
-    // Enter on the Run screen opens the report in Results: the same text `show` prints.
+    // Enter on the Run screen opens the report in Results, on its summary; the full report panel
+    // is the same text `show` prints.
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.screen, Screen::Results);
+    press(&mut app, KeyCode::Char(']'));
     let screen = screen_text(&app);
     for line in show(&file).lines().filter(|l| !l.is_empty()) {
         assert!(screen.contains(line), "missing {line:?}");
@@ -174,6 +176,7 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
         "{text}"
     );
     press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char(']'));
     let screen = screen_text(&app);
     for line in text.lines().filter(|l| !l.is_empty()) {
         assert!(screen.contains(line), "missing {line:?}");

@@ -1,12 +1,13 @@
-//! Results and history: the saved Runs in the evidence directory. A Run is shown with exactly the
-//! text `show` prints, and marked Runs with the text `compare` prints, so CLI and TUI agree.
+//! Results and history: the saved Runs in the evidence directory. A Run opens on a summary built
+//! from the report engine's matrix, and a second panel shows exactly the text `show` prints; marked
+//! Runs do the same with the text `compare` prints, so CLI and TUI agree.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -16,16 +17,26 @@ use crate::evidence::{RunFile, RunState, RunSummary};
 use crate::report;
 
 pub const HINTS: &str =
-    "j/k move · Space mark · Enter report (2+ marked: compare) · m compare · Esc back · q quit";
+    "j/k move · Space mark · Enter open · m compare · [ ] panel · Esc back · q quit";
 
 struct Entry {
     name: String,
     run: Result<RunSummary, String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Summary,
+    Full,
+}
+
 struct View {
     title: String,
-    text: String,
+    panel: Panel,
+    /// The matrix, styled.
+    summary: Vec<Line<'static>>,
+    /// The text `show` or `compare` prints.
+    full: Vec<Line<'static>>,
     scroll: usize,
     /// Columns cut off the left of every line, so wide lines can be read to their end.
     hscroll: usize,
@@ -33,21 +44,72 @@ struct View {
 
 const HSTEP: usize = 8;
 
+fn plain_lines(text: &str) -> Vec<Line<'static>> {
+    text.lines().map(|l| Line::from(l.to_string())).collect()
+}
+
+fn columns(line: &Line) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// `line` without its first `n` columns; the rest keeps its styles.
+fn skip_cols(line: &Line<'static>, mut n: usize) -> Line<'static> {
+    line.spans
+        .iter()
+        .filter_map(|span| {
+            let len = span.content.chars().count();
+            let dropped = n.min(len);
+            n -= dropped;
+            (dropped < len).then(|| {
+                Span::styled(
+                    span.content.chars().skip(dropped).collect::<String>(),
+                    span.style,
+                )
+            })
+        })
+        .collect()
+}
+
 impl View {
-    fn new(title: String, text: String) -> Self {
+    /// Opens on the summary.
+    fn new(title: String, summary: Vec<Line<'static>>, full: &str) -> Self {
         Self {
             title,
-            text,
+            panel: Panel::Summary,
+            summary,
+            full: plain_lines(full),
             scroll: 0,
             hscroll: 0,
+        }
+    }
+
+    fn lines(&self) -> &[Line<'static>] {
+        match self.panel {
+            Panel::Summary => &self.summary,
+            Panel::Full => &self.full,
+        }
+    }
+
+    fn title(&self) -> String {
+        let panel = match self.panel {
+            Panel::Summary => "summary",
+            Panel::Full => "full report",
+        };
+        format!("{} · {panel}", self.title)
+    }
+
+    /// Shows `panel` from its top left; the panel already shown stays where it is.
+    fn select(&mut self, panel: Panel) {
+        if self.panel != panel {
+            (self.panel, self.scroll, self.hscroll) = (panel, 0, 0);
         }
     }
 
     /// Moves the view: vertical keys scroll lines, Left/Right shift by `HSTEP` columns, kept
     /// between 0 and the widest line.
     fn scroll(&mut self, nav: Nav) {
-        let lines = self.text.lines().count();
-        let widest = self.text.lines().map(|l| l.chars().count()).max();
+        let lines = self.lines().len();
+        let widest = self.lines().iter().map(columns).max();
         match nav {
             Nav::Left => self.hscroll = self.hscroll.saturating_sub(HSTEP),
             Nav::Right => {
@@ -58,12 +120,92 @@ impl View {
     }
 }
 
+fn delta_style(kind: report::DeltaKind) -> Style {
+    match kind {
+        report::DeltaKind::Gained => theme::base().fg(theme::STATUS_OK),
+        report::DeltaKind::Lost => theme::base().fg(theme::STATUS_FAIL),
+        report::DeltaKind::Noise => theme::dim(),
+    }
+}
+
+/// The matrix as a table laid out like `Display for Matrix` (left aligned, two spaces between
+/// columns, no indent), each delta coloured by how it reads: the numbers stay in the text, so
+/// colour is never the only sign. The pooled row, when shown, follows a dim rule.
+fn matrix_lines(matrix: &report::Matrix, pooled: bool) -> Vec<Line<'static>> {
+    if matrix.columns.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = matrix.table();
+    let pooled_at = rows.len();
+    let pooled = pooled.then(|| matrix.pooled_row()).flatten();
+    let shown = pooled.is_some();
+    rows.extend(pooled);
+    let width = |cell: &report::CellText| cell.to_string().chars().count();
+    let widths: Vec<usize> = (0..rows[0].len())
+        .map(|c| rows.iter().map(|r| width(&r[c])).max().unwrap_or(0))
+        .collect();
+    let mut lines = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let is_pooled = shown && i == pooled_at;
+        if is_pooled {
+            let rule = widths.iter().sum::<usize>() + 2 * (widths.len() - 1);
+            lines.push(Line::from(Span::styled("─".repeat(rule), theme::dim())));
+        }
+        let mut spans = Vec::new();
+        for (c, cell) in row.iter().enumerate() {
+            let style = if i == 0 || (is_pooled && c < 2) {
+                theme::dim()
+            } else {
+                theme::base()
+            };
+            spans.push(Span::styled(cell.counts.clone(), style));
+            if let Some((delta, kind)) = &cell.delta {
+                spans.push(Span::styled("  ", style));
+                spans.push(Span::styled(delta.clone(), delta_style(*kind)));
+            }
+            if c + 1 < row.len() {
+                spans.push(Span::styled(" ".repeat(widths[c] - width(cell) + 2), style));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    let notes = matrix.notes(shown);
+    lines.extend(
+        notes
+            .into_iter()
+            .map(|n| Line::from(Span::styled(n, theme::dim()))),
+    );
+    lines
+}
+
+/// What the summary panel shows for `runs`: for a comparison, first whether the Runs compare;
+/// then the matrix. A single Run pools its rows only when it has several, as its report does.
+fn summary(runs: &[RunFile]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if runs.len() > 1 {
+        let (incomparable, head) = report::comparability(runs);
+        let style = if incomparable {
+            theme::base().fg(theme::STATUS_WARN)
+        } else {
+            theme::dim()
+        };
+        lines.extend(head.into_iter().map(|l| Line::from(Span::styled(l, style))));
+        lines.push(Line::default());
+    }
+    let matrix = report::Matrix::from_runs(runs);
+    lines.extend(matrix_lines(
+        &matrix,
+        runs.len() > 1 || matrix.rows.len() > 1,
+    ));
+    lines
+}
+
 #[derive(Default)]
 pub struct State {
     entries: Vec<Entry>,
     selected: usize,
-    /// File names marked for comparison.
-    marked: BTreeSet<String>,
+    /// File names marked for comparison, in the order they were marked: the first is the baseline.
+    marked: Vec<String>,
     view: Option<View>,
 }
 
@@ -88,6 +230,25 @@ impl State {
         Ok(())
     }
 
+    /// Marks `name` after the others, or unmarks it.
+    fn toggle_mark(&mut self, name: &str) {
+        match self.marked.iter().position(|m| m == name) {
+            Some(i) => {
+                self.marked.remove(i);
+            }
+            None => self.marked.push(name.to_string()),
+        }
+    }
+
+    /// `[ ]` unmarked, `[1]` the first marked (the baseline), and so on; `[+]` from the tenth.
+    fn mark_label(&self, name: &str) -> String {
+        match self.marked.iter().position(|m| m == name) {
+            None => "[ ]".into(),
+            Some(i) if i < 9 => format!("[{}]", i + 1),
+            Some(_) => "[+]".into(),
+        }
+    }
+
     /// Selects `name` and shows its report.
     pub fn open(&mut self, name: &str, dir: &Path) {
         if let Some(i) = self.entries.iter().position(|e| e.name == name) {
@@ -101,26 +262,30 @@ impl State {
             return;
         };
         // Read again so the text is what `show` prints for the file as it is now.
-        let text = load_run(&dir.join(&entry.name)).map(|run| report::report(&run).to_string());
-        self.view = Some(View::new(
-            format!("report {}", entry.name),
-            text.unwrap_or_else(|e| e),
-        ));
+        let title = format!("report {}", entry.name);
+        self.view = Some(match load_run(&dir.join(&entry.name)) {
+            Ok(run) => View::new(
+                title,
+                summary(std::slice::from_ref(&run)),
+                &report::report(&run).to_string(),
+            ),
+            Err(e) => View::new(title, plain_lines(&e), &e),
+        });
     }
 
     fn compare_marked(&mut self, dir: &Path) -> Result<(), String> {
         let runs: Vec<RunFile> = self
-            .entries
+            .marked
             .iter()
-            .filter(|e| self.marked.contains(&e.name))
-            .map(|e| load_run(&dir.join(&e.name)))
+            .map(|name| load_run(&dir.join(name)))
             .collect::<Result<_, _>>()?;
         if runs.len() < 2 {
             return Err("mark two or more readable runs with Space to compare".into());
         }
         self.view = Some(View::new(
             format!("compare {} runs", runs.len()),
-            report::Comparison(&runs).to_string(),
+            summary(&runs),
+            &report::Comparison(&runs).to_string(),
         ));
         Ok(())
     }
@@ -132,6 +297,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     if let Some(view) = state.view.as_mut() {
         if key.code == KeyCode::Esc {
             state.view = None;
+        } else if key.code == KeyCode::Char('[') {
+            view.select(Panel::Summary);
+        } else if key.code == KeyCode::Char(']') {
+            view.select(Panel::Full);
         } else if let Some(n) = nav(key) {
             view.scroll(n);
         }
@@ -139,10 +308,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char(' ') => {
-            if let Some(Entry { name, run: Ok(_) }) = state.entries.get(state.selected)
-                && !state.marked.remove(name)
-            {
-                state.marked.insert(name.clone());
+            if let Some(Entry { name, run: Ok(_) }) = state.entries.get(state.selected) {
+                let name = name.clone();
+                state.toggle_mark(&name);
             }
         }
         KeyCode::Char('r') => app.refresh_results(),
@@ -180,25 +348,21 @@ fn state_status(run: &RunSummary) -> Span<'static> {
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let state = &app.results;
     if let Some(view) = &state.view {
-        // No wrapping: every report line is shown as `show` prints it, cut only by the terminal.
+        // No wrapping: every line is shown whole, cut only by the terminal.
         let lines: Vec<Line> = view
-            .text
             .lines()
+            .iter()
             .skip(view.scroll)
-            .map(|l| Line::from(l.chars().skip(view.hscroll).collect::<String>()))
+            .map(|l| skip_cols(l, view.hscroll))
             .collect();
-        frame.render_widget(Paragraph::new(lines).block(block(&view.title)), area);
+        frame.render_widget(Paragraph::new(lines).block(block(&view.title())), area);
         return;
     }
     let rows: Vec<Line> = state
         .entries
         .iter()
         .map(|e| {
-            let mark = if state.marked.contains(&e.name) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
+            let mark = state.mark_label(&e.name);
             match &e.run {
                 Ok(run) => {
                     let m = &run.manifest;
@@ -246,11 +410,196 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::evidence::{EndRecord, read_run};
+
+    /// A Run of candidates c, d, e and prompts p (baseline) and q on target `sonnet`, label high.
+    /// Trials are (candidate, prompt index, case, effort).
+    fn run_of(id: &str, trials: &[(&str, usize, &str, &str)]) -> RunFile {
+        let candidates = ["c", "d", "e"]
+            .map(|c| json!({"name": c, "provider": "zen", "model": "m", "url": "u"}));
+        let mut lines = vec![json!({
+            "type": "run", "schema_version": crate::evidence::SCHEMA_VERSION, "id": id,
+            "created_unix_ms": 1, "dataset": {"name": "d", "sha256": "d"},
+            "instructions": [{"name": "p", "sha256": "a", "text": "t"},
+                {"name": "q", "sha256": "b", "text": "t"}],
+            "grading_revision": crate::evidence::GRADING_REVISION,
+            "candidates": candidates,
+            "cases": ["c1"], "targets": ["sonnet"],
+            "settings": {"repetitions": 1, "concurrency": 1, "timeout_secs": 60,
+                "retries": 0, "include_unscored": false},
+            "planned_trials": trials.len(),
+        })];
+        for (seq, (candidate, ins, case, effort)) in trials.iter().enumerate() {
+            let body = json!({"answers": {"effort_sonnet": {"type": "choice", "choice": effort}}});
+            let attempt = json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "answered",
+                "http_status": 200, "raw_response": body.to_string(), "error": null});
+            let (name, sha) = [("p", "a"), ("q", "b")][*ins];
+            lines.push(json!({
+                "type": "trial", "seq": seq, "candidate": candidate,
+                "instructions": {"name": name, "sha256": sha},
+                "case_id": case, "targets": ["sonnet"], "repetition": 1,
+                "labels": {"sonnet": "high"}, "request": {}, "attempts": [attempt],
+                "started_unix_ms": 0, "elapsed_ms": 1,
+            }));
+        }
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        read_run(text.as_bytes()).unwrap()
+    }
+
+    /// c gains three cases under q, d loses three, e gains one (noise).
+    fn moving_run() -> RunFile {
+        let mut trials = Vec::new();
+        for case in ["c1", "c2", "c3"] {
+            trials.extend([
+                ("c", 0, case, "low"),
+                ("c", 1, case, "high"),
+                ("d", 0, case, "high"),
+                ("d", 1, case, "low"),
+            ]);
+        }
+        trials.extend([("e", 0, "c1", "low"), ("e", 1, "c1", "high")]);
+        run_of("X1", &trials)
+    }
+
+    fn complete(mut run: RunFile) -> RunFile {
+        run.end = Some(EndRecord {
+            state: RunState::Complete,
+            finished_unix_ms: 9,
+        });
+        run
+    }
+
+    fn plain(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_summary_rows_read_as_the_matrix_the_report_prints() {
+        let run = moving_run();
+        let shown = report::Matrix::from_runs(std::slice::from_ref(&run)).to_string();
+        // The engine's two lines before the table repeat the header row; its rows are indented.
+        let expected: Vec<&str> = shown
+            .lines()
+            .skip(2)
+            .map(|l| l.strip_prefix("  ").unwrap())
+            .collect();
+        let rows: Vec<String> = summary(&[run]).iter().map(plain).collect();
+        // The separator before the pooled row is the only line the text does not have.
+        let rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
+            .filter(|l| !l.starts_with('─'))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn deltas_are_green_red_or_dim_and_the_rest_keeps_its_style() {
+        let lines = summary(&[moving_run()]);
+        let delta_of = |row: &str| {
+            let line = lines.iter().find(|l| plain(l).starts_with(row)).unwrap();
+            line.spans
+                .iter()
+                .find(|s| s.content.starts_with('+'))
+                .unwrap_or_else(|| panic!("no delta in {}", plain(line)))
+                .clone()
+        };
+        let (gain, loss, noise) = (delta_of("c "), delta_of("d "), delta_of("e "));
+        assert_eq!(gain.content, "+3 -0");
+        assert_eq!(gain.style.fg, Some(theme::STATUS_OK));
+        assert_eq!(loss.content, "+0 -3");
+        assert_eq!(loss.style.fg, Some(theme::STATUS_FAIL));
+        assert_eq!(noise.content, "+1 -0 ~");
+        assert_eq!(noise.style, theme::dim());
+        // The header row, the separator and the pooled label are dim, the footnotes too.
+        assert!(lines[0].spans.iter().all(|s| s.style == theme::dim()));
+        assert!(plain(&lines[0]).contains("p (baseline)"));
+        let pooled = lines
+            .iter()
+            .position(|l| plain(l).starts_with("pooled"))
+            .unwrap();
+        assert_eq!(lines[pooled - 1].spans[0].style, theme::dim());
+        assert_eq!(lines[pooled].spans[0].style, theme::dim());
+        assert!(
+            lines[pooled + 1..]
+                .iter()
+                .all(|l| l.spans.iter().all(|s| s.style == theme::dim()))
+        );
+        // A counts text is the base style.
+        let counts = lines[1]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('%'))
+            .unwrap();
+        assert_eq!(counts.style, theme::base());
+    }
+
+    #[test]
+    fn a_compare_summary_opens_with_the_verdict_on_whether_the_runs_compare() {
+        let (x, y) = (moving_run(), moving_run());
+        // Neither Run has an end record: both are partial.
+        let lines = summary(&[x, y]);
+        assert_eq!(plain(&lines[0]), "Not directly comparable:");
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|s| s.style.fg == Some(theme::STATUS_WARN))
+        );
+        assert!(plain(&lines[1]).starts_with("  - X1: partial run"));
+        let blank = lines.iter().position(|l| plain(l).is_empty()).unwrap();
+        assert!(plain(&lines[blank + 1]).starts_with("candidate"));
+
+        let lines = summary(&[complete(moving_run()), complete(moving_run())]);
+        assert!(plain(&lines[0]).starts_with("no differences found in: "));
+        assert_eq!(lines[0].spans[0].style, theme::dim());
+        assert_eq!(plain(&lines[1]), "");
+    }
+
+    #[test]
+    fn a_run_with_no_prompts_has_an_empty_summary() {
+        let mut run = moving_run();
+        run.manifest.instructions.clear();
+        run.trials.clear();
+        assert!(summary(&[run]).is_empty());
+    }
+
+    #[test]
+    fn panels_are_picked_not_cycled_and_each_starts_at_the_top() {
+        let mut view = View::new("report x".into(), plain_lines("a\nb\nc"), "1\n2\n3\n4");
+        assert_eq!(view.title(), "report x · summary");
+        view.scroll(Nav::Down);
+        view.scroll(Nav::Right);
+        assert_eq!(view.scroll, 1);
+        view.select(Panel::Full);
+        assert_eq!(
+            (view.title(), view.scroll, view.hscroll),
+            ("report x · full report".into(), 0, 0)
+        );
+        view.scroll(Nav::Bottom);
+        assert_eq!(view.scroll, 3); // the full report has four lines
+        view.select(Panel::Full);
+        assert_eq!(view.scroll, 3); // picking the panel already shown changes nothing
+        view.select(Panel::Summary);
+        assert_eq!(
+            (view.title(), view.scroll),
+            ("report x · summary".into(), 0)
+        );
+        view.scroll(Nav::Bottom);
+        assert_eq!(view.scroll, 2);
+    }
 
     #[test]
     fn sideways_scroll_steps_by_columns_and_stays_inside_the_widest_line() {
-        let mut view = View::new("t".into(), format!("short\n{}", "x".repeat(20)));
+        let mut view = View::new(
+            "t".into(),
+            Vec::new(),
+            &format!("short\n{}", "x".repeat(20)),
+        );
+        view.select(Panel::Full);
         view.scroll(Nav::Left);
         assert_eq!(view.hscroll, 0);
         view.scroll(Nav::Right);
@@ -264,8 +613,49 @@ mod tests {
         view.scroll(Nav::Down);
         assert_eq!((view.scroll, view.hscroll), (1, 11));
         // An empty text has nothing to scroll to.
-        let mut empty = View::new("t".into(), String::new());
+        let mut empty = View::new("t".into(), Vec::new(), "");
         empty.scroll(Nav::Right);
         assert_eq!(empty.hscroll, 0);
+    }
+
+    #[test]
+    fn cutting_columns_keeps_the_style_of_what_is_left() {
+        let line = Line::from(vec![
+            Span::styled("abc", theme::dim()),
+            Span::styled("def", theme::base()),
+        ]);
+        let cut = skip_cols(&line, 4);
+        assert_eq!(cut.spans.len(), 1);
+        assert_eq!(
+            (cut.spans[0].content.as_ref(), cut.spans[0].style),
+            ("ef", theme::base())
+        );
+        assert_eq!(plain(&skip_cols(&line, 1)), "bcdef");
+        assert_eq!(plain(&skip_cols(&line, 9)), "");
+    }
+
+    #[test]
+    fn marks_keep_their_order_and_show_it_as_a_number() {
+        let mut state = State::default();
+        for name in ["b", "a", "c"] {
+            state.toggle_mark(name);
+        }
+        let labels: Vec<String> = ["a", "b", "c", "d"].map(|n| state.mark_label(n)).into();
+        assert_eq!(labels, ["[2]", "[1]", "[3]", "[ ]"]);
+        // Unmarking renumbers the rest; marking again goes to the end.
+        state.toggle_mark("b");
+        assert_eq!(state.marked, ["a", "c"]);
+        assert_eq!(
+            (state.mark_label("a"), state.mark_label("c")),
+            ("[1]".into(), "[2]".into())
+        );
+        state.toggle_mark("b");
+        assert_eq!(state.mark_label("b"), "[3]");
+        // From the tenth the number no longer fits.
+        for i in 0..7 {
+            state.toggle_mark(&format!("n{i}"));
+        }
+        assert_eq!(state.mark_label("n5"), "[9]");
+        assert_eq!(state.mark_label("n6"), "[+]");
     }
 }
