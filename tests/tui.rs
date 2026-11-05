@@ -333,6 +333,105 @@ fn marked_runs_are_numbered_in_mark_order_and_the_first_is_the_baseline() {
     );
 }
 
+/// The two fixture runs compared (the Results screen on the summary), and the runs.
+fn comparing(test: &str) -> (App, Vec<evidence::RunFile>) {
+    let (mut app, file) = app_with_fixture(test);
+    second_run(&file);
+    app.screen = Screen::Results;
+    press(&mut app, KeyCode::Char('r'));
+    // Newest first (fixture-2, fixture-1); mark fixture-1 first so it is the baseline.
+    for key in ['g', 'j', ' ', 'k', ' ', 'm'] {
+        press(&mut app, KeyCode::Char(key));
+    }
+    let runs = ["fixture-1.jsonl", "fixture-2.jsonl"]
+        .iter()
+        .map(|n| evidence::read_run(&std::fs::read(file.with_file_name(n)).unwrap()).unwrap())
+        .collect();
+    (app, runs)
+}
+
+/// What is inside the borders of `rows`, in one line with single spaces.
+fn inner_text(rows: &[String]) -> String {
+    let inner: Vec<&str> = rows.iter().map(|r| r.trim_matches('│')).collect();
+    inner
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn summary_prose_wraps_to_a_narrow_pane_and_stays_whole() {
+    let (app, runs) = comparing("tui-wrap");
+    let mut prose: Vec<String> = report::comparability(&runs).1;
+    prose.extend(
+        report::Matrix::from_runs(&runs)
+            .notes(true)
+            .iter()
+            .map(|n| n.to_string()),
+    );
+    assert!(prose.len() >= 3, "{prose:?}");
+    for width in [60, 80] {
+        let rows = draw(&app, width, 40);
+        assert!(contains(&rows, "compare 2 runs · summary"));
+        let text = inner_text(&rows);
+        for line in &prose {
+            let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                text.contains(&line),
+                "{width} wide cuts {line:?}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+}
+
+#[test]
+fn table_rows_are_not_wrapped_and_still_scroll_sideways() {
+    let (mut app, runs) = comparing("tui-table");
+    let header = report::Matrix::from_runs(&runs).to_string();
+    let header = matrix_rows(&header)[0].to_string();
+    let before = draw(&app, 60, 40);
+    assert!(contains(&before, &header), "{}", before.join("\n"));
+    press(&mut app, KeyCode::Right);
+    let shifted = draw(&app, 60, 40);
+    assert!(contains(&shifted, &header[8..]) && !contains(&shifted, &header));
+    // The prose does not move with the table.
+    let notes = report::Matrix::from_runs(&runs).notes(true).join(" ");
+    let notes = notes.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(inner_text(&shifted).contains(&notes));
+}
+
+#[test]
+fn scrolling_to_the_end_reaches_the_last_wrapped_row_also_after_a_resize() {
+    let (mut app, runs) = comparing("tui-wrap-scroll");
+    let notes = report::Matrix::from_runs(&runs).notes(true);
+    let last = notes.last().unwrap().split_whitespace().last().unwrap();
+    let first = report::comparability(&runs).1[0].clone();
+    let first = first.split_whitespace().next().unwrap();
+    // The notes take several rows at 60 columns, so the last row is far below the first.
+    assert!(!contains(&draw(&app, 60, 16)[..4], last));
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::PageDown);
+    }
+    let rows = draw(&app, 60, 16);
+    assert!(contains(&rows, last), "{}", rows.join("\n"));
+    assert!(!contains(&rows, first), "{}", rows.join("\n"));
+    // Widening the pane makes fewer rows: the view still ends on the last, and k steps back one.
+    assert!(contains(&draw(&app, 200, 16), last));
+    press(&mut app, KeyCode::Char('j'));
+    assert!(contains(&draw(&app, 200, 16), last));
+    press(&mut app, KeyCode::Char('k'));
+    let rows = draw(&app, 200, 16);
+    assert!(
+        contains(&rows, last) && contains(&rows, "pooled ="),
+        "{}",
+        rows.join("\n")
+    );
+}
+
 #[test]
 fn the_setup_title_fits_a_narrow_terminal_with_many_cases_marked() {
     let (mut app, _) = app_with_fixture("tui-setup-title");
