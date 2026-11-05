@@ -1750,8 +1750,8 @@ fn a_truncated_body_keeps_the_http_status() {
     let url = format!("http://{}/decisions", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            let mut buf = [0; 4096];
-            let _ = stream.read(&mut buf);
+            // Drain the request so closing does not reset the connection before the reply lands.
+            let _ = read_request(&mut stream);
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\nconnection: close\r\n\r\nshort",
             );
@@ -1779,8 +1779,9 @@ fn a_non_utf8_error_body_is_kept_as_a_provider_error() {
     let url = format!("http://{}/decisions", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            let mut buf = [0; 4096];
-            let _ = stream.read(&mut buf);
+            // Drain the whole request first: closing with unread request bytes makes the kernel
+            // reset the connection, and the client then loses the reply body.
+            let _ = read_request(&mut stream);
             let body = b"Bad gateway: caf\xe9 down";
             let head = format!(
                 "HTTP/1.1 502 Bad Gateway\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
