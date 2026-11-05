@@ -108,6 +108,26 @@ fn new_app(name: &str) -> (App, PathBuf) {
     (app, out)
 }
 
+/// The first Case labelled for opus (the only Target the test Apps ask about) and its position on
+/// the Dataset screen, so a reordered dataset does not matter.
+fn opus_case() -> (String, usize) {
+    let (_, _, cases) = decisionbench::batch::load_dataset(None).unwrap();
+    let at = cases
+        .iter()
+        .position(|c| c.ok.get(decisionbench::grade::Target::Opus).is_some())
+        .unwrap();
+    (cases[at].id.clone(), at)
+}
+
+/// Marks the Case at position `at` on the Dataset screen, by keys.
+fn mark_case(app: &mut App, at: usize) {
+    press(app, KeyCode::Char('2'));
+    for _ in 0..at {
+        press(app, KeyCode::Char('j'));
+    }
+    press(app, KeyCode::Char(' '));
+}
+
 /// Keys only: Setup screen, pick the first candidate, jump to Start and press Enter.
 fn start(app: &mut App) {
     press(app, KeyCode::Char('3'));
@@ -184,12 +204,11 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
 
     // One marked case on the Dataset screen: the run plans exactly that case.
     let (mut app, out) = new_app("tui-workflow-marked");
-    press(&mut app, KeyCode::Char('2'));
-    press(&mut app, KeyCode::Char('j')); // c002, labelled for opus
-    press(&mut app, KeyCode::Char(' '));
+    let (case, at) = opus_case();
+    mark_case(&mut app, at);
     assert!(screen_text(&app).contains("[x]"));
     press(&mut app, KeyCode::Char('3'));
-    assert!(screen_text(&app).contains("cases: 1 selected (c002)"));
+    assert!(screen_text(&app).contains(&format!("cases: 1 selected ({case})")));
     start(&mut app);
     until(&mut app, "the marked run to end", |a| !a.run.active());
     assert_eq!(app.run.planned, 1);
@@ -199,9 +218,7 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
     let (mut app, out) = new_app("tui-workflow-prompts");
     let second = out.with_file_name("second.md");
     std::fs::copy("prompts/neutral.md", &second).unwrap();
-    press(&mut app, KeyCode::Char('2'));
-    press(&mut app, KeyCode::Char('j'));
-    press(&mut app, KeyCode::Char(' '));
+    mark_case(&mut app, opus_case().1);
     press(&mut app, KeyCode::Char('3'));
     press(&mut app, KeyCode::Char(' ')); // the candidate
     for _ in 0..5 {

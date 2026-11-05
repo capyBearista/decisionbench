@@ -16,6 +16,11 @@ use crate::grade::Target;
 use crate::instructions::BUNDLED_NAME;
 use crate::run::{self, Settings};
 
+/// A prompt file over this is listed but not read, so a stray large file cannot stall the screen.
+const MAX_PROMPT_BYTES: u64 = 256 * 1024;
+/// Folder files listed; the rest are counted in a note.
+const MAX_FOLDER_FILES: usize = 200;
+
 pub const HINTS: &str =
     "Enter edit/start · Space toggle · a add · d del · r rescan · h/l -/+ · Esc cancel · q quit";
 
@@ -212,7 +217,11 @@ fn add_prompt(app: &mut App, text: &str) -> Result<(), String> {
         return Err(format!("`{text}` is already added"));
     }
     let name = load_instructions(Some(&path))?.name;
-    if prompts.iter().any(|p| p.name == name) {
+    // A listed file with a problem can never be chosen, so it does not hold its name.
+    if prompts
+        .iter()
+        .any(|p| p.problem.is_none() && p.name == name)
+    {
         return Err(format!("a prompt named `{name}` is already listed"));
     }
     let at = prompts
@@ -254,9 +263,45 @@ fn markdown_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-/// Replaces the prompt folder's entries with what the folder holds now. Files already chosen stay
-/// chosen; new ones start unchosen. Reads files, so call it on a key, never while drawing.
+/// What the cursor is on, in terms that survive the prompt rows changing.
+enum Anchor {
+    Row(Row),
+    Prompt(Source),
+}
+
+fn anchor(app: &App) -> Anchor {
+    let rows = rows(app.candidates.items.len(), app.setup.prompts.len());
+    match rows[app.setup.cursor.min(rows.len() - 1)] {
+        Row::Prompt(i) => Anchor::Prompt(app.setup.prompts[i].source.clone()),
+        row => Anchor::Row(row),
+    }
+}
+
+/// Puts the cursor back on `anchor`'s row; a prompt that is gone leaves it on the prompt folder row.
+fn restore(app: &mut App, anchor: Anchor) {
+    let rows = rows(app.candidates.items.len(), app.setup.prompts.len());
+    let row = match anchor {
+        Anchor::Row(row) => row,
+        Anchor::Prompt(source) => (app.setup.prompts.iter())
+            .position(|p| p.source == source)
+            .map_or(Row::PromptDir, Row::Prompt),
+    };
+    if let Some(at) = rows.iter().position(|r| *r == row) {
+        app.setup.cursor = at;
+    }
+}
+
+/// Re-reads the prompt folder, keeping the cursor on its row. Reads files, so call it on a key,
+/// never while drawing.
 pub(super) fn rescan(app: &mut App) {
+    let at = anchor(app);
+    scan(app);
+    restore(app, at);
+}
+
+/// Replaces the prompt folder's entries with what the folder holds now. Files already chosen stay
+/// chosen; new ones start unchosen.
+fn scan(app: &mut App) {
     let prompts = &mut app.setup.prompts;
     let chosen: HashSet<PathBuf> = prompts
         .iter()
@@ -272,7 +317,7 @@ pub(super) fn rescan(app: &mut App) {
         return;
     };
     let dir = batch::prompts_dir_path(&app.config, dir);
-    let files = match markdown_files(&dir) {
+    let mut files = match markdown_files(&dir) {
         Ok(files) => files,
         Err(e) => {
             app.setup.folder_note = Some(e.clone());
@@ -280,19 +325,31 @@ pub(super) fn rescan(app: &mut App) {
             return;
         }
     };
+    if files.len() > MAX_FOLDER_FILES {
+        app.setup.folder_note = Some(format!(
+            "showing the first {MAX_FOLDER_FILES} of {} .md files",
+            files.len()
+        ));
+        files.truncate(MAX_FOLDER_FILES);
+    }
     let mut taken: HashSet<String> = prompts.iter().map(|p| p.name.clone()).collect();
     for path in files {
         let name = path
             .file_stem()
             .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-        let problem = match load_instructions(Some(&path)) {
-            // The row names the file already, so only the reason is kept.
-            Err(e) => Some(
-                e.split_once(&format!("{}: ", path.display()))
-                    .map_or(e.clone(), |(_, reason)| reason.to_string()),
-            ),
-            Ok(_) if !taken.insert(name.clone()) => Some("duplicate name".into()),
-            Ok(_) => None,
+        let too_large = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_PROMPT_BYTES);
+        let problem = if too_large {
+            Some(format!("too large (over {} KiB)", MAX_PROMPT_BYTES / 1024))
+        } else {
+            match load_instructions(Some(&path)) {
+                // The row names the file already, so only the reason is kept.
+                Err(e) => Some(
+                    e.split_once(&format!("{}: ", path.display()))
+                        .map_or(e.clone(), |(_, reason)| reason.to_string()),
+                ),
+                Ok(_) if !taken.insert(name.clone()) => Some("duplicate name".into()),
+                Ok(_) => None,
+            }
         };
         prompts.push(Prompt {
             chosen: problem.is_none() && chosen.contains(&path),
@@ -387,9 +444,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             if let Row::Prompt(i) = row {
                 match &state.prompts[i].source {
                     Source::Typed(_) => {
-                        let gone = state.prompts.remove(i);
+                        let at = anchor(app);
+                        let gone = app.setup.prompts.remove(i);
                         // A folder file that shared its name may be choosable now.
-                        rescan(app);
+                        scan(app);
+                        restore(app, at);
                         app.message = format!("removed prompt {}", gone.name);
                     }
                     Source::Bundled => app.message = "neutral is built in".into(),

@@ -690,6 +690,162 @@ fn the_plan_line_counts_candidates_prompts_cases_and_repetitions() {
     assert!(screen(&app).contains("▸ ▶ start run"));
 }
 
+/// The text of the Setup row under the cursor.
+fn focused_row(app: &App) -> String {
+    draw(app, 100, 40)
+        .into_iter()
+        .find(|row| row.contains("▸ "))
+        .expect("a focused row")
+}
+
+#[test]
+fn clearing_a_folder_of_files_leaves_the_cursor_on_the_folder_row() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    for i in 0..6 {
+        prompt_file(&folder, &format!("p{i}.md"));
+    }
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    assert_eq!(app.setup.prompts.len(), 7);
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..folder.display().to_string().len() {
+        press(&mut app, KeyCode::Backspace);
+    }
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.setup.prompts.len(), 1);
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+    // Enter here edits the folder; it does not start a run.
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editing() && app.screen == Screen::Setup);
+}
+
+#[test]
+fn a_rescan_keeps_the_cursor_on_the_same_row_or_falls_back_to_the_folder_row() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    let first = prompt_file(&folder, "a.md");
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    focus(&mut app, "repetitions");
+    // Rows appear above the cursor, by `r` and by entering the screen again.
+    prompt_file(&folder, "b.md");
+    press(&mut app, KeyCode::Char('r'));
+    assert_eq!(app.setup.prompts.len(), 3);
+    assert!(
+        focused_row(&app).contains("repetitions"),
+        "{}",
+        screen(&app)
+    );
+    prompt_file(&folder, "c.md");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::BackTab);
+    assert_eq!(app.screen, Screen::Setup);
+    assert_eq!(app.setup.prompts.len(), 4);
+    assert!(
+        focused_row(&app).contains("repetitions"),
+        "{}",
+        screen(&app)
+    );
+    // A prompt row stays focused when rows above it come and go.
+    focus(&mut app, "prompt c");
+    std::fs::remove_file(&first).unwrap();
+    press(&mut app, KeyCode::Char('r'));
+    assert!(focused_row(&app).contains("prompt c"), "{}", screen(&app));
+    // Its own file gone: the folder row, never Start or a number.
+    std::fs::remove_file(folder.join("c.md")).unwrap();
+    press(&mut app, KeyCode::Char('r'));
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+}
+
+#[test]
+fn d_leaves_the_cursor_on_the_folder_row() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    for i in 0..3 {
+        prompt_file(&folder, &format!("p{i}.md"));
+    }
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    add_prompt(&mut app, &prompt_file(&dir.join("mine"), "typed.md"));
+    focus(&mut app, "prompt typed");
+    press(&mut app, KeyCode::Char('d'));
+    assert_eq!(app.setup.prompts.len(), 4);
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+}
+
+#[test]
+fn a_large_prompt_file_is_not_read_and_a_big_folder_is_capped() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    prompt_file(&folder, "ok.md");
+    std::fs::File::create(folder.join("huge.md"))
+        .unwrap()
+        .set_len(300 * 1024)
+        .unwrap();
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    let rows = screen(&app);
+    assert!(
+        rows.contains("[ ] prompt huge · too large (over 256 KiB)"),
+        "{rows}"
+    );
+    focus(&mut app, "prompt huge");
+    press(&mut app, KeyCode::Char(' '));
+    assert!(screen(&app).contains("[ ] prompt huge"));
+
+    for i in 0..205 {
+        std::fs::write(folder.join(format!("f{i:03}.md")), "x").unwrap();
+    }
+    press(&mut app, KeyCode::Char('r'));
+    // Bundled plus the first 200 files by name.
+    assert_eq!(app.setup.prompts.len(), 201);
+    let tall = draw(&app, 100, 250).join("\n");
+    assert!(
+        tall.contains("showing the first 200 of 207 .md files"),
+        "{tall}"
+    );
+}
+
+#[test]
+fn a_typed_prompt_may_reuse_the_name_of_a_folder_file_that_can_never_be_chosen() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("dup.md"), "nope").unwrap();
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    let typed = prompt_file(&dir.join("mine"), "dup.md");
+    add_prompt(&mut app, &typed);
+    assert!(!app.editing(), "{}", app.message);
+    // The folder file stays listed, with its own problem.
+    let dups: Vec<_> = app
+        .setup
+        .prompts
+        .iter()
+        .filter(|p| p.name == "dup")
+        .collect();
+    assert_eq!(dups.len(), 2);
+    assert!(dups[0].chosen && dups[1].problem.is_some());
+}
+
 const SECRET: &str = "sk-test-secret-9876";
 
 /// The Zen candidate `add_candidate` makes, selected, and its (not yet written) credentials file.
@@ -896,8 +1052,10 @@ fn each_row_ends_with_its_key_status_without_being_clipped() {
 /// low-high), drawn at `width`x`height`.
 fn c024_detail_rows(width: u16, height: u16) -> Vec<String> {
     let (mut app, _) = app();
+    let (_, _, cases) = crate::batch::load_dataset(None).unwrap();
+    let at = cases.iter().position(|c| c.id == "c024").unwrap();
     press(&mut app, KeyCode::Char('2'));
-    for _ in 0..23 {
+    for _ in 0..at {
         press(&mut app, KeyCode::Char('j'));
     }
     draw(&app, width, height)
