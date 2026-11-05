@@ -613,10 +613,10 @@ mod tests {
         read_run(text.as_bytes()).unwrap()
     }
 
-    /// c gains three cases under q, d loses three, e gains one (noise).
+    /// c gains six cases under q, d loses six (both significant), e gains one (not significant).
     fn moving_run() -> RunFile {
         let mut trials = Vec::new();
-        for case in ["c1", "c2", "c3"] {
+        for case in ["c1", "c2", "c3", "c4", "c5", "c6"] {
             trials.extend([
                 ("c", 0, case, "low"),
                 ("c", 1, case, "high"),
@@ -679,9 +679,9 @@ mod tests {
                 .clone()
         };
         let (gain, loss, noise) = (delta_of("c "), delta_of("d "), delta_of("e "));
-        assert_eq!(gain.content, "+3 -0");
+        assert_eq!(gain.content, "+6 -0");
         assert_eq!(gain.style.fg, Some(theme::STATUS_OK));
-        assert_eq!(loss.content, "+0 -3");
+        assert_eq!(loss.content, "+0 -6");
         assert_eq!(loss.style.fg, Some(theme::STATUS_FAIL));
         assert_eq!(noise.content, "+1 -0 ~");
         assert_eq!(noise.style, theme::dim());

@@ -3256,7 +3256,7 @@ fn compare_labels_the_same_prompt_in_two_runs_by_run_id() {
         &out,
         "candidate target neutral in X1 (baseline) neutral in Y1",
     );
-    // Repetition 2 missed in X and hit in Y: one case gained, within the noise of 1 repetition.
+    // Repetition 2 missed in X and hit in Y: one case gained, too few changed cases for a sign test to call it significant.
     assert_has_line(&out, "c1 sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~");
     assert_has_line(&out, "pooled all 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~");
 }
@@ -3539,7 +3539,7 @@ fn compare_puts_different_prompts_in_columns_with_a_paired_delta() {
     assert_has_line(&out, "c1 sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~");
     assert_has_line(
         &out,
-        "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)",
+        "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)",
     );
 }
 

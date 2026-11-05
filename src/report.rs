@@ -231,23 +231,45 @@ pub struct Column {
     pub run_id: String,
 }
 
-/// Cases gained and lost against the baseline in paired trials. `noise`: the net change is at most
-/// one Case's worth of repetitions.
+/// Paired trials gained and lost against the baseline, and the cases behind them: `cases_up` and
+/// `cases_down` count the cases whose net change over their repetitions is up or down (a case that
+/// netted zero is left out). `noise`: an exact two-sided sign test on those cases is not
+/// significant (`p >= 0.05`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delta {
     pub gained: usize,
     pub lost: usize,
+    pub cases_up: usize,
+    pub cases_down: usize,
     pub noise: bool,
 }
 
 impl Delta {
-    fn new(gained: usize, lost: usize, repetitions: u32) -> Self {
+    fn new(gained: usize, lost: usize, cases_up: usize, cases_down: usize) -> Self {
         Self {
             gained,
             lost,
-            noise: gained.abs_diff(lost) <= repetitions as usize || gained == lost,
+            cases_up,
+            cases_down,
+            noise: sign_test_p(cases_up, cases_down) >= 0.05,
         }
     }
+}
+
+/// Exact two-sided sign test: the chance, if each changed case were equally likely to move either
+/// way, of a split at least as lopsided as `up` against `down`. Summed in log space so that a count
+/// in the thousands neither overflows nor panics; the terms are at most 1 and may underflow to 0.
+fn sign_test_p(up: usize, down: usize) -> f64 {
+    let (n, k) = (up + down, up.min(down));
+    let mut log_choose = 0.0; // ln C(n, i), built up from i = 0
+    let mut tail = 0.0;
+    for i in 0..=k {
+        if i > 0 {
+            log_choose += ((n - i + 1) as f64).ln() - (i as f64).ln();
+        }
+        tail += (log_choose - n as f64 * std::f64::consts::LN_2).exp();
+    }
+    (2.0 * tail).min(1.0)
 }
 
 pub struct Cell {
@@ -256,8 +278,8 @@ pub struct Cell {
     pub delta: Option<Delta>,
 }
 
-/// How a delta reads: more gained than lost, more lost than gained, or noise (which includes no
-/// net change).
+/// How a delta reads: significantly more cases up than down, the reverse, or noise (not significant,
+/// which includes no changed case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
     Gained,
@@ -265,7 +287,7 @@ pub enum DeltaKind {
     Noise,
 }
 
-/// A matrix cell as text: the counts, and the paired delta (`+g -l`, then ` ~` for noise) when
+/// A matrix cell as text: the counts, and the paired delta (`+g -l`, then ` ~` when not significant) when
 /// there is one. `Display` joins them as `Display for Matrix` prints them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellText {
@@ -300,9 +322,9 @@ pub fn cell_parts(cell: Option<&Cell>) -> CellText {
     CellText {
         counts: accuracy_cell(&cell.tally),
         delta: cell.delta.as_ref().map(|d| {
-            let kind = if d.noise || d.gained == d.lost {
+            let kind = if d.noise {
                 DeltaKind::Noise
-            } else if d.gained > d.lost {
+            } else if d.cases_up > d.cases_down {
                 DeltaKind::Gained
             } else {
                 DeltaKind::Lost
@@ -323,7 +345,7 @@ fn pooled_note(axis: Axis) -> &'static str {
         }
     }
 }
-const DELTA_NOTE: &str = "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)";
+const DELTA_NOTE: &str = "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)";
 
 pub struct MatrixRow {
     /// The candidate on the prompt axis, the prompt on the candidate axis.
@@ -489,7 +511,6 @@ impl Matrix {
                 run_id: run_id.to_string(),
             })
             .collect();
-        let reps = |r: usize| runs[r].manifest.settings.repetitions;
         let Some(base) = sources.first() else {
             return Matrix {
                 axis,
@@ -541,14 +562,18 @@ impl Matrix {
                         let (candidate, ins) = pair(*k, row);
                         let after = scored(&runs[*r], candidate, ins, *target);
                         let (mut gained, mut lost, mut pairs) = (0, 0, 0);
+                        let mut net: BTreeMap<&str, i64> = BTreeMap::new();
                         for (key, was) in &before {
                             let Some(now) = after.get(key) else { continue };
                             pairs += 1;
-                            gained += usize::from(*was != Grade::Hit && *now == Grade::Hit);
-                            lost += usize::from(*was == Grade::Hit && *now != Grade::Hit);
+                            let up = *was != Grade::Hit && *now == Grade::Hit;
+                            let down = *was == Grade::Hit && *now != Grade::Hit;
+                            (gained, lost) = (gained + usize::from(up), lost + usize::from(down));
+                            *net.entry(key.0).or_default() += i64::from(up) - i64::from(down);
                         }
-                        cell.delta = (pairs > 0)
-                            .then(|| Delta::new(gained, lost, reps(base.0).max(reps(*r))));
+                        let up = net.values().filter(|n| **n > 0).count();
+                        let down = net.values().filter(|n| **n < 0).count();
+                        cell.delta = (pairs > 0).then(|| Delta::new(gained, lost, up, down));
                     }
                 }
                 rows.push(MatrixRow {
@@ -562,7 +587,7 @@ impl Matrix {
         let pooled = sources
             .iter()
             .enumerate()
-            .map(|(j, (r, _))| {
+            .map(|(j, _)| {
                 let cells: Vec<&Cell> = rows
                     .iter()
                     .filter(|row| row.cells.iter().all(Option::is_some))
@@ -572,7 +597,7 @@ impl Matrix {
                     return None;
                 }
                 let mut tally = Tally::default();
-                let (mut gained, mut lost, mut any) = (0, 0, false);
+                let (mut gained, mut lost, mut up, mut down, mut any) = (0, 0, 0, 0, false);
                 for cell in &cells {
                     tally.hit += cell.tally.hit;
                     tally.under += cell.tally.under;
@@ -580,12 +605,16 @@ impl Matrix {
                     tally.invalid += cell.tally.invalid;
                     tally.unscored += cell.tally.unscored;
                     if let Some(d) = &cell.delta {
-                        (gained, lost, any) = (gained + d.gained, lost + d.lost, true);
+                        gained += d.gained;
+                        lost += d.lost;
+                        up += d.cases_up;
+                        down += d.cases_down;
+                        any = true;
                     }
                 }
                 Some(Cell {
                     tally,
-                    delta: any.then(|| Delta::new(gained, lost, reps(base.0).max(reps(*r)))),
+                    delta: any.then(|| Delta::new(gained, lost, up, down)),
                 })
             })
             .collect();
@@ -1338,12 +1367,39 @@ mod tests {
         m.columns.iter().map(|c| c.label.as_str()).collect()
     }
 
-    fn delta(gained: usize, lost: usize, noise: bool) -> Option<Delta> {
+    fn delta(
+        (gained, lost): (usize, usize),
+        (cases_up, cases_down): (usize, usize),
+        noise: bool,
+    ) -> Option<Delta> {
         Some(Delta {
             gained,
             lost,
+            cases_up,
+            cases_down,
             noise,
         })
+    }
+
+    #[test]
+    fn sign_test_p_is_the_exact_two_sided_binomial_tail() {
+        let close = |got: f64, want: f64| assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        close(sign_test_p(0, 0), 1.0);
+        close(sign_test_p(3, 0), 0.25);
+        close(sign_test_p(0, 6), 0.03125);
+        close(sign_test_p(6, 3), 260.0 / 512.0);
+        close(sign_test_p(10, 0), 2.0 / 1024.0);
+        close(sign_test_p(4, 4), 1.0); // 2 * P(X <= 4) is above 1: capped
+        for (a, b) in [(6, 3), (7, 1), (0, 5), (2, 2)] {
+            assert_eq!(sign_test_p(a, b), sign_test_p(b, a));
+        }
+        // Thousands of cases neither overflow nor underflow into a panic or a NaN.
+        for (a, b) in [(500, 450), (5000, 0), (0, 4000), (3000, 2900)] {
+            let p = sign_test_p(a, b);
+            assert!((0.0..=1.0).contains(&p), "({a}, {b}) gave {p}");
+        }
+        assert!(sign_test_p(500, 450) > 0.05);
+        assert!(sign_test_p(600, 400) < 0.001);
     }
 
     #[test]
@@ -1455,7 +1511,7 @@ mod tests {
             ],
         );
         let cell = m.rows[0].cells[1].as_ref().unwrap();
-        assert_eq!(cell.delta, delta(2, 1, true));
+        assert_eq!(cell.delta, delta((2, 1), (2, 1), true));
         // The baseline column never carries a delta.
         assert!(m.rows[0].cells[0].as_ref().unwrap().delta.is_none());
     }
@@ -1467,8 +1523,8 @@ mod tests {
     }
 
     #[test]
-    fn matrix_noise_is_a_net_change_of_at_most_one_case_of_repetitions() {
-        let gains = |n: usize, losses: usize, repetitions: u32| {
+    fn matrix_delta_is_significant_only_by_a_sign_test_on_the_cases_that_changed() {
+        let gains = |n: usize, losses: usize| {
             let ids: Vec<String> = (0..n + losses).map(|i| format!("k{i}")).collect();
             let cases: Vec<_> = ids
                 .iter()
@@ -1482,18 +1538,66 @@ mod tests {
                     (id.as_str(), Some(b), Some(v))
                 })
                 .collect();
-            paired(repetitions, &cases).rows[0].cells[1]
+            paired(1, &cases).rows[0].cells[1]
                 .as_ref()
                 .unwrap()
                 .delta
                 .clone()
         };
-        assert_eq!(gains(3, 1, 2), delta(3, 1, true)); // net 2 <= 2
-        assert_eq!(gains(4, 1, 2), delta(4, 1, false)); // net 3 > 2
-        assert_eq!(gains(2, 0, 1), delta(2, 0, false));
-        assert_eq!(gains(1, 0, 1), delta(1, 0, true));
-        assert_eq!(gains(1, 3, 2), delta(1, 3, true)); // a net loss counts the same
-        assert_eq!(gains(0, 0, 1), None);
+        assert_eq!(gains(5, 0), delta((5, 0), (5, 0), true)); // p = 0.0625
+        assert_eq!(gains(6, 0), delta((6, 0), (6, 0), false)); // p = 0.03125
+        assert_eq!(gains(0, 6), delta((0, 6), (0, 6), false));
+        assert_eq!(gains(7, 1), delta((7, 1), (7, 1), true)); // p = 0.0703
+        assert_eq!(gains(8, 1), delta((8, 1), (8, 1), false)); // p = 0.0391
+        assert_eq!(gains(1, 3), delta((1, 3), (1, 3), true));
+        assert_eq!(gains(0, 0), None);
+    }
+
+    #[test]
+    fn matrix_delta_counts_a_case_once_however_many_repetitions_flip() {
+        // Every case gains in both repetitions: `+2` trials per case, but one flipped case each.
+        let flips = |cases: usize| {
+            let ids: Vec<String> = (0..cases).map(|i| format!("k{i}")).collect();
+            let mut trials = Vec::new();
+            for id in &ids {
+                for rep in [1, 2] {
+                    trials.push(("c", 0, id.as_str(), rep, "low"));
+                    trials.push(("c", 1, id.as_str(), rep, "high"));
+                }
+            }
+            let run = run_of("X1", 2, &[("p", "a"), ("q", "b")], &["c"], &trials);
+            Matrix::from_runs(&[run], Axis::Prompt).rows[0].cells[1]
+                .as_ref()
+                .unwrap()
+                .delta
+                .clone()
+        };
+        // Three cases x two repetitions: 6 trials gained, but 3 cases, p = 0.25.
+        assert_eq!(flips(3), delta((6, 0), (3, 0), true));
+        // Six cases: p = 0.03125, however the trials are counted.
+        assert_eq!(flips(6), delta((12, 0), (6, 0), false));
+    }
+
+    #[test]
+    fn matrix_delta_ignores_a_case_whose_repetitions_cancel() {
+        // k0 gains in repetition 1 and loses in repetition 2: two flipped trials, no flipped case.
+        let run = run_of(
+            "X1",
+            2,
+            &[("p", "a"), ("q", "b")],
+            &["c"],
+            &[
+                ("c", 0, "k0", 1, "low"),
+                ("c", 1, "k0", 1, "high"),
+                ("c", 0, "k0", 2, "high"),
+                ("c", 1, "k0", 2, "low"),
+            ],
+        );
+        let m = Matrix::from_runs(&[run], Axis::Prompt);
+        assert_eq!(
+            m.rows[0].cells[1].as_ref().unwrap().delta,
+            delta((1, 1), (0, 0), true)
+        );
     }
 
     #[test]
@@ -1527,7 +1631,7 @@ mod tests {
         assert_eq!((b.tally.hit, b.tally.under, b.tally.invalid), (1, 2, 1));
         assert_eq!((v.tally.hit, v.tally.under), (3, 1));
         assert!(b.delta.is_none());
-        assert_eq!(v.delta, delta(2, 1, true));
+        assert_eq!(v.delta, delta((2, 1), (2, 1), true));
     }
 
     #[test]
@@ -1547,7 +1651,7 @@ mod tests {
         let (b, v) = (m.pooled[0].as_ref().unwrap(), m.pooled[1].as_ref().unwrap());
         assert_eq!((b.tally.hit, b.tally.under), (0, 1));
         assert_eq!((v.tally.hit, v.tally.under), (0, 1));
-        assert_eq!(v.delta, delta(0, 0, true));
+        assert_eq!(v.delta, delta((0, 0), (0, 0), true));
     }
 
     #[test]
@@ -1582,7 +1686,14 @@ mod tests {
             .iter()
             .map(|c| c.as_ref().unwrap().delta.clone())
             .collect();
-        assert_eq!(deltas, [None, delta(1, 0, true), delta(0, 0, true)]);
+        assert_eq!(
+            deltas,
+            [
+                None,
+                delta((1, 0), (1, 0), true),
+                delta((0, 0), (0, 0), true)
+            ]
+        );
     }
 
     #[test]
@@ -1615,7 +1726,7 @@ mod tests {
                 "d sonnet 1/1 (100.0%) n/a (0 valid scored)",
                 "pooled all 2/3 (66.7%) 2/2 (100.0%) +1 -0 ~",
                 "pooled = rows present in every column, all candidates and targets together, over valid scored predictions; it is not a score",
-                "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)",
+                "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)",
             ]
         );
     }
@@ -1633,24 +1744,28 @@ mod tests {
         assert_eq!(cell_parts(None), CellText::plain("-"));
         assert_eq!(parts(None), CellText::plain("1/1 (100.0%)"));
         let read = |p: CellText| p.delta.unwrap();
+        // Significant: the colour follows which side has more flipped cases.
         assert_eq!(
-            read(parts(delta(2, 1, false))),
-            ("+2 -1".into(), DeltaKind::Gained)
+            read(parts(delta((9, 2), (7, 1), false))),
+            ("+9 -2".into(), DeltaKind::Gained)
         );
         assert_eq!(
-            read(parts(delta(1, 2, false))),
-            ("+1 -2".into(), DeltaKind::Lost)
+            read(parts(delta((2, 9), (1, 7), false))),
+            ("+2 -9".into(), DeltaKind::Lost)
         );
+        // Not significant is dim and marked, whichever side is ahead.
         assert_eq!(
-            read(parts(delta(3, 1, true))),
+            read(parts(delta((3, 1), (3, 1), true))),
             ("+3 -1 ~".into(), DeltaKind::Noise)
         );
-        // No net change is noise even when the engine did not flag it.
         assert_eq!(
-            read(parts(delta(2, 2, false))),
-            ("+2 -2".into(), DeltaKind::Noise)
+            read(parts(delta((2, 2), (0, 0), true))),
+            ("+2 -2 ~".into(), DeltaKind::Noise)
         );
-        assert_eq!(parts(delta(2, 1, false)).to_string(), "1/1 (100.0%)  +2 -1");
+        assert_eq!(
+            parts(delta((9, 2), (7, 1), false)).to_string(),
+            "1/1 (100.0%)  +9 -2"
+        );
     }
 
     #[test]
@@ -1797,11 +1912,11 @@ mod tests {
         // d against the baseline c, for the same prompt: gained on p, lost on q.
         assert_eq!(
             m.rows[0].cells[1].as_ref().unwrap().delta,
-            delta(1, 0, true)
+            delta((1, 0), (1, 0), true)
         );
         assert_eq!(
             m.rows[1].cells[1].as_ref().unwrap().delta,
-            delta(0, 1, true)
+            delta((0, 1), (0, 1), true)
         );
         assert!(m.rows[0].cells[0].as_ref().unwrap().delta.is_none());
         assert_eq!(
@@ -1814,7 +1929,7 @@ mod tests {
                 "q sonnet 1/1 (100.0%) 0/1 (0.0%) +0 -1 ~",
                 "pooled all 1/2 (50.0%) 1/2 (50.0%) +1 -1 ~",
                 "pooled = rows present in every column, all prompts and targets together, over valid scored predictions; it is not a score",
-                "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = within noise (net change of one case's repetitions or less)",
+                "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)",
             ]
         );
         // The prompt axis of the same run is the transpose: it keeps its own words and header.
@@ -1895,8 +2010,8 @@ mod tests {
             pooled.iter().map(|c| c.tally.under).collect::<Vec<_>>(),
             [0, 1, 1]
         );
-        assert_eq!(pooled[1].delta, delta(0, 1, true));
-        assert_eq!(pooled[2].delta, delta(0, 1, true));
+        assert_eq!(pooled[1].delta, delta((0, 1), (0, 1), true));
+        assert_eq!(pooled[2].delta, delta((0, 1), (0, 1), true));
         // With no prompt in every column there is nothing to pool.
         let x = run_of("X1", 1, &[("p", "a")], &["c"], &[]);
         let y = run_of("Y1", 1, &[("q", "b")], &["d"], &[]);
