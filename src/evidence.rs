@@ -14,14 +14,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cost::{CostTally, attempt_cost, plural};
-use crate::dataset::EffortRange;
+use crate::dataset::Labels;
 use crate::grade::{Grade, Tally, Target, grade};
 use crate::provider::{Attempt, Candidate, Disposition, normalize};
 use crate::run::Settings;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 4;
 /// Bump when grading semantics change, so old evidence stays interpretable.
-pub const GRADING_REVISION: u32 = 1;
+pub const GRADING_REVISION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hashed {
@@ -69,10 +69,11 @@ pub struct TrialRecord {
     pub candidate: String,
     pub instructions: Hashed,
     pub case_id: String,
-    pub target: Target,
+    /// The Target Models the request asked about, in `Target::ALL` order.
+    pub targets: Vec<Target>,
     pub repetition: u32,
-    /// The label as it was when the request was made.
-    pub label: Option<EffortRange>,
+    /// The Case's labels as they were when the request was made.
+    pub labels: Labels,
     pub request: Value,
     pub attempts: Vec<Attempt>,
     pub started_unix_ms: u64,
@@ -90,19 +91,28 @@ impl TrialRecord {
             .is_some_and(|a| a.disposition == Disposition::Answered)
     }
 
-    /// `None` unless the final Attempt was answered.
-    pub fn grade(&self) -> Option<Grade> {
+    /// One grade per asked target; `None` unless the final Attempt was answered.
+    pub fn grades(&self) -> Option<Vec<(Target, Grade)>> {
         let attempt = self
             .last_attempt()
             .filter(|a| a.disposition == Disposition::Answered)?;
-        let effort = normalize(attempt.raw_response.as_deref().unwrap_or_default()).effort;
-        Some(grade(self.label, &effort))
+        let efforts = normalize(attempt.raw_response.as_deref().unwrap_or_default()).efforts;
+        Some(
+            self.targets
+                .iter()
+                .map(|t| (*t, grade(self.labels.get(*t), &efforts[t])))
+                .collect(),
+        )
     }
 
     /// The per-trial progress line `run` prints to stderr.
     pub fn progress(&self, done: usize, total: usize) -> String {
-        let outcome = match (self.grade(), self.last_attempt()) {
-            (Some(g), _) => g.to_string(),
+        let outcome = match (self.grades(), self.last_attempt()) {
+            (Some(grades), _) => grades
+                .iter()
+                .map(|(target, grade)| format!("{target} {grade}"))
+                .collect::<Vec<_>>()
+                .join(" · "),
             (None, Some(a)) => {
                 let status = a
                     .http_status
@@ -112,11 +122,10 @@ impl TrialRecord {
             (None, None) => "no attempts".to_string(),
         };
         format!(
-            "[{done}/{total}] {} {} {} {} #{}: {outcome} ({}, {} ms)",
+            "[{done}/{total}] {} {} {} #{}: {outcome} ({}, {} ms)",
             self.candidate,
             self.instructions.name,
             self.case_id,
-            self.target,
             self.repetition,
             plural(self.attempts.len(), "attempt", "attempts"),
             self.elapsed_ms
@@ -185,8 +194,13 @@ pub fn encode(line: &Line) -> String {
     text
 }
 
-/// Appends one line with a single `write_all`. If that fails the reply is already paid for, so
-/// the line goes to stderr rather than being lost.
+/// The line as it is safe to show on a terminal: C1 controls escaped, still valid JSON.
+pub fn printable(line: &Line) -> String {
+    escape_c1(&encode(line))
+}
+
+/// Appends one line with a single `write_all`. If that fails the reply is already paid for; the
+/// caller must keep the line (see `printable`).
 pub fn append(file: &mut File, path: &Path, line: &Line) -> Result<(), String> {
     write_text(file, path, encode(line))
 }
@@ -198,10 +212,8 @@ pub fn append_on_new_line(file: &mut File, path: &Path, line: &Line) -> Result<(
 }
 
 fn write_text(file: &mut File, path: &Path, text: String) -> Result<(), String> {
-    file.write_all(text.as_bytes()).map_err(|e| {
-        eprint!("{}", escape_c1(&text));
-        format!("cannot write {}: {e}", path.display())
-    })
+    file.write_all(text.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// serde_json escapes C0 controls but not C1 (U+0080-U+009F, e.g. CSI), which a terminal acts on.
@@ -237,6 +249,40 @@ fn unsupported_schema(value: &Value) -> String {
 /// have died mid-write); an unparseable line anywhere else is an error, except one directly
 /// followed by an `end` line with state `failed` (a write failed and left a partial line).
 pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
+    parse(bytes, false).map(|(run, _)| run)
+}
+
+/// What a list of Runs needs: the manifest, the number of Trials and the end line. Trial lines
+/// are only checked for their `type` tag (not read into records), except the last two, which can
+/// be cut or partial; so a Trial line with a bad body in the middle counts here but fails
+/// `read_run`. Open the file with `read_run` for anything more.
+pub struct RunSummary {
+    pub manifest: Manifest,
+    pub trials: usize,
+    pub end: Option<EndRecord>,
+}
+
+impl RunSummary {
+    pub fn state(&self) -> RunState {
+        self.end.as_ref().map_or(RunState::Partial, |e| e.state)
+    }
+}
+
+pub fn read_summary(bytes: &[u8]) -> Result<RunSummary, String> {
+    let (run, skimmed) = parse(bytes, true)?;
+    Ok(RunSummary {
+        manifest: run.manifest,
+        trials: run.trials.len() + skimmed,
+        end: run.end,
+    })
+}
+
+/// `skim` leaves Trial lines other than the last two unread and counts them instead.
+fn parse(bytes: &[u8], skim: bool) -> Result<(RunFile, usize), String> {
+    #[derive(Deserialize)]
+    struct Tag {
+        r#type: String,
+    }
     // Lossy so a final line cut inside a multibyte character is a warning, not a failure.
     let text = String::from_utf8_lossy(bytes);
     let mut lines = text
@@ -256,8 +302,15 @@ pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
         Err(e) => return Err(format!("line 1: {e}")),
     };
     let rest: Vec<(usize, &str)> = lines.collect();
-    let (mut trials, mut end, mut warnings) = (Vec::new(), None, Vec::new());
+    let (mut trials, mut end, mut warnings, mut skimmed) = (Vec::new(), None, Vec::new(), 0);
     for (i, (n, line)) in rest.iter().enumerate() {
+        if skim
+            && i + 2 < rest.len()
+            && serde_json::from_str::<Tag>(line).is_ok_and(|t| t.r#type == "trial")
+        {
+            skimmed += 1;
+            continue;
+        }
         match serde_json::from_str::<Line>(line) {
             Ok(Line::Trial(trial)) => trials.push(trial),
             Ok(Line::End(record)) => end = Some(record),
@@ -287,12 +340,13 @@ pub fn read_run(bytes: &[u8]) -> Result<RunFile, String> {
         }
     }
     trials.sort_by_key(|t| t.seq);
-    Ok(RunFile {
+    let run = RunFile {
         manifest,
         trials,
         end,
         warnings,
-    })
+    };
+    Ok((run, skimmed))
 }
 
 /// What went wrong: the provider's message when the body has one, else a cut of the raw body.
@@ -344,16 +398,21 @@ impl fmt::Display for RunFile {
             }
             writeln!(f)?;
             for instructions in &self.manifest.instructions {
+                let group: Vec<&&TrialRecord> = mine
+                    .iter()
+                    .filter(|t| t.instructions.name == instructions.name)
+                    .collect();
+                if group.is_empty() {
+                    continue;
+                }
                 for target in &self.manifest.targets {
-                    let group: Vec<&&TrialRecord> = mine
-                        .iter()
-                        .filter(|t| t.instructions.name == instructions.name && t.target == *target)
-                        .collect();
-                    if group.is_empty() {
-                        continue;
-                    }
                     let mut tally = Tally::default();
-                    for grade in group.iter().filter_map(|t| t.grade()) {
+                    for (_, grade) in group
+                        .iter()
+                        .filter_map(|t| t.grades())
+                        .flatten()
+                        .filter(|(t, _)| t == target)
+                    {
                         tally.add(grade);
                     }
                     let short: String = instructions.sha256.chars().take(12).collect();
@@ -439,9 +498,9 @@ mod tests {
                 sha256: "a".repeat(64),
             },
             case_id: "c001".into(),
-            target: Target::Sonnet,
+            targets: vec![Target::Sonnet],
             repetition: 1,
-            label: None,
+            labels: Labels::default(),
             request: json!({}),
             attempts: Vec::new(),
             started_unix_ms: 1,
@@ -480,6 +539,38 @@ mod tests {
         assert_eq!(run.trials.len(), 1);
         assert_eq!(run.warnings.len(), 1);
         assert!(run.warnings[0].contains("line 3"), "{:?}", run.warnings);
+    }
+
+    #[test]
+    fn a_summary_counts_trials_and_tolerates_a_partial_file() {
+        let end = Line::End(EndRecord {
+            state: RunState::Complete,
+            finished_unix_ms: 9,
+        });
+        let summary =
+            read_summary(file(&[manifest(4), trial(0), trial(1), trial(2), end]).as_bytes());
+        let summary = summary.unwrap();
+        assert_eq!(summary.trials, 3);
+        assert_eq!(summary.state(), RunState::Complete);
+        assert_eq!(summary.manifest.planned_trials, 4);
+
+        // No end line: partial. A cut last line is not a Trial, however many lines precede it.
+        let whole = file(&[manifest(9), trial(0), trial(1), trial(2), trial(3)]);
+        let summary = read_summary(whole.as_bytes()).unwrap();
+        assert_eq!((summary.trials, summary.state()), (4, RunState::Partial));
+        let cut = format!("{whole}{}", &encode(&trial(4))[..30]);
+        assert_eq!(read_summary(cut.as_bytes()).unwrap().trials, 4);
+        // Same answers as the full read.
+        assert_eq!(read_run(cut.as_bytes()).unwrap().trials.len(), 4);
+
+        // An unreadable middle line is still an error; a bad manifest is too.
+        let middle = format!(
+            "{}{{oops\n{}",
+            file(&[manifest(2)]),
+            file(&[trial(0), trial(1)])
+        );
+        assert!(read_summary(middle.as_bytes()).is_err());
+        assert!(read_summary(b"").is_err());
     }
 
     #[test]
@@ -534,6 +625,73 @@ mod tests {
         );
     }
 
+    fn answered(body: &str) -> Attempt {
+        Attempt {
+            started_unix_ms: 0,
+            latency_ms: 0,
+            disposition: Disposition::Answered,
+            http_status: Some(200),
+            raw_response: Some(body.to_string()),
+            error: None,
+        }
+    }
+
+    fn graded_trial(attempts: Vec<Attempt>) -> TrialRecord {
+        let Line::Trial(mut record) = trial(0) else {
+            unreachable!()
+        };
+        record.targets = vec![Target::Haiku, Target::Sonnet, Target::Opus];
+        record.labels =
+            serde_json::from_value(json!({"sonnet": "low", "opus": "medium-high"})).unwrap();
+        record.attempts = attempts;
+        record
+    }
+
+    #[test]
+    fn each_asked_target_is_graded_from_its_own_answer() {
+        let body = r#"{"answers":{"effort_haiku":{"choice":"max"},"effort_sonnet":{"choice":"high"},"effort_opus":{"choice":"high"}}}"#;
+        let record = graded_trial(vec![answered(body)]);
+        assert_eq!(
+            record.grades().unwrap(),
+            [
+                (Target::Haiku, Grade::Unscored),
+                (Target::Sonnet, Grade::Over),
+                (Target::Opus, Grade::Hit),
+            ]
+        );
+        assert!(
+            record
+                .progress(1, 1)
+                .contains("#1: haiku unscored · sonnet over · opus hit (")
+        );
+        // A target without an answer is invalid when labelled, unscored otherwise.
+        let record = graded_trial(vec![answered(
+            r#"{"answers":{"effort_sonnet":{"choice":"low"}}}"#,
+        )]);
+        assert_eq!(
+            record.grades().unwrap(),
+            [
+                (Target::Haiku, Grade::Unscored),
+                (Target::Sonnet, Grade::Hit),
+                (Target::Opus, Grade::Invalid),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_final_attempt_has_no_grades() {
+        let mut failed = answered("busy");
+        failed.disposition = Disposition::ProviderError;
+        failed.http_status = Some(503);
+        let record = graded_trial(vec![failed]);
+        assert_eq!(record.grades(), None);
+        assert!(
+            record
+                .progress(1, 1)
+                .contains("#1: provider_error (HTTP 503): busy (")
+        );
+    }
+
     #[test]
     fn c1_controls_are_escaped_for_stderr_only() {
         let csi = "a\u{9b}31m\u{80}\u{9f}b\u{a0}";
@@ -545,9 +703,11 @@ mod tests {
     }
 
     #[test]
-    fn only_schema_2_is_read() {
+    fn only_schema_4_is_read() {
         for first in [
             r#"{"type":"run","schema_version":1}"#,
+            r#"{"type":"run","schema_version":2}"#,
+            r#"{"type":"run","schema_version":3}"#,
             r#"{"schema_version":99}"#,
             r#"{"type":"run"}"#,
         ] {

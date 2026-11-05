@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
+use crate::grade::Target;
+
 /// The bundled dataset (`datasets/cases.json`).
 pub const BUNDLED_CASES: &[u8] = include_bytes!("../datasets/cases.json");
 
@@ -80,13 +82,44 @@ impl Serialize for EffortRange {
 
 /// Labels per Target Model; an absent target is unscored. `null` is rejected, so omitting the key is
 /// the only way to leave a target unscored.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Labels {
-    #[serde(default, deserialize_with = "present")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub haiku: Option<EffortRange>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub sonnet: Option<EffortRange>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub opus: Option<EffortRange>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fable: Option<EffortRange>,
+}
+
+impl Labels {
+    pub fn get(&self, target: Target) -> Option<EffortRange> {
+        match target {
+            Target::Haiku => self.haiku,
+            Target::Sonnet => self.sonnet,
+            Target::Opus => self.opus,
+            Target::Fable => self.fable,
+        }
+    }
 }
 
 /// Only called for keys that are present, so `None` here means an explicit `null`.
@@ -111,8 +144,8 @@ pub struct Case {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Summary {
     pub cases: usize,
-    pub sonnet_labels: usize,
-    pub opus_labels: usize,
+    /// Labelled Cases per Target Model, in `Target::ALL` order.
+    pub labels: [usize; Target::ALL.len()],
 }
 
 /// Parses and validates a dataset file.
@@ -127,7 +160,7 @@ pub fn parse_cases(bytes: &[u8]) -> Result<Vec<Case>, String> {
         if case.id.is_empty() {
             return Err("case with empty id".to_string());
         }
-        if case.ok.sonnet.is_none() && case.ok.opus.is_none() {
+        if Target::ALL.iter().all(|t| case.ok.get(*t).is_none()) {
             return Err(format!("case {} has no labels", case.id));
         }
         if !ids.insert(case.id.as_str()) {
@@ -147,15 +180,14 @@ pub fn parse_cases(bytes: &[u8]) -> Result<Vec<Case>, String> {
 pub fn summarize(cases: &[Case]) -> Summary {
     Summary {
         cases: cases.len(),
-        sonnet_labels: cases.iter().filter(|c| c.ok.sonnet.is_some()).count(),
-        opus_labels: cases.iter().filter(|c| c.ok.opus.is_some()).count(),
+        labels: Target::ALL.map(|t| cases.iter().filter(|c| c.ok.get(t).is_some()).count()),
     }
 }
 
 impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "cases: {}", self.cases)?;
-        for (target, labels) in [("sonnet", self.sonnet_labels), ("opus", self.opus_labels)] {
+        for (target, labels) in Target::ALL.iter().zip(self.labels) {
             writeln!(
                 f,
                 "{target} labels: {labels} ({} unscored)",

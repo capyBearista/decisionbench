@@ -9,18 +9,27 @@ use serde_json::Value;
 
 use crate::dataset::{Case, Effort, EffortRange};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Target {
+    Haiku,
     Sonnet,
     Opus,
+    Fable,
+}
+
+impl Target {
+    /// Every Target Model, in the order requests list their questions.
+    pub const ALL: [Self; 4] = [Self::Haiku, Self::Sonnet, Self::Opus, Self::Fable];
 }
 
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Haiku => "haiku",
             Self::Sonnet => "sonnet",
             Self::Opus => "opus",
+            Self::Fable => "fable",
         })
     }
 }
@@ -91,11 +100,7 @@ pub fn grade_all(cases: &[Case], predictions: &[Prediction]) -> Result<Vec<Grade
             let case = by_id
                 .get(p.case.as_str())
                 .ok_or_else(|| format!("prediction {} names unknown case {}", i + 1, p.case))?;
-            let label = match p.target {
-                Target::Sonnet => case.ok.sonnet,
-                Target::Opus => case.ok.opus,
-            };
-            Ok(grade(label, &p.effort))
+            Ok(grade(case.ok.get(p.target), &p.effort))
         })
         .collect()
 }

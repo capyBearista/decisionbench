@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::dataset::{Case, EffortRange};
+use crate::dataset::Case;
 use crate::evidence::{Hashed, TrialRecord};
 use crate::grade::Target;
 use crate::instructions::JudgeInstructions;
@@ -18,7 +18,7 @@ const RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    /// Repetitions of every Candidate × instructions × Case × Target combination.
+    /// Repetitions of every Candidate × instructions × Case combination.
     pub repetitions: u32,
     /// Trials in flight at once.
     pub concurrency: u32,
@@ -35,7 +35,6 @@ pub struct TrialSpec {
     pub candidate: usize,
     pub instructions: usize,
     pub case: usize,
-    pub target: Target,
     /// Starts at 1.
     pub repetition: u32,
 }
@@ -43,22 +42,15 @@ pub struct TrialSpec {
 #[derive(Debug)]
 pub struct Plan {
     pub trials: Vec<TrialSpec>,
-    /// Case × Target pairs planned.
-    pub pairs: usize,
-    /// Unlabelled pairs left out.
+    /// Cases planned.
+    pub cases: usize,
+    /// Cases left out because none of the selected Targets has a label.
     pub skipped: usize,
 }
 
-pub fn label(case: &Case, target: Target) -> Option<EffortRange> {
-    match target {
-        Target::Sonnet => case.ok.sonnet,
-        Target::Opus => case.ok.opus,
-    }
-}
-
 /// Repetition-first: repetition 1 of every combination, then repetition 2, and so on, so a
-/// cancelled Run covers as many combinations as possible. Unlabelled pairs are skipped unless
-/// `include_unscored`.
+/// cancelled Run covers as many combinations as possible. A Case is skipped when none of the
+/// selected `targets` has a label, unless `include_unscored`.
 pub fn plan(
     candidates: usize,
     instructions: usize,
@@ -66,24 +58,21 @@ pub fn plan(
     targets: &[Target],
     settings: &Settings,
 ) -> Plan {
-    let all_pairs = cases.len() * targets.len();
-    let pairs: Vec<(usize, Target)> = (0..cases.len())
-        .flat_map(|case| targets.iter().map(move |t| (case, *t)))
-        .filter(|(case, target)| {
-            settings.include_unscored || label(&cases[*case], *target).is_some()
+    let planned: Vec<usize> = (0..cases.len())
+        .filter(|&case| {
+            settings.include_unscored || targets.iter().any(|t| cases[case].ok.get(*t).is_some())
         })
         .collect();
     let mut trials = Vec::new();
     for repetition in 1..=settings.repetitions {
         for candidate in 0..candidates {
             for instructions in 0..instructions {
-                for &(case, target) in &pairs {
+                for &case in &planned {
                     trials.push(TrialSpec {
                         seq: trials.len(),
                         candidate,
                         instructions,
                         case,
-                        target,
                         repetition,
                     });
                 }
@@ -92,8 +81,8 @@ pub fn plan(
     }
     Plan {
         trials,
-        pairs: pairs.len(),
-        skipped: all_pairs - pairs.len(),
+        cases: planned.len(),
+        skipped: cases.len() - planned.len(),
     }
 }
 
@@ -105,13 +94,14 @@ pub struct Job<'a> {
     pub keys: &'a [Option<String>],
     pub instructions: &'a [JudgeInstructions],
     pub cases: &'a [Case],
+    pub targets: &'a [Target],
 }
 
 fn run_trial(spec: &TrialSpec, job: &Job, settings: &Settings, agent: &ureq::Agent) -> TrialRecord {
     let candidate = &job.candidates[spec.candidate];
     let instructions = &job.instructions[spec.instructions];
     let case = &job.cases[spec.case];
-    let request = request_body(&candidate.model, instructions, case, spec.target);
+    let request = request_body(&candidate.model, instructions, case, job.targets);
     let started_unix_ms = now_unix_ms();
     let clock = Instant::now();
     let mut attempts = Vec::new();
@@ -137,9 +127,9 @@ fn run_trial(spec: &TrialSpec, job: &Job, settings: &Settings, agent: &ureq::Age
             sha256: instructions.sha256.clone(),
         },
         case_id: case.id.clone(),
-        target: spec.target,
+        targets: job.targets.to_vec(),
         repetition: spec.repetition,
-        label: label(case, spec.target),
+        labels: case.ok.clone(),
         request,
         attempts,
         started_unix_ms,
@@ -203,43 +193,60 @@ mod tests {
         }
     }
 
-    fn key(t: &TrialSpec) -> (u32, usize, usize, usize, Target) {
-        (t.repetition, t.candidate, t.instructions, t.case, t.target)
+    fn key(t: &TrialSpec) -> (u32, usize, usize, usize) {
+        (t.repetition, t.candidate, t.instructions, t.case)
     }
 
     #[test]
-    fn plans_repetition_first_and_skips_unlabelled_pairs() {
+    fn plans_repetition_first_and_skips_cases_no_selected_target_labels() {
         let both = [Target::Sonnet, Target::Opus];
         let plan = plan(2, 1, &cases(), &both, &settings(2, false));
-        assert_eq!((plan.pairs, plan.skipped), (3, 1));
-        assert_eq!(plan.trials.len(), 2 * 2 * 3);
+        assert_eq!((plan.cases, plan.skipped), (2, 0));
+        assert_eq!(plan.trials.len(), 2 * 2 * 2);
         assert!(plan.trials.iter().enumerate().all(|(i, t)| t.seq == i));
         let keys: Vec<_> = plan.trials.iter().map(key).collect();
-        // Repetition 1 of every candidate and pair, then repetition 2.
-        assert_eq!(keys[0], (1, 0, 0, 0, Target::Sonnet));
-        assert_eq!(keys[1], (1, 0, 0, 0, Target::Opus));
-        assert_eq!(keys[2], (1, 0, 0, 1, Target::Sonnet));
-        assert_eq!(keys[3], (1, 1, 0, 0, Target::Sonnet));
-        assert_eq!(keys[6], (2, 0, 0, 0, Target::Sonnet));
-        assert!(!keys.contains(&(1, 0, 0, 1, Target::Opus)));
-    }
-
-    #[test]
-    fn include_unscored_keeps_every_pair() {
-        let both = [Target::Sonnet, Target::Opus];
-        let plan = plan(1, 2, &cases(), &both, &settings(1, true));
-        assert_eq!((plan.pairs, plan.skipped, plan.trials.len()), (4, 0, 8));
-        assert!(
-            plan.trials
-                .iter()
-                .any(|t| t.case == 1 && t.target == Target::Opus)
+        // Repetition 1 of every candidate and case, then repetition 2.
+        assert_eq!(
+            keys[..4],
+            [(1, 0, 0, 0), (1, 0, 0, 1), (1, 1, 0, 0), (1, 1, 0, 1)]
         );
+        assert_eq!(keys[4], (2, 0, 0, 0));
     }
 
     #[test]
-    fn only_unlabelled_pairs_plan_nothing() {
+    fn a_case_is_kept_when_any_selected_target_is_labelled() {
+        // Case b is labelled for sonnet only.
+        let plan = plan(
+            1,
+            1,
+            &cases(),
+            &[Target::Opus, Target::Sonnet],
+            &settings(1, false),
+        );
+        assert_eq!((plan.cases, plan.skipped, plan.trials.len()), (2, 0, 2));
+        // With only opus selected, b has nothing to score.
+        let plan = plan_for(&[Target::Opus], false);
+        assert_eq!((plan.cases, plan.skipped, plan.trials.len()), (1, 1, 1));
+        assert_eq!(plan.trials[0].case, 0);
+        // A target nobody labelled drops every case.
+        let plan = plan_for(&[Target::Haiku, Target::Fable], false);
+        assert_eq!((plan.cases, plan.skipped, plan.trials.len()), (0, 2, 0));
+    }
+
+    fn plan_for(targets: &[Target], include_unscored: bool) -> Plan {
+        plan(1, 1, &cases(), targets, &settings(1, include_unscored))
+    }
+
+    #[test]
+    fn include_unscored_keeps_every_case() {
+        let plan = plan(1, 2, &cases(), &[Target::Opus], &settings(1, true));
+        assert_eq!((plan.cases, plan.skipped, plan.trials.len()), (2, 0, 4));
+    }
+
+    #[test]
+    fn only_unlabelled_cases_plan_nothing() {
         let plan = plan(1, 1, &cases()[1..], &[Target::Opus], &settings(3, false));
         assert!(plan.trials.is_empty());
-        assert_eq!((plan.pairs, plan.skipped), (0, 1));
+        assert_eq!((plan.cases, plan.skipped), (0, 1));
     }
 }

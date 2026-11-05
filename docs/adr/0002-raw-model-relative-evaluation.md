@@ -1,6 +1,6 @@
 # ADR-0002: Grade raw, model-relative effort predictions independently of prior effort
 
-**Status:** Accepted as benchmark methodology (2026-11-03); superseded in part by [ADR-0003](0003-owned-per-target-effort-ranges.md) for dataset provenance, holdouts and label format
+**Status:** Accepted as benchmark methodology (2026-11-03); superseded in part by [ADR-0003](0003-owned-per-target-effort-ranges.md) for dataset provenance, holdouts and label format; superseded in part by [ADR-0005](0005-one-request-per-case-four-targets.md), which replaces the separate request per target with one request per Case
 
 ## Context
 

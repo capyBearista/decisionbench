@@ -1,6 +1,6 @@
 # decisionbench
 
-**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset, grade local effort predictions offline, and run batches of Decisions requests (Candidate × Judge Instructions × Case × Target Model × repetition) through OpenRouter or OpenCode Zen with retries, a concurrency limit and safe cancellation, saving every Attempt as evidence with a manually priced cost estimate. Detailed reports (latency, consistency, history) are not implemented yet.
+**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset, grade local effort predictions offline, and run batches of Decisions requests (Candidate × Judge Instructions × Case × repetition, one question per Target Model) through OpenRouter or OpenCode Zen with retries, a concurrency limit and safe cancellation, saving every Attempt as evidence with a manually priced cost estimate. Saved Runs can be reported, compared and listed offline. A terminal UI (`decisionbench tui`) is under development.
 
 ```sh
 cargo run -- dataset inspect            # bundled dataset
@@ -8,7 +8,10 @@ cargo run -- dataset inspect FILE.json  # another dataset file
 cargo run -- grade PREDICTIONS.json     # grade against the bundled dataset (or --dataset FILE.json)
 cargo run -- run --candidate jev-openrouter --case c002 --target opus --repetitions 1   # smoke test
 cargo run -- run --candidate jev-openrouter --candidate jev-zen-free                     # full run
-cargo run -- show ~/.local/share/decisionbench/runs/FILE.jsonl
+cargo run -- show ~/.local/share/decisionbench/runs/FILE.jsonl      # full report of one run
+cargo run -- compare RUN1.jsonl RUN2.jsonl                          # runs side by side
+cargo run -- history                                                # saved runs
+cargo run -- tui                                                    # terminal UI
 ```
 
 ## Sending a request
@@ -25,7 +28,6 @@ model = "typesafe/jev-1.13"        # the model id sent on the wire
 [candidate.price]                  # optional; USD, captured with each run
 input_per_million = 0.04           # required in the table
 output_per_million = 0.0           # optional, default 0
-per_request = 0.0                  # optional fixed fee, default 0
 
 [[candidate]]
 name = "jev-zen-free"
@@ -34,23 +36,23 @@ provider = "zen"
 model = "jev-1.13-free"
 ```
 
-Credentials come from environment variables only and are never written to evidence: `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent when it is unset or empty). Requests always go to the provider's own URL and honour the standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` environment variables. The tests redirect every request, API key included, to a local stub with `DECISIONBENCH_TEST_BASE_URL`; never set it outside tests.
+API keys come from the environment variables `OPENROUTER_API_KEY` (required for `openrouter`) and `OPENCODE_API_KEY` (optional for `zen`; free models work without one, and no `Authorization` header is sent without a key). A non-empty variable wins; otherwise the key saved in `credentials.toml`, next to the config file, is used (an empty value counts as unset). Save a key with `K` (Shift-k) on the TUI Candidates screen, or write the file by hand as `openrouter = "..."` and/or `zen = "..."`. The TUI creates the file with mode 0600; a hand-written one is read as is, so make it private yourself. A key is never written to the config or to evidence. An unreadable or invalid `credentials.toml` stops runs even when an environment key is set; the Candidates row then shows `file error`. Requests always go to the provider's own URL and honour the standard `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` environment variables. The tests redirect every request, API key included, to a local stub with `DECISIONBENCH_TEST_BASE_URL`; never set it outside tests.
 
 ### Running a benchmark
 
-`run` sends one independent request per Trial. Each request carries the Case message, its context if any, and the Target Model. It never sends current effort or current model.
+`run` sends one independent request per Trial (Candidate × Judge Instructions × Case × repetition). The request asks one question per selected Target Model (`effort_haiku`, `effort_sonnet`, `effort_opus`, `effort_fable`) and carries the Case message and its context, if any. It never sends current effort or current model. Because one request covers all selected targets, the answers within a Trial are not independent. Each target's answer is a Prediction, graded against that target's label.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--candidate NAME` | required | Candidate from the config; repeatable |
 | `--instructions PATH` | bundled `neutral` | Judge Instructions file; repeatable |
 | `--case ID` | every Case | repeatable |
-| `--target sonnet\|opus` | both | repeatable |
+| `--target haiku\|sonnet\|opus\|fable` | all four | which questions to ask; repeatable. The instructions file must have a section for each |
 | `--repetitions N` | 3 | independent Trials per combination |
 | `--concurrency N` | 1 | Trials in flight at once |
 | `--timeout SECS` | 60 | per request |
 | `--retries N` | 1 | extra Attempts after a transport error or HTTP 408, 429, 500, 502, 503, 504, 524 or 529, after a 1 s pause |
-| `--include-unscored` | off | also run Case × Target pairs with no label (they can only grade as unscored) |
+| `--include-unscored` | off | also run Cases that none of the selected targets labels (they can only grade as unscored) |
 | `--config`, `--dataset`, `--out` | see above | |
 
 A reply that arrives is never retried, even when its effort is invalid. A Trial's outcome is its last Attempt, and every Attempt is kept. Before sending, `run` prints the planned Trial count and the maximum number of requests, then one progress line per finished Trial on stderr, and a summary on stdout.
@@ -59,41 +61,63 @@ A reply that arrives is never retried, even when its effort is invalid. A Trial'
 
 **Exit codes:** `0` complete and every Trial answered (an effort may still grade as invalid); `3` complete, but some Trial ended in a provider or transport failure; `130` cancelled (partial); `1` bad config, input or missing key (nothing sent or saved), or the run failed on an internal error such as an evidence write; `2` usage error.
 
-**Evidence:** one append-only JSONL file per run under `$XDG_DATA_HOME/decisionbench/runs` (default `~/.local/share/decisionbench/runs`, or `--out DIR`), private to your user. The first line is the run manifest (settings, Candidates with their price snapshot, Judge Instructions, dataset revision); then one line per finished Trial with all its Attempts; then an end line with the state `complete`, `partial` or `failed`. `show FILE` prints the same summary offline. Grades and costs are recomputed when reading, never stored.
+**Evidence:** one append-only JSONL file per run under `$XDG_DATA_HOME/decisionbench/runs` (default `~/.local/share/decisionbench/runs`, or `--out DIR`), private to your user. The first line is the run manifest (settings, Candidates with their price snapshot, Judge Instructions, dataset revision); then one line per finished Trial with all its Attempts; then an end line with the state `complete`, `partial` or `failed`. The format is schema version 4; older files are not readable. Grades and costs are recomputed when reading, never stored.
 
-**Cost:** each answered Attempt costs `input_tokens × input rate + output_tokens × output rate + per-request fee`, using the price captured in the run, not the current config. A failed Attempt (error reply or transport failure before a success status) is counted as costing nothing, on the assumption that providers do not bill failed requests; the summary says how many were counted this way. A Candidate without a price, or an answer without the needed usage counters, shows as unknown, never as zero. OpenRouter's own `usage.cost` is kept in the raw reply but not used.
+### Reading results
+
+- `show FILE` prints the full report of one run: accuracy (hit, under, over, invalid and unscored counts per Candidate × Judge Instructions × target, with the denominator), cross-model metrics, consistency, coverage and validity, reliability, latency (median and p95), cost and warnings. A ratio with nothing to divide by prints as `n/a`, not 0%.
+- `compare FILE…` (two or more) prints accuracy per run side by side, after a list of everything that makes the runs not directly comparable: dataset, grading revision, schema, targets, instructions content, provider route, case selection, repetitions, unscored inclusion, candidates, or a run that is not complete.
+- `history [DIR]` lists saved runs by creation time (default: the evidence folder above) with state, recorded and planned Trials, Candidates and dataset hash. Unreadable files are listed as such.
+
+The two cross-model metrics sit next to the per-target numbers and never replace them. **Joint hit** is the share of Trials, among those with at least two labelled targets that all gave a valid effort, where every labelled target hit. **Gap agreement** is the share of eligible target pairs that keep the expected order: when two labels do not overlap, the target with the higher range must get a strictly higher effort.
+
+### Terminal UI
+
+`decisionbench tui` (also takes `--config FILE` and `--out DIR`) opens the same engine and reports in a terminal. It has five screens: Candidates, Dataset, Run setup, Run and Results/History. Switch screens with `Tab` or `1`-`5`, move with the arrow keys or `h`/`j`/`k`/`l`, select with `Enter`, go back with `Esc` and quit with `q`. On the Candidates screen, `K` asks for the API key of the highlighted Candidate's provider and saves it at once to `credentials.toml`; each row shows `key: env`, `key: saved` or `key: missing`. On the Run screen, press `c` to cancel (stop starting Trials) and `c` again to stop waiting for Trials in flight. On the Dataset screen, `Space` marks or unmarks the highlighted Case (`[x]`) and `x` clears all marks; Run setup then shows `cases: all eligible` or `cases: N selected (...)`, the same selection as `--case`. If the evidence file cannot be written during a Run, the Run screen says so and the unsaved Trials are printed to stderr as JSON lines when you quit. Details may change while the TUI is being built.
+
+**Cost:** each answered Attempt costs `input_tokens × input rate + output_tokens × output rate`, using the price captured in the run, not the current config. A failed Attempt (error reply or transport failure before a success status) is counted as costing nothing, on the assumption that providers do not bill failed requests; the summary says how many were counted this way. A Candidate without a price, or an answer without the needed usage counters, shows as unknown, never as zero. OpenRouter's own `usage.cost` is kept in the raw reply but not used.
 
 **Evidence files contain the full prompt text, the Case message and context, and the raw provider reply.** Review them before sharing.
 
 ### Judge Instructions
 
-The instructions and per-effort descriptions sent with every request live in a Markdown file. The bundled default is [`prompts/neutral.md`](prompts/neutral.md); pass another with `--instructions PATH`. The file name (without `.md`) is the set's name. The format is the instructions first, then one `## <effort>` section per effort in the order `low`, `medium`, `high`, `xhigh`, `max`, none empty:
+The task text, per-model instructions and per-effort descriptions sent with every request live in a Markdown file. Two sets ship with the repository; only `neutral` is built into the binary:
+
+- [`prompts/neutral.md`](prompts/neutral.md), the default, uses the same neutral criteria for every model and has no effortless policy rules.
+- [`prompts/effortless.md`](prompts/effortless.md), selected with `--instructions prompts/effortless.md`, mirrors effortless's text for Haiku, Sonnet and Opus, plus a **drafted Fable section** that has not been measured.
+
+Pass another file with `--instructions PATH`; the file name without `.md` is the set's name. The format is an intro (sent as `state.task`), then one `## <target>` section per model in the order `haiku`, `sonnet`, `opus`, `fable`. Each section is an instructions paragraph followed by exactly five lines in the order `low`, `medium`, `high`, `xhigh`, `max`, none empty:
 
 ```markdown
-Choose the reasoning effort ... for the target model.
+Choose the reasoning effort ... for each model asked about.
 
-## low
-quick answer or trivial action
-## medium
-...
-## max
+## haiku
+Which effort should Claude Haiku 5.5 use for the next message?
+
+- low: quick answer or trivial action
+- medium: ...
+- high: ...
+- xhigh: ...
+- max: ...
+
+## sonnet
 ...
 ```
 
-Evidence records the set's name, SHA-256 and full text.
+A file may leave a model out, but asking about it with `--target` is then a usage error before anything is sent. Evidence records the set's name, SHA-256 and full text.
 
 ## Offline grading
 
-A predictions file is a JSON array such as `[{"case":"c001","target":"sonnet","effort":"high"}]`. A Case with no label for that target grades as unscored, whatever the effort. Otherwise only an exact effort name (`low`, `medium`, `high`, `xhigh`, `max`) is valid; anything else, or a missing `effort`, grades as invalid. The raw effort is printed as re-serialized JSON. Accuracy counts hits among valid, scored predictions.
+A predictions file is a JSON array such as `[{"case":"c001","target":"sonnet","effort":"high"}]`; `target` is `haiku`, `sonnet`, `opus` or `fable`. A Case with no label for that target grades as unscored, whatever the effort. Otherwise only an exact effort name (`low`, `medium`, `high`, `xhigh`, `max`) is valid; anything else, or a missing `effort`, grades as invalid. The raw effort is printed as re-serialized JSON. Accuracy counts hits among valid, scored predictions.
 
-**decisionbench** is a planned standalone, terminal-first benchmark for **Decisions models**: specialized models asked to choose an appropriate reasoning-effort level for a target assistant. Its first benchmark evaluates effort-selection quality for **Claude Sonnet** and **Claude Opus** separately, not task-execution success.
+**decisionbench** is a planned standalone, terminal-first benchmark for **Decisions models**: specialized models asked to choose an appropriate reasoning-effort level for a target assistant. Its first benchmark evaluates effort-selection quality for **Claude Haiku, Sonnet, Opus and Fable** separately, not task-execution success.
 
 ## Initial product
 
 - **Rust** benchmark engine shared by a **headless CLI** and **Ratatui TUI**.
 - Initial provider routes: **OpenCode Zen** and **OpenRouter Decisions API**; the same underlying model exposed through different routes is compared as a distinct candidate.
-- One versioned dataset (`datasets/cases.json`, 71 Cases) converted from the effortless benchmark cases.
-- Independent, human-reviewed acceptable effort ranges for Sonnet and Opus, such as `"low-high"`. Missing counterparts remain **unscored**. Each evaluation is a separate API request, with three logical trials per combination by default.
+- One versioned dataset (`datasets/cases.json`, 66 Cases) converted from the effortless benchmark cases.
+- Independent, human-reviewed acceptable effort ranges per Target Model, such as `"low-high"`. Every Case has a label for all four targets today; a missing label would grade as **unscored**. Each Trial is one API request that asks about every selected model, with three logical trials per combination by default.
 - Accuracy and under/over-selection, reliability, latency, consistency, history and manually configured per-route cost reported **separately**. No composite leaderboard score.
 - Raw predictions and confidence retained separately from any future production fallback/retention policy. **Current effort is not supplied as a judging anchor.**
 - Local TOML configuration and versioned JSON/JSONL evidence. No web UI, mandatory service, Docker runtime, or coding-agent harness dependency.

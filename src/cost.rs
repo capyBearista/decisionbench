@@ -14,8 +14,6 @@ pub struct Price {
     pub input_per_million: f64,
     #[serde(default)]
     pub output_per_million: f64,
-    #[serde(default)]
-    pub per_request: f64,
 }
 
 impl Price {
@@ -24,7 +22,6 @@ impl Price {
         for (field, value) in [
             ("input_per_million", self.input_per_million),
             ("output_per_million", self.output_per_million),
-            ("per_request", self.per_request),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
@@ -81,7 +78,7 @@ pub fn attempt_cost(price: Option<&Price>, attempt: &Attempt) -> AttemptCost {
         part("input_tokens", price.input_per_million),
         part("output_tokens", price.output_per_million),
     ) {
-        (Some(input), Some(output)) => AttemptCost::Known(input + output + price.per_request),
+        (Some(input), Some(output)) => AttemptCost::Known(input + output),
         _ => AttemptCost::Unknown(UnknownReason::NoUsage),
     }
 }
@@ -168,11 +165,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn price(i: f64, o: f64, r: f64) -> Price {
+    fn price(i: f64, o: f64) -> Price {
         Price {
             input_per_million: i,
             output_per_million: o,
-            per_request: r,
         }
     }
 
@@ -206,21 +202,14 @@ mod tests {
     fn rate_formula() {
         // 488 * 0.04 / 1e6 = 0.00001952; 54 * 0.08 / 1e6 = 0.00000432
         let a = answered(json!({"input_tokens": 488, "output_tokens": 54, "cost": 99.0}));
-        let x = known(attempt_cost(Some(&price(0.04, 0.08, 0.0)), &a));
+        let x = known(attempt_cost(Some(&price(0.04, 0.08)), &a));
         assert!((x - 0.00002384).abs() < 1e-12, "{x}");
-    }
-
-    #[test]
-    fn per_request_fee_is_added() {
-        let a = answered(json!({"input_tokens": 1_000_000, "output_tokens": 0}));
-        let x = known(attempt_cost(Some(&price(2.0, 0.0, 0.003)), &a));
-        assert!((x - 2.003).abs() < 1e-12, "{x}");
     }
 
     #[test]
     fn omitted_output_rate_counts_as_zero() {
         let p: Price = toml::from_str("input_per_million = 0.04").unwrap();
-        assert_eq!(p, price(0.04, 0.0, 0.0));
+        assert_eq!(p, price(0.04, 0.0));
         // No output_tokens needed when the output rate is 0.
         let a = answered(json!({"input_tokens": 500_000}));
         let x = known(attempt_cost(Some(&p), &a));
@@ -235,7 +224,7 @@ mod tests {
             Some(json!({"answers": {}})),
         );
         assert_eq!(
-            attempt_cost(Some(&price(0.0, 0.0, 0.0)), &a),
+            attempt_cost(Some(&price(0.0, 0.0)), &a),
             AttemptCost::Known(0.0)
         );
     }
@@ -254,7 +243,7 @@ mod tests {
 
     #[test]
     fn missing_required_usage_is_unknown() {
-        let p = price(0.04, 0.0, 0.0);
+        let p = price(0.04, 0.0);
         for raw in [
             json!({"answers": {}}),
             json!({"usage": {"output_tokens": 5}}),
@@ -279,14 +268,14 @@ mod tests {
         // A nonzero output rate makes output_tokens required.
         let a = answered(json!({"input_tokens": 5}));
         assert_eq!(
-            attempt_cost(Some(&price(0.04, 0.08, 0.0)), &a),
+            attempt_cost(Some(&price(0.04, 0.08)), &a),
             AttemptCost::Unknown(UnknownReason::NoUsage)
         );
     }
 
     #[test]
     fn failed_attempts_are_unbilled() {
-        let p = price(0.04, 0.08, 0.01);
+        let p = price(0.04, 0.08);
         let provider = attempt(Disposition::ProviderError, Some(429), Some(json!({})));
         let transport = Attempt {
             error: Some("timeout".into()),
@@ -299,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_transport_error_after_a_2xx_status_has_unknown_usage() {
-        let p = price(0.04, 0.08, 0.01);
+        let p = price(0.04, 0.08);
         let cut = Attempt {
             error: Some("body read failed".into()),
             ..attempt(Disposition::TransportError, Some(200), None)
@@ -315,27 +304,26 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_2xx_with_zero_token_rates_costs_the_per_request_fee() {
+    fn a_cut_2xx_with_zero_token_rates_is_known_zero() {
         let cut = Attempt {
             error: Some("body read failed".into()),
             ..attempt(Disposition::TransportError, Some(200), None)
         };
         assert_eq!(
-            attempt_cost(Some(&price(0.0, 0.0, 0.003)), &cut),
-            AttemptCost::Known(0.003)
+            attempt_cost(Some(&price(0.0, 0.0)), &cut),
+            AttemptCost::Known(0.0)
         );
     }
 
     #[test]
     fn rejects_negative_and_non_finite_prices() {
-        assert!(price(0.04, 0.0, 0.0).validate().is_ok());
-        assert!(price(0.0, 0.0, 0.0).validate().is_ok());
+        assert!(price(0.04, 0.0).validate().is_ok());
+        assert!(price(0.0, 0.0).validate().is_ok());
         for bad in [
-            price(-0.01, 0.0, 0.0),
-            price(0.04, -1.0, 0.0),
-            price(0.04, 0.0, -0.001),
-            price(f64::NAN, 0.0, 0.0),
-            price(0.04, f64::INFINITY, 0.0),
+            price(-0.01, 0.0),
+            price(0.04, -1.0),
+            price(f64::NAN, 0.0),
+            price(0.04, f64::INFINITY),
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
