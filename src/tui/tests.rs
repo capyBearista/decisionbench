@@ -634,6 +634,49 @@ fn each_row_ends_with_its_key_status_without_being_clipped() {
     }
 }
 
+/// The Dataset screen on case c024 (haiku xhigh-max, sonnet high-xhigh, opus medium-xhigh, fable
+/// low-high), drawn at `width`x`height`.
+fn c024_detail_rows(width: u16, height: u16) -> Vec<String> {
+    let (mut app, _) = app();
+    press(&mut app, KeyCode::Char('2'));
+    for _ in 0..23 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    draw(&app, width, height)
+}
+
+#[test]
+fn the_case_pane_draws_an_effort_bar_per_labelled_target() {
+    for (w, h) in [(60, 16), (80, 24), (120, 40)] {
+        let rows = c024_detail_rows(w, h);
+        for target in ["haiku", "sonnet", "opus", "fable"] {
+            let row = rows
+                .iter()
+                .find(|r| r.contains(&format!("✓ {target}")))
+                .unwrap_or_else(|| panic!("{w}x{h}: no {target} row:\n{}", rows.join("\n")));
+            assert!(row.contains('━'), "{w}x{h}: {row:?}");
+        }
+    }
+}
+
+#[test]
+fn the_case_pane_shows_the_range_text_and_level_names_only_when_they_fit() {
+    let wide = c024_detail_rows(140, 40).join("\n");
+    assert!(
+        wide.contains("xhigh-max") && wide.contains("medium-xhigh"),
+        "{wide}"
+    );
+    assert!(wide.contains("low    medium high   xhigh  max"), "{wide}");
+    let medium = c024_detail_rows(120, 40).join("\n");
+    assert!(
+        medium.contains("xhigh-max") && medium.contains("low  med  hi   xh   max"),
+        "{medium}"
+    );
+    let narrow = c024_detail_rows(60, 16).join("\n");
+    assert!(!narrow.contains("xhigh-max"), "{narrow}");
+    assert!(narrow.contains("lo md hi xh mx"), "{narrow}");
+}
+
 /// The row of the one Candidate `add_candidate` makes, drawn at `width`x`height`.
 fn candidate_row(name: &str, width: u16, height: u16) -> String {
     let (mut app, _) = app();
