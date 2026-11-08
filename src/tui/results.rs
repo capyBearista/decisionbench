@@ -376,8 +376,8 @@ fn matrix_lines(matrix: &report::Matrix, pooled: bool, collapsed: bool) -> Vec<R
     lines
 }
 
-/// What the summary panel shows for `runs`: for a comparison, first whether the Runs compare;
-/// then the matrix built from them. A single Run pools its rows only when it has several, as its
+/// What the summary panel shows for `runs`: for a comparison, first whether the Runs compare; for
+/// a single Run that is not complete, its state and recorded Trials; then the matrix built from them. A single Run pools its rows only when it has several, as its
 /// report does; the collapsed table pools when it shows several rows.
 fn summary(runs: &[RunFile], matrix: &report::Matrix, collapsed: bool) -> Vec<Row> {
     let mut lines = Vec::new();
@@ -392,6 +392,10 @@ fn summary(runs: &[RunFile], matrix: &report::Matrix, collapsed: bool) -> Vec<Ro
             head.into_iter()
                 .map(|l| Row::prose(Line::from(Span::styled(l, style)))),
         );
+        lines.push(Row::prose(Line::default()));
+    } else if let Some(note) = runs.first().and_then(report::incomplete_note) {
+        let warn = theme::base().fg(theme::STATUS_WARN);
+        lines.push(Row::prose(Line::from(Span::styled(note, warn))));
         lines.push(Row::prose(Line::default()));
     }
     // Collapsed, the pooled row is a total only when there is more than one row to add up.
@@ -659,7 +663,8 @@ mod tests {
             ]);
         }
         trials.extend([("e", 0, "c1", "low"), ("e", 1, "c1", "high")]);
-        run_of("X1", &trials)
+        // Complete, so a single run's summary opens on its table, not on a state note.
+        complete(run_of("X1", &trials))
     }
 
     fn complete(mut run: RunFile) -> RunFile {
@@ -778,6 +783,37 @@ mod tests {
     }
 
     #[test]
+    fn a_single_incomplete_run_says_so_above_its_summary_and_a_complete_one_does_not() {
+        // No end record: the run was interrupted.
+        let mut run = moving_run();
+        run.end = None;
+        let lines = summary_lines(&[run]);
+        assert_eq!(
+            plain(&lines[0]),
+            "state: partial (interrupted: no end record; not comparable to a complete run); trials: 26 recorded of 26 planned"
+        );
+        assert_eq!(
+            lines[0].spans[0].style,
+            theme::base().fg(theme::STATUS_WARN)
+        );
+        assert_eq!(plain(&lines[1]), "");
+        let lines = summary_lines(&[moving_run()]);
+        assert!(
+            plain(&lines[0]).starts_with("candidate"),
+            "{}",
+            plain(&lines[0])
+        );
+        // A comparison already lists runs that are not complete among what differs.
+        let partial = || {
+            let mut run = moving_run();
+            run.end = None;
+            run
+        };
+        let lines = summary_lines(&[partial(), partial()]);
+        assert_eq!(plain(&lines[0]), "Not directly comparable:");
+    }
+
+    #[test]
     fn the_collapsed_pooled_row_shows_only_over_several_displayed_rows() {
         let has_pooled = |lines: &[Line]| lines.iter().any(|l| plain(l).starts_with("pooled "));
         assert!(has_pooled(&summary_lines_with(&[moving_run()], true)));
@@ -796,7 +832,12 @@ mod tests {
 
     #[test]
     fn a_compare_summary_opens_with_the_verdict_on_whether_the_runs_compare() {
-        let (x, y) = (moving_run(), moving_run());
+        let partial = || {
+            let mut run = moving_run();
+            run.end = None;
+            run
+        };
+        let (x, y) = (partial(), partial());
         // Neither Run has an end record: both are partial.
         let lines = summary_lines(&[x, y]);
         assert_eq!(plain(&lines[0]), "Not directly comparable:");

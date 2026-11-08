@@ -10,7 +10,7 @@
 - **Status:** Implementation complete and verified. Committed and pushed; PR #19 (https://github.com/capyBearista/decisionbench/pull/19) is marked ready for review and CI passed. No issue is closed by it (open issues #1, #2, #12 are unrelated or umbrella).
 - **Repo / branch:** `/home/arjun/decisionbench`, branch `feat/prompts-axis-results-ui`, based on `main` (`37b906c`, PR #18's merge). Push with the explicit URL: `git push https://github.com/capyBearista/decisionbench.git feat/prompts-axis-results-ui` (SSH fails here).
 - **Last two code commits:** `b1dff62` collapsed summary and once-per-case sign test; `d31f613` docs for both.
-- **Verification (fresh, this session):** `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; `cargo test --locked`: lib 191, CLI 115, TUI 20, workflow 1, all passed. `show` on the real run `1793857680687-313790.jsonl` is byte-identical with and without the collapsed-grid changes. An independent review found 0 critical, 0 important, 2 minor (doc wording, fixed). The two doc-only fixes came after the last full test run.
+- **Verification (fresh, this session):** `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; `cargo test --locked`: lib 192, CLI 115, TUI 20, workflow 1, all passed (rerun after the Devin fix). `show` on the real run `1793857680687-313790.jsonl` is byte-identical with and without the collapsed-grid changes. An independent review found 0 critical, 0 important, 2 minor (doc wording, fixed). The two doc-only fixes came after the last full test run.
 - **User checks (manual, in a real terminal):** the user confirmed both Results views, `c`, `t` (also while scrolled), `[` `]`, marking and compare, scrolling with `h j k l` and the arrows, an unreadable run (error shown, `t` does nothing), the Setup prompt list (`Space`, `a`, `d`, `r`), the prompt folder row (`prompts_dir` is written to the config), the plan line, the cursor, long candidate names, and the Dataset bars and `Space`. The hint line does not wrap at low widths; the user accepts that.
 
 ## Decisions and constraints
@@ -28,6 +28,7 @@
 - TUI: Setup prompt list and folder (`a` `d` `r`), plan line; Dataset effort bars; Results Summary and Full panels, mark order, `c` axis, `t` collapse, wrapped prose.
 - Config: optional top-level `prompts_dir`.
 - Docs: README, SPEC, ADR-0006 (with addenda), ADR-0004 pointer, GLOSSARY.
+- Devin review (PR #19): a single partial or failed run's summary hid its state and recorded-trial count. Fixed: `report::incomplete_note` feeds a warning line at the top of a single run's summary; the `moving_run()` test fixture is now complete and partial cases build their own.
 - Fixed this session: stale test `t_at_the_bottom_of_a_narrow_pane_keeps_the_last_row_in_view` (it asserted a `pooled =` note that a one-candidate collapsed view cannot show; it now checks that `k` scrolls one row up); stale doc passages (old noise rule, double-counting caveat).
 
 ## Pitfalls

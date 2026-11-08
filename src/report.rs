@@ -67,6 +67,20 @@ fn state_text(run: &RunFile) -> String {
     }
 }
 
+/// What a single Run's summary must say when the Run is not complete: its state and how many of
+/// its planned Trials were recorded, so a rate over the recorded ones is not read as the whole
+/// Run's. `None` for a complete Run.
+pub fn incomplete_note(run: &RunFile) -> Option<String> {
+    (state(run) != RunState::Complete).then(|| {
+        format!(
+            "state: {}; trials: {} recorded of {} planned",
+            state_text(run),
+            run.trials.len(),
+            run.manifest.planned_trials
+        )
+    })
+}
+
 fn short(sha: &str) -> String {
     sha.chars().take(12).collect()
 }
