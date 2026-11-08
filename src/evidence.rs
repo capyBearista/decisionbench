@@ -633,6 +633,7 @@ mod tests {
             http_status: Some(200),
             raw_response: Some(body.to_string()),
             error: None,
+            retry_after_secs: None,
         }
     }
 

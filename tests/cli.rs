@@ -513,6 +513,7 @@ struct Reply {
     delay: Duration,
     /// Close the connection without answering (a transport error for the client).
     drop_connection: bool,
+    retry_after: Option<u64>,
 }
 
 impl Reply {
@@ -522,7 +523,13 @@ impl Reply {
             body: body.to_string(),
             delay: Duration::ZERO,
             drop_connection: false,
+            retry_after: None,
         }
+    }
+
+    fn retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
     }
 
     fn dropped() -> Self {
@@ -624,8 +631,11 @@ fn scripted(replies: Vec<Reply>) -> Stub {
                 if reply.drop_connection {
                     return;
                 }
+                let retry_after = reply
+                    .retry_after
+                    .map_or(String::new(), |s| format!("retry-after: {s}\r\n"));
                 let response = format!(
-                    "HTTP/1.1 {} Stub\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {} Stub\r\ncontent-type: application/json\r\n{retry_after}content-length: {}\r\nconnection: close\r\n\r\n{}",
                     reply.status,
                     reply.body.len(),
                     reply.body
@@ -2056,6 +2066,23 @@ fn run_case_ids(eval: &Eval) -> Vec<String> {
         .collect();
     ids.sort();
     ids
+}
+
+#[test]
+fn a_retry_after_header_is_saved_on_the_attempt_that_received_it() {
+    let stub = scripted(vec![
+        Reply::new(429, ZEN_429).retry_after(1),
+        Reply::new(200, OPENROUTER_REPLY),
+    ]);
+    let eval = openrouter_eval("retry-after", &stub);
+    let out = eval.run(
+        &args_with(&C002_OPUS, &[]),
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let trial = &eval.trials()[0];
+    assert_eq!(trial["attempts"][0]["retry_after_secs"], 1);
+    assert!(trial["attempts"][1].get("retry_after_secs").is_none());
 }
 
 #[test]
