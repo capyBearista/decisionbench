@@ -163,31 +163,34 @@ fn dataset_lists_each_target_with_its_label_status() {
 fn dataset_title_with_label_counts_fits_in_the_list_pane() {
     let (mut app, _) = app_with_fixture("tui-dataset-title");
     app.screen = Screen::Dataset;
-    for width in [60, 80, 100] {
+    let (_, _, cases) = decisionbench::batch::load_dataset(None).unwrap();
+    let summary = decisionbench::dataset::summarize(&cases);
+    let [h, s, o, f] = summary.labels;
+    let full = format!("{} cases · h{h} s{s} o{o} f{f}", summary.cases);
+    let narrow = format!("{} cases · {h}/{s}/{o}/{f}", summary.cases);
+    // Every width from the minimum up: each title is whole, and once the full one fits it stays.
+    let mut shown = Vec::new();
+    for width in 60..=100 {
         let rows = draw(&app, width, 30);
-        let title = rows
+        let row = rows
             .iter()
             .find(|r| r.contains(" cases · "))
             .unwrap_or_else(|| panic!("no title at {width}:\n{}", rows.join("\n")));
-        let counts = title.split(" cases · ").nth(1).unwrap();
-        // Narrow panes drop the initials and keep the four counts as `a/b/c/d`.
-        let ok = if counts.contains('/') {
-            let parts: Vec<&str> = counts
-                .split_whitespace()
-                .next()
-                .unwrap()
-                .split('/')
-                .collect();
-            parts.len() == 4 && parts.iter().all(|p| p.parse::<usize>().is_ok())
-        } else {
-            let words: Vec<&str> = counts.split_whitespace().collect();
-            words
-                .iter()
-                .zip(['h', 's', 'o', 'f'])
-                .all(|(w, i)| w.starts_with(i) && w[1..].parse::<usize>().is_ok())
-        };
-        assert!(ok, "title cut at {width}: {title:?}");
+        let start = row.find(&format!("{} cases · ", summary.cases)).unwrap();
+        let title: String = row[start..]
+            .chars()
+            .take_while(|c| !matches!(c, '─' | '┐'))
+            .collect();
+        let title = title.trim_end();
+        assert!(
+            title == full || title == narrow,
+            "title cut at {width}: {title:?}"
+        );
+        shown.push(title == full);
     }
+    let first_full = shown.iter().position(|f| *f).expect("full title at 100");
+    assert!(first_full > 0, "the narrow title is never used");
+    assert!(shown[first_full..].iter().all(|f| *f), "{shown:?}");
 }
 
 #[test]

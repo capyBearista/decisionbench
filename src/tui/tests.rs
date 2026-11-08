@@ -1049,7 +1049,7 @@ fn each_row_ends_with_its_key_status_without_being_clipped() {
 }
 
 /// The Dataset screen on case c024 (haiku xhigh-max, sonnet high-xhigh, opus medium-xhigh, fable
-/// low-high), drawn at `width`x`height`.
+/// medium-high), drawn at `width`x`height`.
 fn c024_detail_rows(width: u16, height: u16) -> Vec<String> {
     let (mut app, _) = app();
     let (_, _, cases) = crate::batch::load_dataset(None).unwrap();
