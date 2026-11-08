@@ -12,7 +12,7 @@ We now want to tune Judge Instructions against the dataset with an automated loo
 
 ## Decision
 
-- Every Case has a required `split`: `train` or `holdout`. The 66 existing Cases were assigned with a seeded shuffle (seed 20261108) inside strata of highest labelled effort × has-context, 30% of each stratum to holdout; c064 follows its near-duplicate c010. Result: 45 train, 21 holdout. The 131 later Cases (c067–c197) were assigned the same way, giving 138 train and 59 holdout in total. A split never changes once assigned.
+- Every Case has a required `split`: `train` or `holdout`. The 66 existing Cases were assigned with a seeded shuffle (seed 20261108) inside strata of highest labelled effort × has-context, 30% of each stratum to holdout; c064 follows its near-duplicate c010. Result: 45 train, 21 holdout. The 131 later Cases (c067–c197) were assigned the same way, giving 138 train and 59 holdout in total. The audit also revised 12 labels on 11 of the original Cases (c012, c014, c015, c024, c026, c028, c030, c032, c036, c052, c063); their messages, contexts and splits are unchanged. A split never changes once assigned.
 - `run --split train|holdout` runs only that part. It combines with `--case`.
 - `score FILE` prints JSON, per Candidate × Judge Instructions, per Target Model and pooled: hit, under, over, invalid, failed, coverage, hit rate, **floor** and **lift**.
   - Rows are labelled predictions of answered Trials. Invalid counts as a miss; a Trial with no valid reply is `failed` and outside the rows, lowering coverage.
