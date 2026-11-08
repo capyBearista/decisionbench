@@ -1,6 +1,30 @@
 # decisionbench
 
-**Status: early implementation.** The Rust CLI can validate and summarize the bundled dataset, grade local effort predictions offline, and run batches of Decisions requests (Candidate × Judge Instructions × Case × repetition, one question per Target Model) through OpenRouter or OpenCode Zen with retries, a concurrency limit and safe cancellation, saving every Attempt as evidence with a manually priced cost estimate. Saved Runs can be reported, compared and listed offline. A terminal UI (`decisionbench tui`) is under development.
+A terminal-first benchmark for **Decisions models**: specialised models that are asked which reasoning effort (`low`, `medium`, `high`, `xhigh` or `max`) a target assistant should use for the next message. It scores **Claude Haiku, Sonnet, Opus and Fable** separately, against human-reviewed acceptable ranges on 66 bundled Cases. It measures effort selection only, not whether a model finishes the task at that effort.
+
+- A Rust engine shared by a headless CLI and a Ratatui terminal UI.
+- Providers: OpenRouter and OpenCode Zen. The same model on two routes is two separate Candidates.
+- Accuracy (hit, under, over), invalid and unscored counts, reliability, latency, consistency, history and manually priced cost, reported **separately**. There is no composite score.
+- Raw predictions and confidence are kept as returned. The current effort is never sent as a hint.
+- Local TOML config and versioned JSON/JSONL evidence. No web UI, server, database or Docker.
+
+**Status: first release candidate.** Linux is the only supported platform. The test suite runs offline; see [Known limitations](#known-limitations).
+
+## Install
+
+You need Linux, `git`, and a Rust toolchain that supports edition 2024. The dependencies declare Rust 1.89 as their highest minimum, and `Cargo.toml` sets `rust-version = "1.89"`; only Rust 1.99.1 has been tested.
+
+```sh
+git clone https://github.com/capyBearista/decisionbench.git
+cd decisionbench
+cargo build --release          # binary: target/release/decisionbench
+cargo install --path .         # or install it into ~/.cargo/bin
+decisionbench --help
+```
+
+The examples below use `cargo run --` from a checkout; replace it with `decisionbench` once installed.
+
+## Quick start
 
 ```sh
 cargo run -- dataset inspect            # bundled dataset
@@ -13,6 +37,14 @@ cargo run -- compare RUN1.jsonl RUN2.jsonl                          # prompts an
 cargo run -- history                                                # saved runs
 cargo run -- tui                                                    # terminal UI
 ```
+
+A first session:
+
+1. `dataset inspect` shows the 66 Cases and their label counts without a network or a key.
+2. Create `~/.config/decisionbench/config.toml` with a Candidate (see below) and set its key (`OPENROUTER_API_KEY`, or `K` in the TUI). Zen free models need no key.
+3. Send one request as a smoke test: `run --candidate NAME --case c002 --target opus --repetitions 1`.
+4. Run the full set, then `history` and `show` the file it prints.
+5. To compare prompts or models, pass `--instructions` more than once or `--candidate` more than once, then `show` the run; `compare` puts several runs side by side.
 
 ## Sending a request
 
@@ -77,7 +109,7 @@ The two cross-model metrics sit next to the per-target numbers and never replace
 
 ### Terminal UI
 
-`decisionbench tui` (also takes `--config FILE` and `--out DIR`) opens the same engine and reports in a terminal. It has five screens: Candidates, Dataset, Run setup, Run and Results/History. Switch screens with `Tab` or `1`-`5`, move with the arrow keys or `h`/`j`/`k`/`l`, select with `Enter`, go back with `Esc` and quit with `q`. On the Candidates screen, `K` asks for the API key of the highlighted Candidate's provider and saves it at once to `credentials.toml`; each row shows `key: env`, `key: saved` or `key: missing`. On the Run setup screen, prompts are a list: the bundled `neutral` is chosen by default, `Space` toggles a prompt, `a` adds a prompt file by path (checked on entry, relative to the folder you started the TUI from) and `d` removes an added one, so one run can use several prompts. The `prompt folder` row sets `prompts_dir` in the config file; its `*.md` files are listed too, and `r` rescans the folder. A dim `plan:` line above Start shows candidates × prompts × cases × repetitions = trials, and the most requests that could take. On the Run screen, press `c` to cancel (stop starting Trials) and `c` again to stop waiting for Trials in flight; `Enter` opens the finished run in Results. On the Dataset screen, `Space` marks or unmarks the highlighted Case (`[x]`) and `x` clears all marks; Run setup then shows `cases: all eligible` or `cases: N selected (...)`, the same selection as `--case`. The Dataset screen draws each labelled target's acceptable range as a bar across the five effort levels. Results opens a run on a summary table, and `[` and `]` switch between it and the full report, which is the text `show` prints (`compare` for marked runs). `c` swaps the columns between prompts and candidates in both panels (the panel title says which); a newly opened report starts on the automatic choice. The summary also opens with the targets pooled: one row per candidate (or prompt) with `all` in the target column, adding up only the targets every column has, so it hides differences between targets. `t` spreads it into one row per target and back; the full report is not affected. Mark runs with `Space` and press `m` or `Enter` to compare; marks show as `[1]`, `[2]`… in the order you set them, and the first is the baseline. If the evidence file cannot be written during a Run, the Run screen says so and the unsaved Trials are printed to stderr as JSON lines when you quit. Details may change while the TUI is being built.
+`decisionbench tui` (also takes `--config FILE` and `--out DIR`) opens the same engine and reports in a terminal. It has five screens: Candidates, Dataset, Run setup, Run and Results/History. Switch screens with `Tab` or `1`-`5`, move with the arrow keys or `h`/`j`/`k`/`l`, select with `Enter`, go back with `Esc` and quit with `q`. On the Candidates screen, `K` asks for the API key of the highlighted Candidate's provider and saves it at once to `credentials.toml`; each row shows `key: env`, `key: saved` or `key: missing`. On the Run setup screen, prompts are a list: the bundled `neutral` is chosen by default, `Space` toggles a prompt, `a` adds a prompt file by path (checked on entry, relative to the folder you started the TUI from) and `d` removes an added one, so one run can use several prompts. The `prompt folder` row sets `prompts_dir` in the config file; its `*.md` files are listed too, and `r` rescans the folder. A dim `plan:` line above Start shows candidates × prompts × cases × repetitions = trials, and the most requests that could take. On the Run screen, press `c` to cancel (stop starting Trials) and `c` again to stop waiting for Trials in flight; `Enter` opens the finished run in Results. On the Dataset screen, `Space` marks or unmarks the highlighted Case (`[x]`) and `x` clears all marks; Run setup then shows `cases: all eligible` or `cases: N selected (...)`, the same selection as `--case`. The Dataset screen draws each labelled target's acceptable range as a bar across the five effort levels. Results opens a run on a summary table, and `[` and `]` switch between it and the full report, which is the text `show` prints (`compare` for marked runs). `c` swaps the columns between prompts and candidates in both panels (the panel title says which); a newly opened report starts on the automatic choice. The summary also opens with the targets pooled: one row per candidate (or prompt) with `all` in the target column, adding up only the targets every column has, so it hides differences between targets. `t` spreads it into one row per target and back; the full report is not affected. Mark runs with `Space` and press `m` or `Enter` to compare; marks show as `[1]`, `[2]`… in the order you set them, and the first is the baseline. If the evidence file cannot be written during a Run, the Run screen says so and the unsaved Trials are printed to stderr as JSON lines when you quit.
 
 **Cost:** each answered Attempt costs `input_tokens × input rate + output_tokens × output rate`, using the price captured in the run, not the current config. A failed Attempt (error reply or transport failure before a success status) is counted as costing nothing, on the assumption that providers do not bill failed requests; the summary says how many were counted this way. A Candidate without a price, or an answer without the needed usage counters, shows as unknown, never as zero. OpenRouter's own `usage.cost` is kept in the raw reply but not used.
 
@@ -114,26 +146,57 @@ A file may leave a model out, but asking about it with `--target` is then a usag
 
 A predictions file is a JSON array such as `[{"case":"c001","target":"sonnet","effort":"high"}]`; `target` is `haiku`, `sonnet`, `opus` or `fable`. A Case with no label for that target grades as unscored, whatever the effort. Otherwise only an exact effort name (`low`, `medium`, `high`, `xhigh`, `max`) is valid; anything else, or a missing `effort`, grades as invalid. The raw effort is printed as re-serialized JSON. Accuracy counts hits among valid, scored predictions.
 
-**decisionbench** is a planned standalone, terminal-first benchmark for **Decisions models**: specialized models asked to choose an appropriate reasoning-effort level for a target assistant. Its first benchmark evaluates effort-selection quality for **Claude Haiku, Sonnet, Opus and Fable** separately, not task-execution success.
+## Evidence format
 
-## Initial product
+One run is one append-only JSONL file (schema version 4) in the evidence folder, written with mode 0600:
 
-- **Rust** benchmark engine shared by a **headless CLI** and **Ratatui TUI**.
-- Initial provider routes: **OpenCode Zen** and **OpenRouter Decisions API**; the same underlying model exposed through different routes is compared as a distinct candidate.
-- One versioned dataset (`datasets/cases.json`, 66 Cases) converted from the effortless benchmark cases.
-- Independent, human-reviewed acceptable effort ranges per Target Model, such as `"low-high"`. Every Case has a label for all four targets today; a missing label would grade as **unscored**. Each Trial is one API request that asks about every selected model, with three logical trials per combination by default.
-- Accuracy and under/over-selection, reliability, latency, consistency, history and manually configured per-route cost reported **separately**. No composite leaderboard score.
-- Raw predictions and confidence retained separately from any future production fallback/retention policy. **Current effort is not supplied as a judging anchor.**
-- Local TOML configuration and versioned JSON/JSONL evidence. No web UI, mandatory service, Docker runtime, or coding-agent harness dependency.
+| Line | Holds |
+|---|---|
+| first: `run` (the manifest) | schema version, run id (`{unix_ms}-{pid}`, also the file name), dataset name and SHA-256, the full text and hash of each Judge Instructions set, grading revision, each Candidate (name, provider, model, price snapshot, the URL actually used), the Case ids and targets, settings, planned Trial count |
+| one per finished Trial | Candidate, instructions name and hash, Case id, repetition, targets asked, the Case's labels at request time, the request body, every Attempt, start time, elapsed time |
+| last: `end` | the run state (`complete`, `partial` or `failed`) and the finish time |
 
-The later [Valbench integration](https://github.com/capyBearista/decisionbench/issues/1) will be planned around the CLI and evidence export. HTTP APIs and packaging are deferred until required.
+An Attempt records its start time, latency, disposition (`answered`, `provider_error` or `transport_error`), HTTP status, the raw reply body and any error text. Trial lines are written as Trials finish, so file order is not plan order (`seq` gives the plan position). A file with no end line reads back as partial (interrupted); a truncated last line is skipped with a warning.
 
-## Planning documents
+Grades and costs are **derived when a file is read** and never stored, so a later grading revision can regrade old evidence without changing it. Only schema 4 is read: any other `schema_version` is rejected with a message naming it, and there is no migration. The key is never written to evidence; if a provider echoes it in a reply, the copy in the saved reply is replaced with `[redacted]` (exact text only, see [Known limitations](#known-limitations)).
 
-- [Product and engineering specification](docs/SPEC.md): behavior, evidence, scoring, scope and testing decisions.
-- [Domain glossary](GLOSSARY.md): canonical terminology for models, provider routes, cases, trials and evidence.
-- [Architecture decisions](docs/adr/): why the engine is standalone, why the benchmark grades raw, model-relative predictions, and why labels are per-target effort ranges.
-- [Issue tracker convention](docs/agents/issue-tracker.md) and [domain-documentation map](docs/agents/domain.md): how future implementation work should use these documents.
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `cannot read …/config.toml: No such file or directory` | `run` needs a config with at least one `[[candidate]]`. Create `~/.config/decisionbench/config.toml` (or pass `--config FILE`) as shown above. `dataset`, `grade`, `show`, `compare` and `history` need none. |
+| `run` exits 1 before sending anything | Bad config or input, or a missing key. The message names the file or variable. Set `OPENROUTER_API_KEY`, or press `K` on the TUI Candidates screen. |
+| The Candidates row says `key: missing` or `file error` | No key for that provider, or `credentials.toml` does not parse. A broken credentials file stops runs even when an environment key is set. Fix or delete the file. |
+| Exit code 3 | The run finished but some Trial ended in a provider or transport failure. `show FILE` has the Reliability section; the raw body is kept in the evidence. |
+| Exit code 130, or `partial` in `history` | The run was cancelled or interrupted. The evidence holds the Trials that finished; compare treats partial runs as not comparable. |
+| HTTP 429 or a free-quota error from Zen | The free quota is used up. Retries pause 1 s and do not honour `Retry-After`; wait, lower `--concurrency`, or use a paid model. |
+| Timeouts | Raise `--timeout` (default 60 s). Requests honour `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`. |
+| `unsupported schema_version` | The file was written by another version of the tool. Only schema 4 is read. |
+| `terminal too small` | The TUI needs at least 60x16. |
+| `tui` says it cannot open the terminal | It needs an interactive terminal; use the CLI in scripts. |
+| A candidate model answers 400 | Some models restrict the `state` shape or the question types they accept (for example, some `:free` routes). The 400 is saved as a provider error. |
+
+Never set `DECISIONBENCH_TEST_BASE_URL` outside tests: it sends every request, key included, to the address you give.
+
+## Known limitations
+
+- **Linux only.** No Windows or macOS builds, CI or support.
+- **Prices are manual.** There is no price fetching, and cost is an estimate from the usage counters in the reply. Unknown usage or price shows as unknown, never zero.
+- **Dataset.** The 66 Cases and their ranges were converted once from effortless ([ADR-0003](docs/adr/0003-owned-per-target-effort-ranges.md)). Ranges are acceptable levels, not measured task success, and no label was invented for a missing target. Any change to the file is a new dataset revision.
+- **Fable instructions are drafted.** `prompts/effortless.md` has a Fable section that has not been measured against effortless.
+- **Key redaction is exact-text.** A provider reply that echoes the key in another form (encoded, split) is not caught. Evidence also holds the full prompt, the Case text and the raw reply, so review it before sharing.
+- **Retries are simple.** A fixed 1 s pause, no `Retry-After`, and a 2xx reply is never retried.
+- **One request covers all targets**, so the answers within a Trial are not independent; the sign test accounts for this by counting each Case once. The 5% line is a convention, and a table with many cells will show some significant deltas by chance.
+- **TUI.** Terminals narrower than 60 columns or shorter than 16 rows show a size message. The Candidates form hint is not wrapped.
+- **Deferred.** An export contract for other tools, HTTP API, Docker packaging, a label-editing UI, other providers (SubQ, direct TypeSafe), and price scraping. See [issue #1](https://github.com/capyBearista/decisionbench/issues/1).
+- **Live checks.** Both routes have answered four-target requests during development (OpenRouter with `baseten/joey-1` and `perplexity/pplx-decider-flash-v1.2`, Zen with `jev-1.13-free`). The automated tests never call a provider, and other models on these routes may behave differently.
+
+## Documentation
+
+- [Product and engineering specification](docs/SPEC.md): behaviour, evidence, scoring, scope and testing decisions.
+- [Domain glossary](GLOSSARY.md): the terms used throughout (Candidate, Trial, Attempt, Target Model, Judge Instructions, Prediction).
+- [Architecture decisions](docs/adr/): [0001](docs/adr/0001-standalone-engine.md) standalone engine, [0002](docs/adr/0002-raw-model-relative-evaluation.md) raw model-relative grading, [0003](docs/adr/0003-owned-per-target-effort-ranges.md) per-target ranges, [0004](docs/adr/0004-judge-instructions-axis.md) Judge Instructions, [0005](docs/adr/0005-one-request-per-case-four-targets.md) one request per Case for four targets, [0006](docs/adr/0006-prompts-as-a-comparison-axis.md) prompts as a comparison axis.
+- [Issue tracker convention](docs/agents/issue-tracker.md) and [domain-documentation map](docs/agents/domain.md).
 
 ## Source attribution
 
