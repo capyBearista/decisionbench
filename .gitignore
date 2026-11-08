@@ -4,4 +4,5 @@
 # Tuning runs: private to each session; the baseline and prompt history live in git.
 tuning/results.tsv
 tuning/best.json
+tuning/runs/
 tuning/__pycache__/

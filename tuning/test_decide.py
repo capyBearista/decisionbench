@@ -107,6 +107,14 @@ class Judge(unittest.TestCase):
         ok = decide.judge(score({"a": 0.25, "b": 0.081}), b, None, SEL)  # b fell by 0.019, within 0.02
         self.assertEqual(ok["verdict"], "keep")
 
+    def test_the_drop_guard_compares_each_model_with_the_kept_best_not_the_baseline(self):
+        b = base(noise=0.01)  # baseline lifts 0.10; guard and delta 0.02
+        best = best_of(b, 0.14, {"a": 0.14, "b": 0.14})
+        # Mean 0.1825 gains 0.0425 on the best, and b is up 0.015 on the baseline, but down 0.025 on the best.
+        r = decide.judge(score({"a": 0.25, "b": 0.115}), b, best, SEL)
+        self.assertEqual(r["verdict"], "discard")
+        self.assertIn("b", r["worse_models"])
+
     def test_the_drop_guard_has_a_one_point_floor_when_noise_is_zero(self):
         self.assertEqual(decide.judge(score({"a": 0.30, "b": 0.095}), base(), None, SEL)["verdict"], "keep")
         self.assertEqual(decide.judge(score({"a": 0.30, "b": 0.085}), base(), None, SEL)["verdict"], "discard")
@@ -194,13 +202,68 @@ class Cli(unittest.TestCase):
             baseline, best = os.path.join(d, "baseline.json"), os.path.join(d, "best.json")
             self.assertEqual(self.run_cli("baseline", paths["a"], paths["b"], "--runs", run, run, "-o", baseline).returncode, 0)
             self.assertEqual(self.run_cli("baseline", paths["weak"], paths["weak"], "--runs", run, run, "-o", baseline + "2").returncode, 12)
-            judge = ["judge", "--baseline", baseline, "--best", best, "--run", run]
-            self.assertEqual(self.run_cli(*judge, paths["bad"]).returncode, 10)
+            judge = ["judge", "--baseline", baseline, "--best", best, "--commit", "c0ffee"]
+            self.assertEqual(self.run_cli(*judge, "--run", run, paths["bad"]).returncode, 10)
             self.assertFalse(os.path.exists(best), "a discard must not write the best file")
-            self.assertEqual(self.run_cli(*judge, paths["good"]).returncode, 0)
+            self.assertEqual(self.run_cli(*judge, "--run", run, paths["good"]).returncode, 0)
             with open(best) as f:
-                self.assertAlmostEqual(json.load(f)["objective"], 0.15)
-            self.assertEqual(self.run_cli(*judge, paths["good"]).returncode, 10, "no further gain over the new best")
+                kept = json.load(f)
+            self.assertAlmostEqual(kept["objective"], 0.15)
+            self.assertEqual((kept["commit"], kept["run"], kept["evidence"]), ("c0ffee", "r1", os.path.abspath(run)))
+            # Judging the kept run again (a resume after a stop before logging) reports the same keep.
+            again = self.run_cli(*judge, "--run", run, paths["good"])
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertAlmostEqual(json.loads(again.stdout)["gain"], 0.05)
+            other_commit = ["judge", "--baseline", baseline, "--best", best, "--commit", "beef"]
+            self.assertEqual(self.run_cli(*other_commit, "--run", run, paths["good"]).returncode, 1,
+                             "the kept run belongs to another commit")
+            # A new run of an equal prompt is no gain over the new best.
+            second = os.path.join(d, "second.json")
+            with open(second, "w") as f:
+                json.dump({**score({"a": 0.15, "b": 0.15}), "run": "r2"}, f)
+            self.assertEqual(self.run_cli(*judge, "--run", write_run(d, "r2.jsonl", run_id="r2"), second).returncode, 10)
+            self.assertFalse([n for n in os.listdir(d) if n.endswith(".tmp")], "no temp file left behind")
+
+    def test_bad_input_is_a_decide_error_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            sc = os.path.join(d, "s.json")
+            with open(sc, "w") as f:
+                json.dump(score({"a": 0.10, "b": 0.10}), f)
+            bare = os.path.join(d, "bare.jsonl")
+            with open(bare, "w") as f:
+                f.write('{"type": "run", "id": "r1"}\n')
+            for args in (
+                ["baseline", os.path.join(d, "missing.json"), sc, "--runs", bare, bare, "-o", os.path.join(d, "b.json")],
+                ["baseline", sc, sc, "--runs", bare, bare, "-o", os.path.join(d, "b.json")],
+                ["spent", os.path.join(d, "no-such-dir"), "--budget", "10"],
+            ):
+                r = self.run_cli(*args)
+                self.assertEqual(r.returncode, 1, args)
+                self.assertTrue(r.stderr.startswith("decide.py: "), r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+
+    def test_spent_adds_up_every_attempt_in_the_folder_and_checks_the_budget(self):
+        with tempfile.TemporaryDirectory() as d:
+            def trial(n):
+                return json.dumps({"type": "trial", "attempts": [{}] * n})
+            with open(os.path.join(d, "1-1.jsonl"), "w") as f:  # calibration: 5 Trials, one retried twice
+                f.write("\n".join(['{"type": "run"}', *[trial(1)] * 4, trial(3), '{"type": "end"}']) + "\n")
+            with open(os.path.join(d, "2-1.jsonl"), "w") as f:  # a probe; a stop cut its last line
+                f.write('{"type": "run"}\n' + trial(1) + '\n{"type": "tri')
+            none = ["--baseline", os.path.join(d, "no-baseline.json")]
+            ok = self.run_cli("spent", d, "--budget", "100", *none)
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertEqual(json.loads(ok.stdout), {"requests": 8, "budget": 100, "remaining": 92, "next_run": 7})
+            # Before calibration, the next run is sized as the largest so far.
+            self.assertEqual(self.run_cli("spent", d, "--budget", "14", *none).returncode, 13, "6 left, the next run may need 7")
+            self.assertEqual(self.run_cli("spent", d, "--budget", "15", *none).returncode, 0)
+            # After it, as the eligible models (a and b, not x) × Cases × repetitions: 2 × 2 × 1.
+            baseline = os.path.join(d, "baseline.json")
+            with open(baseline, "w") as f:
+                json.dump(base(), f)
+            with_base = self.run_cli("spent", d, "--budget", "12", "--baseline", baseline)
+            self.assertEqual((with_base.returncode, json.loads(with_base.stdout)["next_run"]), (0, 4))
+            self.assertEqual(self.run_cli("spent", d, "--budget", "11", "--baseline", baseline).returncode, 13)
 
     def test_other_cases_or_another_run_file_are_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -215,7 +278,7 @@ class Cli(unittest.TestCase):
             self.assertEqual(self.run_cli(*args, "--runs", run, run).returncode, 0)
             self.assertEqual(self.run_cli(*args, "--runs", run, other_cases).returncode, 1, "same count, other Cases")
             self.assertEqual(self.run_cli(*args, "--runs", run, wrong_run).returncode, 1, "run file of another run")
-            judge = ["judge", sc, "--baseline", baseline, "--best", os.path.join(d, "best.json")]
+            judge = ["judge", sc, "--baseline", baseline, "--best", os.path.join(d, "best.json"), "--commit", "c0ffee"]
             self.assertEqual(self.run_cli(*judge, "--run", other_cases).returncode, 1)
             self.assertEqual(self.run_cli(*judge, "--run", write_run(d, "reps.jsonl", repetitions=3)).returncode, 1)
             self.assertEqual(self.run_cli(*judge).returncode, 2, "--run is required")

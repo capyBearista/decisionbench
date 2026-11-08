@@ -2,17 +2,20 @@
 """Arithmetic for the tuning loop, so the agent never does it by hand (standard library only).
 
   decide.py baseline SCORE_A SCORE_B --runs RUN_A RUN_B [-o tuning/baseline.json]
-  decide.py judge SCORE --run RUN [--baseline tuning/baseline.json] [--best tuning/best.json]
+  decide.py judge SCORE --run RUN --commit HASH [--baseline tuning/baseline.json] [--best tuning/best.json]
   decide.py misses RUN.jsonl [--limit N]
+  decide.py spent DIR --budget N [--baseline tuning/baseline.json]
 
 SCORE_* is the JSON printed by `decisionbench score`; RUN_* is the evidence file it scored. `score` does not say
 which Cases it covered, so the evidence manifest is read to make sure that runs compare the same Cases. `judge` exits 0 on keep, 10 on discard,
 11 on rerun (the run is not usable), 1 on bad input. `baseline` exits 0, or 12 when fewer than
-two models are eligible. See tuning/program.md.
+two models are eligible. `spent` exits 13 when what is left of the budget cannot cover one more run. See tuning/program.md.
 """
 import argparse
+import glob
 import hashlib
 import json
+import os
 import sys
 
 MIN_LIFT = 0.02  # a model must beat the best fixed answer by this much to be eligible
@@ -32,6 +35,15 @@ def load(path):
 
 def fail(message):
     sys.exit(f"decide.py: {message}")
+
+
+def save(path, data):
+    """Write JSON through a temp file and a rename, so a crash never leaves a half-written file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def by_model(score):
@@ -120,7 +132,11 @@ def fingerprint(base):
     return hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()
 
 
-def judge(score, base, best, sel):
+# Keys of best.json that are not part of the verdict.
+PROVENANCE = ("baseline", "commit", "run", "evidence")
+
+
+def judge(score, base, best, sel, commit=None):
     """A verdict for one experiment against the best kept state."""
     d = derived(base)
     eligible = d["eligible_models"]
@@ -132,6 +148,12 @@ def judge(score, base, best, sel):
         fail("the run selects other Cases, targets or repetitions than the baseline's (is it a train run with the same flags?)")
     if best is not None and best.get("baseline") != fingerprint(base):
         fail("best.json belongs to another baseline; delete it only if you are starting over")
+    if best is not None and best.get("run") == score["run"]:
+        # This run was kept already (the session stopped before logging it): report that keep again,
+        # rather than judge it against its own score.
+        if best.get("commit") != commit:
+            fail(f"run {score['run']} was kept for commit {best.get('commit')}, not {commit}")
+        return {k: v for k, v in best.items() if k not in PROVENANCE}
     if (why := usable(score)):
         return {"verdict": "rerun", "reason": why}
     got = by_model(score)
@@ -210,6 +232,33 @@ def misses(path, limit):
     return {"counts": {f"{k[0]} {k[1]}": v for k, v in sorted(counts.items())}, "misses": rows[::step][:limit]}
 
 
+def spent(directory, budget, base=None):
+    """Requests sent so far (every Attempt in every evidence file in `directory`), and the size of the
+    next run: one request per eligible model, Case and repetition once there is a baseline, else the
+    largest run so far."""
+    if not os.path.isdir(directory):
+        fail(f"{directory} is not a folder")
+    runs = []
+    for path in sorted(glob.glob(os.path.join(directory, "*.jsonl"))):
+        attempts = 0
+        with open(path) as f:
+            for line in f:
+                try:
+                    t = json.loads(line)
+                except ValueError:  # a line cut short by a stop: its Trial is lost, as are Trials in flight
+                    continue
+                if t.get("type") == "trial":
+                    attempts += len(t["attempts"])
+        runs.append(attempts)
+    total = sum(runs)
+    if base is None:
+        next_run = max(runs, default=0)
+    else:
+        sel = base["selection"]
+        next_run = len(derived(base)["eligible_models"]) * len(sel["cases"]) * sel["repetitions"]
+    return {"requests": total, "budget": budget, "remaining": budget - total, "next_run": next_run}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -221,19 +270,30 @@ def main():
     j = sub.add_parser("judge")
     j.add_argument("score")
     j.add_argument("--run", required=True)
+    j.add_argument("--commit", required=True, help="the commit judged: $(git rev-parse HEAD)")
     j.add_argument("--baseline", default="tuning/baseline.json")
     j.add_argument("--best", default="tuning/best.json")
     m = sub.add_parser("misses")
     m.add_argument("run")
     m.add_argument("--limit", type=int, default=40)
+    s = sub.add_parser("spent")
+    s.add_argument("dir")
+    s.add_argument("--budget", type=int, required=True)
+    s.add_argument("--baseline", default="tuning/baseline.json")
     args = p.parse_args()
+    try:
+        command(args)
+    except OSError as e:
+        fail(f"{e.filename or e}: {e.strerror or e}")
+    except (KeyError, TypeError, IndexError, ValueError, AttributeError) as e:
+        fail(f"unexpected input ({type(e).__name__}: {e}); pass a `decisionbench score` result and the evidence file it scored")
 
+
+def command(args):
     if args.cmd == "baseline":
         a, b = load(args.score_a), load(args.score_b)
         result = baseline(a, b, selection(args.runs[0], a), selection(args.runs[1], b))
-        with open(args.out, "w") as f:
-            json.dump(result, f, indent=2)
-            f.write("\n")
+        save(args.out, result)
         print(json.dumps(result, indent=2))
         sys.exit(0 if len(result["eligible_models"]) >= 2 else 12)
     if args.cmd == "judge":
@@ -243,13 +303,17 @@ def main():
         except FileNotFoundError:
             best = None
         score = load(args.score)
-        result = judge(score, base, best, selection(args.run, score))
+        result = judge(score, base, best, selection(args.run, score), args.commit)
         if result["verdict"] == "keep":
-            with open(args.best, "w") as f:
-                json.dump({"baseline": fingerprint(base), "objective": result["objective"], "lifts": result["lifts"]}, f, indent=2)
-                f.write("\n")
+            save(args.best, {**result, "baseline": fingerprint(base), "commit": args.commit,
+                             "run": score["run"], "evidence": os.path.abspath(args.run)})
         print(json.dumps(result, indent=2))
         sys.exit({"keep": 0, "discard": 10, "rerun": 11}[result["verdict"]])
+    if args.cmd == "spent":
+        base = load(args.baseline) if os.path.exists(args.baseline) else None
+        result = spent(args.dir, args.budget, base)
+        print(json.dumps(result))
+        sys.exit(13 if result["remaining"] < result["next_run"] else 0)
     print(json.dumps(misses(args.run, args.limit), indent=2))
 
 
