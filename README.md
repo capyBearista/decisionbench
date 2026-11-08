@@ -14,12 +14,23 @@ A terminal-first benchmark for **Decisions models**: specialised models that are
 
 You need Linux, `git`, and a Rust toolchain that supports edition 2024. The dependencies declare Rust 1.89 as their highest minimum, and `Cargo.toml` sets `rust-version = "1.89"`; only Rust 1.99.1 has been tested.
 
+Install straight from GitHub (needs only `cargo`; it builds on your machine in about a minute and puts `decisionbench` in `~/.cargo/bin`):
+
+```sh
+cargo install --git https://github.com/capyBearista/decisionbench --locked                 # latest main
+cargo install --git https://github.com/capyBearista/decisionbench --locked --tag v1.0.0    # a specific release
+decisionbench --help
+```
+
+To update, run the same command again (with `--tag`, name the newer tag). Nothing checks for updates by itself. `main` can be ahead of the latest release, so use `--tag` to stay on releases; releases are listed at https://github.com/capyBearista/decisionbench/releases.
+
+Or build from a clone:
+
 ```sh
 git clone https://github.com/capyBearista/decisionbench.git
 cd decisionbench
 cargo build --release          # binary: target/release/decisionbench
 cargo install --path .         # or install it into ~/.cargo/bin
-decisionbench --help
 ```
 
 The examples below use `cargo run --` from a checkout; replace it with `decisionbench` once installed.
