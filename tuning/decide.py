@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Arithmetic for the tuning loop, so the agent never does it by hand (standard library only).
 
-  decide.py baseline SCORE_A SCORE_B [-o tuning/baseline.json]
-  decide.py judge SCORE [--baseline tuning/baseline.json] [--best tuning/best.json]
+  decide.py baseline SCORE_A SCORE_B --runs RUN_A RUN_B [-o tuning/baseline.json]
+  decide.py judge SCORE --run RUN [--baseline tuning/baseline.json] [--best tuning/best.json]
   decide.py misses RUN.jsonl [--limit N]
 
-SCORE_* is the JSON printed by `decisionbench score`. `judge` exits 0 on keep, 10 on discard,
+SCORE_* is the JSON printed by `decisionbench score`; RUN_* is the evidence file it scored. `score` does not say
+which Cases it covered, so the evidence manifest is read to make sure that runs compare the same Cases. `judge` exits 0 on keep, 10 on discard,
 11 on rerun (the run is not usable), 1 on bad input. `baseline` exits 0, or 12 when fewer than
 two models are eligible. See tuning/program.md.
 """
@@ -58,7 +59,22 @@ def size(pooled):
     return sum(pooled[k] for k in ("hit", "under", "over", "invalid", "failed"))
 
 
-def baseline(a, b):
+def selection(path, score):
+    """The Cases, targets and repetitions a run planned, read from its evidence manifest."""
+    with open(path) as f:
+        manifest = json.loads(f.readline())
+    if manifest.get("type") != "run":
+        fail(f"{path} does not start with a run manifest")
+    if manifest["id"] != score["run"]:
+        fail(f"{path} is run {manifest['id']}, but the score is of run {score['run']}")
+    return {
+        "cases": sorted(manifest["cases"]),
+        "targets": sorted(manifest["targets"]),
+        "repetitions": manifest["settings"]["repetitions"],
+    }
+
+
+def baseline(a, b, sel_a, sel_b):
     for name, s in (("A", a), ("B", b)):
         if (why := usable(s)):
             fail(f"score {name}: {why}")
@@ -66,6 +82,8 @@ def baseline(a, b):
     ia, ib = {r["instructions_sha256"] for r in a["scores"]}, {r["instructions_sha256"] for r in b["scores"]}
     if ia != ib:
         fail("the two calibration runs must use the same instructions")
+    if sel_a != sel_b:
+        fail("the two calibration runs must select the same Cases, targets and repetitions")
     if a["dataset_sha256"] != b["dataset_sha256"] or set(ma) != set(mb) or any(size(ma[n]) != size(mb[n]) for n in ma):
         fail("the two runs must use the same dataset, candidates and selection")
     models = {}
@@ -78,7 +96,7 @@ def baseline(a, b):
             lift, noise = (la + lb) / 2, abs(la - lb)
             ok = cover >= MIN_COVERAGE and lift > max(2 * noise, MIN_LIFT)
         models[name] = {"predictions": size(ma[name]), "lift": lift, "noise": noise, "coverage": cover, "eligible": ok}
-    result = {"dataset_sha256": a["dataset_sha256"], "models": models}
+    result = {"dataset_sha256": a["dataset_sha256"], "selection": sel_a, "models": models}
     result.update(derived(result))
     return result
 
@@ -98,11 +116,11 @@ def derived(base):
 
 def fingerprint(base):
     """Identifies the baseline a best.json belongs to."""
-    basis = {"d": base["dataset_sha256"], "m": {n: [m["eligible"], m["lift"], m["noise"]] for n, m in sorted(base["models"].items())}}
+    basis = {"d": base["dataset_sha256"], "s": base["selection"], "m": {n: [m["eligible"], m["lift"], m["noise"]] for n, m in sorted(base["models"].items())}}
     return hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()
 
 
-def judge(score, base, best):
+def judge(score, base, best, sel):
     """A verdict for one experiment against the best kept state."""
     d = derived(base)
     eligible = d["eligible_models"]
@@ -110,6 +128,8 @@ def judge(score, base, best):
         fail("fewer than two eligible models in the baseline")
     if score["dataset_sha256"] != base["dataset_sha256"]:
         fail("the dataset differs from the baseline's")
+    if sel != base["selection"]:
+        fail("the run selects other Cases, targets or repetitions than the baseline's (is it a train run with the same flags?)")
     if best is not None and best.get("baseline") != fingerprint(base):
         fail("best.json belongs to another baseline; delete it only if you are starting over")
     if (why := usable(score)):
@@ -156,12 +176,13 @@ def misses(path, limit):
             t = json.loads(line)
             if t.get("type") != "trial" or not t["attempts"] or t["attempts"][-1]["disposition"] != "answered":
                 continue
+            # `score` counts an answered reply that cannot be read as invalid for every labelled target.
             try:
                 answers = json.loads(t["attempts"][-1]["raw_response"])["answers"]
             except (ValueError, KeyError, TypeError):
-                continue
+                answers = {}
             if not isinstance(answers, dict):
-                continue
+                answers = {}
             for target in t["targets"]:
                 label = t["labels"].get(target)
                 entry = answers.get(f"effort_{target}")
@@ -195,9 +216,11 @@ def main():
     b = sub.add_parser("baseline")
     b.add_argument("score_a")
     b.add_argument("score_b")
+    b.add_argument("--runs", nargs=2, required=True, metavar=("RUN_A", "RUN_B"))
     b.add_argument("-o", "--out", default="tuning/baseline.json")
     j = sub.add_parser("judge")
     j.add_argument("score")
+    j.add_argument("--run", required=True)
     j.add_argument("--baseline", default="tuning/baseline.json")
     j.add_argument("--best", default="tuning/best.json")
     m = sub.add_parser("misses")
@@ -206,7 +229,8 @@ def main():
     args = p.parse_args()
 
     if args.cmd == "baseline":
-        result = baseline(load(args.score_a), load(args.score_b))
+        a, b = load(args.score_a), load(args.score_b)
+        result = baseline(a, b, selection(args.runs[0], a), selection(args.runs[1], b))
         with open(args.out, "w") as f:
             json.dump(result, f, indent=2)
             f.write("\n")
@@ -218,7 +242,8 @@ def main():
             best = load(args.best)
         except FileNotFoundError:
             best = None
-        result = judge(load(args.score), base, best)
+        score = load(args.score)
+        result = judge(score, base, best, selection(args.run, score))
         if result["verdict"] == "keep":
             with open(args.best, "w") as f:
                 json.dump({"baseline": fingerprint(base), "objective": result["objective"], "lifts": result["lifts"]}, f, indent=2)

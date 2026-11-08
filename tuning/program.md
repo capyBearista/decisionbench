@@ -33,7 +33,7 @@ Rules for the prompt text:
    $BIN score PATH_1 > /tmp/score_a.json
    # run the same command again, then:
    $BIN score PATH_2 > /tmp/score_b.json
-   python3 tuning/decide.py baseline /tmp/score_a.json /tmp/score_b.json
+   python3 tuning/decide.py baseline /tmp/score_a.json /tmp/score_b.json --runs PATH_1 PATH_2
    ```
 
    `decide.py baseline` writes `tuning/baseline.json` and prints, per model, its neutral lift, its noise (the difference between the two runs) and whether it is **eligible**. Eligible means the lift over the best fixed answer is more than twice the noise and more than 2 points, with coverage of 90% or better. It also prints `delta`, the smallest objective gain that counts: 1 point or twice the mean noise. It exits 12 when fewer than 2 models are eligible. In that case **stop and report**: there is no signal to tune against. Exit code 3 from `run` only means some Trials had no reply; keep going, and `score` will show the coverage.
@@ -61,14 +61,14 @@ Repeat until you reach a stop condition.
 
    ```sh
    $BIN score PATH > /tmp/score.json
-   python3 tuning/decide.py judge /tmp/score.json
+   python3 tuning/decide.py judge /tmp/score.json --run PATH
    ```
 
-   `judge` compares the run with the best state so far (the baseline at first) and exits:
+   `--run` is the evidence file that was scored; `decide.py` reads its manifest to check that it covers the same Cases, targets and repetitions as the baseline, which `score` alone cannot show. `judge` compares the run with the best state so far (the baseline at first) and exits:
    - `0` **keep**: the objective rose by at least delta, and no model fell by more than twice its noise (at least 1 point). Leave the commit in place. `judge` has recorded the new best in `tuning/best.json`.
    - `10` **discard**: `git reset --hard HEAD~1`.
    - `11` **rerun**: the run is not usable (it is partial, a Trial is missing, or a model's coverage is under 90%). Do not score it and do not count it as an experiment. Run the same commit again. If it comes back unusable three times in a row, stop (see below).
-   - `1`: bad input (a different dataset or other selection than the baseline, or a missing model). Stop and report.
+   - `1`: bad input (a different dataset, other Cases, targets or repetitions than the baseline, an evidence file that is not the scored run, or a missing model). Stop and report.
 6. **Log** one row to `tuning/results.tsv`: short commit hash, objective, gain, verdict (`keep`, `discard`, `rerun`), the requests used, the evidence path, and the description. Never commit `results.tsv`.
 7. Go to step 1.
 
