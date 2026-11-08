@@ -180,7 +180,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     // Initials, as in the row marks: the full names would be cut off in a narrow list pane.
-    let title = format!("{} cases · {}", state.summary.cases, counts.join(" "));
+    let mut title = format!("{} cases · {}", state.summary.cases, counts.join(" "));
+    if title.chars().count() + 4 > list.width as usize {
+        // Too narrow for the initials: keep the counts in h/s/o/f order without them.
+        let plain: Vec<String> = state.summary.labels.iter().map(usize::to_string).collect();
+        title = format!("{} cases · {}", state.summary.cases, plain.join("/"));
+    }
     let height = list.height.saturating_sub(2) as usize;
     frame.render_widget(
         Paragraph::new(list_lines(rows, state.selected, height)).block(block(&title)),

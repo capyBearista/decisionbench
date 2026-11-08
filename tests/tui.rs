@@ -170,13 +170,23 @@ fn dataset_title_with_label_counts_fits_in_the_list_pane() {
             .find(|r| r.contains(" cases · "))
             .unwrap_or_else(|| panic!("no title at {width}:\n{}", rows.join("\n")));
         let counts = title.split(" cases · ").nth(1).unwrap();
-        let words: Vec<&str> = counts.split_whitespace().collect();
-        for (word, initial) in words.iter().zip(['h', 's', 'o', 'f']) {
-            assert!(
-                word.starts_with(initial) && word[1..].parse::<usize>().is_ok(),
-                "title cut at {width}: {title:?}"
-            );
-        }
+        // Narrow panes drop the initials and keep the four counts as `a/b/c/d`.
+        let ok = if counts.contains('/') {
+            let parts: Vec<&str> = counts
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .split('/')
+                .collect();
+            parts.len() == 4 && parts.iter().all(|p| p.parse::<usize>().is_ok())
+        } else {
+            let words: Vec<&str> = counts.split_whitespace().collect();
+            words
+                .iter()
+                .zip(['h', 's', 'o', 'f'])
+                .all(|(w, i)| w.starts_with(i) && w[1..].parse::<usize>().is_ok())
+        };
+        assert!(ok, "title cut at {width}: {title:?}");
     }
 }
 
