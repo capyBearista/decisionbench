@@ -64,11 +64,11 @@ Repeat until you reach a stop condition.
    python3 tuning/decide.py judge /tmp/score.json --run PATH --commit $(git rev-parse HEAD)
    ```
 
-   `--run` is the evidence file that was scored; `decide.py` reads its manifest to check that it covers the same Cases, targets and repetitions as the baseline, which `score` alone cannot show. `judge` compares the run with the best state so far (the baseline at first) and exits:
+   `--run` is the evidence file that was scored; `decide.py` reads its manifest to check that it covers the same Cases, targets, repetitions and retries as the baseline, which `score` alone cannot show. `judge` compares the run with the best state so far (the baseline at first) and exits:
    - `0` **keep**: the objective rose by at least delta, and no model fell by more than twice its noise (at least 1 point). Leave the commit in place. `judge` has recorded the new best in `tuning/best.json`, with the commit, the run id and the evidence path, so a resume can tell that this commit was kept even if the session stops before step 6.
    - `10` **discard**: `git reset --hard HEAD~1`.
    - `11` **rerun**: the run is not usable (it is partial, a Trial is missing, or a model's coverage is under 90%). Do not score it and do not count it as an experiment. `judge` names the low-coverage models in its reason. Check the budget, then send one request to each of them, as in the smoke test, before rerunning. If any fails (a 429 usually means the free quota is used up), **stop now**: leave the experiment's commit in place, unjudged, and report (see Resuming). Otherwise run the same commit again. If it comes back unusable three times in a row, stop in the same way.
-   - `1`: bad input (a different dataset, other Cases, targets or repetitions than the baseline, an evidence file that is not the scored run, or a missing model). Stop and report.
+   - `1`: bad input (a different dataset, other Cases, targets, repetitions or retries than the baseline, an evidence file that is not the scored run, or a missing model). Stop and report.
 6. **Log** one row to `tuning/results.tsv`: short commit hash, objective, gain, verdict (`keep`, `discard`, `rerun`), the evidence path, and the description. Never commit `results.tsv`.
 7. Go to step 1.
 

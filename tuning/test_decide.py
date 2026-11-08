@@ -27,7 +27,7 @@ def score(lifts, coverage=1.0, planned=100, recorded=None, state="complete", sha
     }
 
 
-SEL = {"cases": ["c1", "c2"], "targets": ["opus"], "repetitions": 1}
+SEL = {"cases": ["c1", "c2"], "targets": ["opus"], "repetitions": 1, "retries": 3}
 
 
 class Baseline(unittest.TestCase):
@@ -202,7 +202,7 @@ class Cli(unittest.TestCase):
             baseline, best = os.path.join(d, "baseline.json"), os.path.join(d, "best.json")
             self.assertEqual(self.run_cli("baseline", paths["a"], paths["b"], "--runs", run, run, "-o", baseline).returncode, 0)
             with open(baseline) as f:
-                self.assertEqual(json.load(f)["retries"], 3, "read from the calibration run's manifest")
+                self.assertEqual(json.load(f)["selection"]["retries"], 3, "read from the calibration run's manifest")
             self.assertEqual(self.run_cli("baseline", paths["weak"], paths["weak"], "--runs", run, run, "-o", baseline + "2").returncode, 12)
             judge = ["judge", "--baseline", baseline, "--best", best, "--commit", "c0ffee"]
             self.assertEqual(self.run_cli(*judge, "--run", run, paths["bad"]).returncode, 10)
@@ -258,7 +258,7 @@ class Cli(unittest.TestCase):
             # The next experiment's ceiling: eligible models (a and b, not x) × Cases × repetitions × (1 + retries) = 2 × 2 × 1 × 4.
             baseline = os.path.join(d, "baseline.json")
             with open(baseline, "w") as f:
-                json.dump({**base(), "retries": 3}, f)
+                json.dump(base(), f)
             ok = self.run_cli("spent", d, "--budget", "24", "--baseline", baseline)
             self.assertEqual(ok.returncode, 0, ok.stderr)
             self.assertEqual(json.loads(ok.stdout), {"requests": 8, "budget": 24, "remaining": 16, "next_run": 16})
@@ -281,15 +281,19 @@ class Cli(unittest.TestCase):
             judge = ["judge", sc, "--baseline", baseline, "--best", os.path.join(d, "best.json"), "--commit", "c0ffee"]
             self.assertEqual(self.run_cli(*judge, "--run", other_cases).returncode, 1)
             self.assertEqual(self.run_cli(*judge, "--run", write_run(d, "reps.jsonl", repetitions=3)).returncode, 1)
+            # Fewer retries in calibration than later would make `spent` size runs too small.
+            fewer = write_run(d, "fewer.jsonl", retries=0)
+            self.assertEqual(self.run_cli(*args, "--runs", run, fewer).returncode, 1, "calibration runs with other retries")
+            self.assertEqual(self.run_cli(*judge, "--run", write_run(d, "more.jsonl", retries=5)).returncode, 1, "other retries than the baseline")
             self.assertEqual(self.run_cli(*judge).returncode, 2, "--run is required")
 
 
-def write_run(directory, name, cases=("c1", "c2"), run_id="r1", repetitions=1):
+def write_run(directory, name, cases=("c1", "c2"), run_id="r1", repetitions=1, retries=3):
     """An evidence file with only the manifest line `decide.py` reads."""
     path = os.path.join(directory, name)
     with open(path, "w") as f:
         f.write(json.dumps({"type": "run", "id": run_id, "cases": list(cases), "targets": ["opus"],
-                            "settings": {"repetitions": repetitions, "retries": 3}}) + "\n")
+                            "settings": {"repetitions": repetitions, "retries": retries}}) + "\n")
     return path
 
 

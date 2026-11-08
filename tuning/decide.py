@@ -73,7 +73,8 @@ def size(pooled):
 
 
 def selection(path, score):
-    """The Cases, targets and repetitions a run planned, read from its evidence manifest."""
+    """The Cases, targets, repetitions and retries a run planned, read from its evidence manifest.
+    Retries are part of it because `spent` sizes the next run with the baseline's."""
     with open(path) as f:
         manifest = json.loads(f.readline())
     if manifest.get("type") != "run":
@@ -84,13 +85,8 @@ def selection(path, score):
         "cases": sorted(manifest["cases"]),
         "targets": sorted(manifest["targets"]),
         "repetitions": manifest["settings"]["repetitions"],
+        "retries": manifest["settings"]["retries"],
     }
-
-
-def retries(path):
-    """The retries a run allowed per Trial, from its evidence manifest; `spent` sizes the next run with it."""
-    with open(path) as f:
-        return json.loads(f.readline())["settings"]["retries"]
 
 
 def baseline(a, b, sel_a, sel_b):
@@ -102,7 +98,7 @@ def baseline(a, b, sel_a, sel_b):
     if ia != ib:
         fail("the two calibration runs must use the same instructions")
     if sel_a != sel_b:
-        fail("the two calibration runs must select the same Cases, targets and repetitions")
+        fail("the two calibration runs must select the same Cases, targets, repetitions and retries")
     if a["dataset_sha256"] != b["dataset_sha256"] or set(ma) != set(mb) or any(size(ma[n]) != size(mb[n]) for n in ma):
         fail("the two runs must use the same dataset, candidates and selection")
     models = {}
@@ -152,7 +148,7 @@ def judge(score, base, best, sel, commit=None):
     if score["dataset_sha256"] != base["dataset_sha256"]:
         fail("the dataset differs from the baseline's")
     if sel != base["selection"]:
-        fail("the run selects other Cases, targets or repetitions than the baseline's (is it a train run with the same flags?)")
+        fail("the run selects other Cases, targets, repetitions or retries than the baseline's (is it a train run with the same flags?)")
     if best is not None and best.get("baseline") != fingerprint(base):
         fail("best.json belongs to another baseline; delete it only if you are starting over")
     if best is not None and best.get("run") == score["run"]:
@@ -242,7 +238,7 @@ def misses(path, limit):
 def spent(directory, budget, base):
     """Requests sent so far (every Attempt in every evidence file in `directory`), and the most the next
     experiment can send: one request per eligible model, Case and repetition, each retried up to the
-    calibration's `retries`, as `run` counts its "up to N requests"."""
+    baseline's `retries`, as `run` counts its "up to N requests"."""
     if not os.path.isdir(directory):
         fail(f"{directory} is not a folder")
     runs = []
@@ -259,7 +255,7 @@ def spent(directory, budget, base):
         runs.append(attempts)
     total = sum(runs)
     sel = base["selection"]
-    next_run = len(derived(base)["eligible_models"]) * len(sel["cases"]) * sel["repetitions"] * (1 + base["retries"])
+    next_run = len(derived(base)["eligible_models"]) * len(sel["cases"]) * sel["repetitions"] * (1 + sel["retries"])
     return {"requests": total, "budget": budget, "remaining": budget - total, "next_run": next_run}
 
 
@@ -297,7 +293,6 @@ def command(args):
     if args.cmd == "baseline":
         a, b = load(args.score_a), load(args.score_b)
         result = baseline(a, b, selection(args.runs[0], a), selection(args.runs[1], b))
-        result["retries"] = retries(args.runs[0])
         save(args.out, result)
         print(json.dumps(result, indent=2))
         sys.exit(0 if len(result["eligible_models"]) >= 2 else 12)
