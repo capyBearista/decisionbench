@@ -141,6 +141,15 @@ pub enum Split {
     Holdout,
 }
 
+impl Split {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Train => "train",
+            Self::Holdout => "holdout",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {

@@ -191,6 +191,7 @@ pub(super) fn args(app: &App) -> Result<RunArgs, String> {
         candidates,
         instructions,
         cases: app.dataset.marked.iter().cloned().collect(),
+        split: None,
         targets: state.targets.iter().copied().collect(),
         settings: Settings {
             repetitions: state.repetitions,

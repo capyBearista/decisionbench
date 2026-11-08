@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use clap::{Parser, Subcommand};
 use decisionbench::batch::{self, Control, RunArgs, load_dataset, load_run, read};
 use decisionbench::cost::plural;
-use decisionbench::dataset::summarize;
+use decisionbench::dataset::{Split, summarize};
 use decisionbench::evidence::{self, Line, RunFile, RunState};
 use decisionbench::grade::{Tally, Target, grade_all, parse_predictions};
 use decisionbench::report::{self, Axis};
@@ -47,6 +47,9 @@ enum Command {
         /// Case id in the dataset; repeatable. Defaults to every Case.
         #[arg(long = "case")]
         cases: Vec<String>,
+        /// Run only the Cases in this part of the dataset; combines with --case.
+        #[arg(long, value_enum)]
+        split: Option<Split>,
         /// Target Model to ask about; repeatable. Defaults to all four.
         #[arg(long = "target", value_enum)]
         targets: Vec<Target>,
@@ -131,6 +134,7 @@ fn main() -> ExitCode {
             candidates,
             instructions,
             cases,
+            split,
             targets,
             repetitions,
             concurrency,
@@ -148,6 +152,7 @@ fn main() -> ExitCode {
                 instructions.into_iter().map(Some).collect()
             },
             cases,
+            split,
             targets,
             settings: Settings {
                 repetitions,

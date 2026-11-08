@@ -2025,6 +2025,63 @@ fn a_full_matrix_runs_every_trial_once_repetition_first() {
     }
 }
 
+/// `t1` and `t2` train, `h1` holdout.
+fn split_dataset(name: &str) -> PathBuf {
+    temp_file(
+        name,
+        &dataset(
+            r#"{"id":"t1","message":"first","split":"train","ok":{"sonnet":"low"}},
+               {"id":"h1","message":"second","split":"holdout","ok":{"sonnet":"low"}},
+               {"id":"t2","message":"third","split":"train","ok":{"sonnet":"low"}}"#,
+        ),
+    )
+}
+
+fn split_run(test: &str, extra: &[&str]) -> (Eval, Output) {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = Eval::new(test, &candidate_toml("a", "openrouter", "m-a"), &stub.url);
+    let dataset = split_dataset(&format!("{test}-dataset.json"));
+    let mut args = vec!["--candidate", "a", "--repetitions", "1"];
+    args.extend(["--dataset", dataset.to_str().unwrap()]);
+    args.extend(extra);
+    let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    (eval, out)
+}
+
+fn run_case_ids(eval: &Eval) -> Vec<String> {
+    let mut ids: Vec<String> = eval
+        .trials()
+        .iter()
+        .map(|t| t["case_id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn split_selects_only_that_part_of_the_dataset() {
+    let (eval, out) = split_run("split-holdout", &["--split", "holdout"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(run_case_ids(&eval), ["h1"]);
+    let (eval, out) = split_run("split-train", &["--split", "train"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(run_case_ids(&eval), ["t1", "t2"]);
+    let (eval, out) = split_run("split-none", &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(run_case_ids(&eval), ["h1", "t1", "t2"]);
+}
+
+#[test]
+fn split_intersects_with_case_and_rejects_a_case_outside_it() {
+    let (eval, out) = split_run("split-case", &["--split", "train", "--case", "t2"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(run_case_ids(&eval), ["t2"]);
+    let (eval, out) = split_run("split-outside", &["--split", "train", "--case", "h1"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("unknown case h1"), "{}", stderr(&out));
+    assert!(files_in(&eval.out_dir).is_empty(), "nothing is written");
+}
+
 #[test]
 fn repetitions_default_to_three() {
     let stub = stub(200, OPENROUTER_REPLY);
