@@ -77,7 +77,7 @@ For a pair of selected Target Models whose label ranges do not overlap (so one i
 One column of a comparison: a Judge Instructions set as run in one Run. A Run with several prompts gives several Variants; the same prompt in two Runs gives two. Variants are labelled by prompt name, with a content hash or Run id added only when names collide.
 
 **Baseline**  
-The first Variant of a comparison. Every other Variant is measured against it with a paired delta (`+g -l`): the paired Trials (Case × repetition) the Variant gained and lost relative to the Baseline. A net change of one Case's repetitions or less is marked as within noise.
+The first Variant of a comparison. Every other Variant is measured against it with a paired delta (`+g -l`): the paired Trials (Case × repetition) the Variant gained and lost relative to the Baseline. A delta is marked `~` (not significant) unless an exact two-sided sign test on the Cases that changed gives p < 0.05.
 
 **Pooled Row**  
 The row of a comparison matrix that sums valid scored predictions over all Candidates and Targets for each Variant. It exists only to compare Variants at a glance, is always labelled, and is not a score.
