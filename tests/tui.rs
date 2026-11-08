@@ -197,6 +197,26 @@ fn matrix_rows(text: &str) -> Vec<&str> {
     text.lines().skip(2).map(str::trim).collect()
 }
 
+/// `text` with every run of whitespace made one space.
+fn squashed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The rows of the matrix with its targets pooled (header included), whitespace squashed: padding
+/// depends on the widest cell, which differs between the pooled and the expanded table.
+fn collapsed_rows(matrix: &report::Matrix) -> Vec<String> {
+    matrix
+        .grouped_table()
+        .iter()
+        .map(|r| squashed(&r.iter().map(|c| format!("{c} ")).collect::<String>()))
+        .collect()
+}
+
+/// `contains` for text whose whitespace does not matter.
+fn contains_squashed(rows: &[String], text: &str) -> bool {
+    rows.iter().any(|r| squashed(r).contains(text))
+}
+
 #[test]
 fn the_results_pane_opens_on_the_summary_and_the_full_report_is_what_show_prints() {
     let (mut app, file) = app_with_fixture("tui-agreement");
@@ -211,6 +231,17 @@ fn the_results_pane_opens_on_the_summary_and_the_full_report_is_what_show_prints
     let rows = draw(&app, 200, 30);
     assert!(contains(&rows, "report fixture-1.jsonl · summary"));
     assert!(!contains(&rows, "== Run =="), "{}", rows.join("\n"));
+    // It opens with the targets pooled; `t` spreads them into the rows the matrix prints.
+    let grouped = report::Matrix::from_runs(std::slice::from_ref(&run), report::Axis::Auto);
+    for line in collapsed_rows(&grouped) {
+        assert!(
+            contains_squashed(&rows, &line),
+            "summary lacks {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+    press(&mut app, KeyCode::Char('t'));
+    let rows = draw(&app, 200, 30);
     for line in matrix_rows(&matrix) {
         assert!(
             contains(&rows, line),
@@ -306,6 +337,12 @@ fn marked_runs_are_numbered_in_mark_order_and_the_first_is_the_baseline() {
     );
     assert!(contains(&rows, "neutral (baseline)") && !contains(&rows, "terse (baseline)"));
     assert!(contains(&rows, "no differences found in:"));
+    let grouped = report::Matrix::from_runs(&runs, report::Axis::Auto);
+    for line in collapsed_rows(&grouped) {
+        assert!(contains_squashed(&rows, &line), "summary lacks {line:?}");
+    }
+    press(&mut app, KeyCode::Char('t'));
+    let rows = draw(&app, 200, height);
     for line in matrix_rows(&matrix) {
         assert!(
             contains(&rows, line),
@@ -363,7 +400,9 @@ fn inner_text(rows: &[String]) -> String {
 
 #[test]
 fn summary_prose_wraps_to_a_narrow_pane_and_stays_whole() {
-    let (app, runs) = comparing("tui-wrap");
+    let (mut app, runs) = comparing("tui-wrap");
+    // The pooled note belongs to the pooled row, which the collapsed table of one candidate omits.
+    press(&mut app, KeyCode::Char('t'));
     let mut prose: Vec<String> = report::comparability(&runs, report::Axis::Auto).1;
     prose.extend(
         report::Matrix::from_runs(&runs, report::Axis::Auto)
@@ -390,6 +429,7 @@ fn summary_prose_wraps_to_a_narrow_pane_and_stays_whole() {
 #[test]
 fn table_rows_are_not_wrapped_and_still_scroll_sideways() {
     let (mut app, runs) = comparing("tui-table");
+    press(&mut app, KeyCode::Char('t')); // the expanded table is the one `matrix_rows` pads
     let header = report::Matrix::from_runs(&runs, report::Axis::Auto).to_string();
     let header = matrix_rows(&header)[0].to_string();
     let before = draw(&app, 60, 40);
@@ -408,6 +448,7 @@ fn table_rows_are_not_wrapped_and_still_scroll_sideways() {
 #[test]
 fn scrolling_to_the_end_reaches_the_last_wrapped_row_also_after_a_resize() {
     let (mut app, runs) = comparing("tui-wrap-scroll");
+    press(&mut app, KeyCode::Char('t'));
     let notes = report::Matrix::from_runs(&runs, report::Axis::Auto).notes(true);
     let last = notes.last().unwrap().split_whitespace().last().unwrap();
     let first = report::comparability(&runs, report::Axis::Auto).1[0].clone();
@@ -474,6 +515,11 @@ fn c_toggles_the_columns_of_both_panels_and_the_full_report_is_what_show_prints(
     // One prompt and one candidate: Auto reads as prompts.
     assert!(contains(
         &draw(&app, 200, 30),
+        "report fixture-1.jsonl · summary (columns: prompts, targets pooled)"
+    ));
+    press(&mut app, KeyCode::Char('t'));
+    assert!(contains(
+        &draw(&app, 200, 30),
         "report fixture-1.jsonl · summary (columns: prompts)"
     ));
     press(&mut app, KeyCode::Char('c'));
@@ -525,18 +571,28 @@ fn c_toggles_the_columns_of_both_panels_and_the_full_report_is_what_show_prints(
 }
 
 #[test]
-fn a_new_view_starts_on_auto_whatever_the_last_one_toggled_to() {
+fn a_new_view_starts_on_auto_and_pooled_whatever_the_last_one_toggled_to() {
     let (mut app, _, _) = opened("tui-columns-reset");
     press(&mut app, KeyCode::Char('c'));
+    press(&mut app, KeyCode::Char('t'));
     assert!(contains(&draw(&app, 200, 30), "(columns: candidates)"));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Enter);
-    assert!(contains(&draw(&app, 200, 30), "(columns: prompts)"));
+    // The columns are back on Auto and the targets pooled.
+    assert!(contains(
+        &draw(&app, 200, 30),
+        "(columns: prompts, targets pooled)"
+    ));
 }
 
 #[test]
 fn c_toggles_a_comparison_and_its_full_text_is_what_compare_prints() {
     let (mut app, runs) = comparing("tui-columns-compare");
+    assert!(contains(
+        &draw(&app, 200, 40),
+        "compare 2 runs · summary (columns: prompts, targets pooled)"
+    ));
+    press(&mut app, KeyCode::Char('t'));
     assert!(contains(
         &draw(&app, 200, 40),
         "compare 2 runs · summary (columns: prompts)"
@@ -587,7 +643,10 @@ fn c_on_a_comparison_of_candidates_toggles_the_comparability_lines_with_the_axis
     }
     let rows = draw(&app, 200, 40);
     assert!(
-        contains(&rows, "compare 2 runs · summary (columns: candidates)"),
+        contains(
+            &rows,
+            "compare 2 runs · summary (columns: candidates, targets pooled)"
+        ),
         "{}",
         app.message
     );
@@ -596,11 +655,138 @@ fn c_on_a_comparison_of_candidates_toggles_the_comparability_lines_with_the_axis
 
     press(&mut app, KeyCode::Char('c'));
     let rows = draw(&app, 200, 40);
-    assert!(contains(&rows, "(columns: prompts)"));
+    assert!(contains(&rows, "(columns: prompts, targets pooled)"));
     assert!(contains(&rows, "candidate `beta` is not in fixture-1"));
 
     press(&mut app, KeyCode::Char('c'));
     let rows = draw(&app, 200, 40);
-    assert!(contains(&rows, "(columns: candidates)"));
+    assert!(contains(&rows, "(columns: candidates, targets pooled)"));
     assert!(!contains(&rows, "is not in"), "{}", rows.join("\n"));
+}
+
+/// Screen rows whose first words are `label target`.
+fn has_row(rows: &[String], label: &str, target: &str) -> bool {
+    contains_squashed(rows, &format!("{label} {target} "))
+}
+
+#[test]
+fn the_summary_opens_with_targets_pooled_and_t_spreads_them_out_and_back() {
+    let (mut app, _, run) = opened("tui-targets");
+    let rows = draw(&app, 200, 30);
+    assert!(contains(
+        &rows,
+        "summary (columns: prompts, targets pooled)"
+    ));
+    // One row for the candidate, none per target.
+    assert!(has_row(&rows, "alpha", "all"), "{}", rows.join("\n"));
+    assert!(!has_row(&rows, "alpha", "sonnet") && !has_row(&rows, "alpha", "opus"));
+    // The header keeps its target column.
+    assert!(contains_squashed(
+        &rows,
+        "candidate target neutral (baseline)"
+    ));
+
+    press(&mut app, KeyCode::Char('t'));
+    let rows = draw(&app, 200, 30);
+    assert!(contains(&rows, "summary (columns: prompts)"));
+    let matrix =
+        report::Matrix::from_runs(std::slice::from_ref(&run), report::Axis::Auto).to_string();
+    for line in matrix_rows(&matrix) {
+        assert!(
+            contains(&rows, line),
+            "lacks {line:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+    assert!(has_row(&rows, "alpha", "sonnet") && has_row(&rows, "alpha", "opus"));
+    assert!(!has_row(&rows, "alpha", "all"));
+
+    press(&mut app, KeyCode::Char('t'));
+    let rows = draw(&app, 200, 30);
+    assert!(contains(&rows, "(columns: prompts, targets pooled)"));
+    assert!(has_row(&rows, "alpha", "all") && !has_row(&rows, "alpha", "sonnet"));
+}
+
+#[test]
+fn c_keeps_whether_targets_are_pooled_and_t_keeps_the_columns() {
+    let (mut app, _) = comparing("tui-targets-columns");
+    press(&mut app, KeyCode::Char('c'));
+    let rows = draw(&app, 200, 40);
+    assert!(contains(&rows, "(columns: candidates, targets pooled)"));
+    assert!(has_row(&rows, "neutral", "all") && has_row(&rows, "terse", "all"));
+    press(&mut app, KeyCode::Char('t'));
+    let rows = draw(&app, 200, 40);
+    assert!(contains(&rows, "(columns: candidates)") && !contains(&rows, "targets pooled"));
+    assert!(has_row(&rows, "neutral", "sonnet") && has_row(&rows, "neutral", "opus"));
+    press(&mut app, KeyCode::Char('c'));
+    let rows = draw(&app, 200, 40);
+    assert!(contains(&rows, "(columns: prompts)") && !contains(&rows, "targets pooled"));
+    assert!(has_row(&rows, "alpha", "sonnet") && has_row(&rows, "alpha", "opus"));
+}
+
+#[test]
+fn t_does_not_change_the_full_report() {
+    let (mut app, runs) = comparing("tui-targets-full");
+    press(&mut app, KeyCode::Char(']'));
+    let before = draw(&app, 200, 60);
+    assert!(contains(&before, "compare 2 runs · full report"));
+    press(&mut app, KeyCode::Char('t'));
+    assert_eq!(draw(&app, 200, 60), before, "`t` moved the full report");
+    // It took effect on the summary behind it, and the text is still what `compare` prints.
+    let expected = report::Comparison(&runs, report::Axis::Auto).to_string();
+    for line in expected.lines().filter(|l| !l.is_empty()) {
+        assert!(contains(&before, line), "missing {line:?}");
+    }
+    press(&mut app, KeyCode::Char('['));
+    let rows = draw(&app, 200, 60);
+    assert!(contains(&rows, "summary (columns: prompts)") && !contains(&rows, "targets pooled"));
+}
+
+#[test]
+fn t_does_nothing_on_a_run_that_cannot_be_read() {
+    let (mut app, file) = app_with_fixture("tui-targets-error");
+    std::fs::write(file.with_file_name("bad.jsonl"), "not a run\n").unwrap();
+    app.screen = Screen::Results;
+    press(&mut app, KeyCode::Char('r'));
+    // Unreadable files sort last.
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Enter);
+    let before = draw(&app, 100, 30);
+    assert!(
+        contains(&before, "report bad.jsonl · summary"),
+        "{}",
+        before.join("\n")
+    );
+    press(&mut app, KeyCode::Char('t'));
+    assert_eq!(draw(&app, 100, 30), before);
+}
+
+#[test]
+fn t_at_the_bottom_of_a_narrow_pane_keeps_the_last_row_in_view() {
+    let (mut app, runs) = comparing("tui-targets-scroll");
+    let notes = report::Matrix::from_runs(&runs, report::Axis::Auto).notes(true);
+    let last = notes.last().unwrap().split_whitespace().last().unwrap();
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('G'));
+    assert!(contains(&draw(&app, 60, 16), last));
+    // One row fewer: the scroll is clamped to it, not left past the end.
+    press(&mut app, KeyCode::Char('t'));
+    assert!(contains(&draw(&app, 60, 16), last));
+    press(&mut app, KeyCode::Char('j'));
+    let at_end = draw(&app, 60, 16);
+    assert!(contains(&at_end, last));
+    // The collapsed table of one candidate has no pooled row, so only the delta note is left to
+    // scroll over. `k` moves one row up, so the pane shows one more row of it.
+    press(&mut app, KeyCode::Char('k'));
+    let rows = draw(&app, 60, 16);
+    let filled = |rows: &[String]| {
+        rows.iter()
+            .filter(|r| !r.trim_matches('│').trim().is_empty())
+            .count()
+    };
+    assert!(
+        contains(&rows, last) && filled(&rows) == filled(&at_end) + 1,
+        "{}",
+        rows.join("\n")
+    );
 }

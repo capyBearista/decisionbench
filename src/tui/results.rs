@@ -17,8 +17,7 @@ use crate::batch::{load_run, read_runs};
 use crate::evidence::{RunFile, RunState, RunSummary};
 use crate::report;
 
-pub const HINTS: &str =
-    "j/k move · Space mark · Enter open · m compare · [ ] panel · c columns · Esc back · q quit";
+pub const HINTS: &str = "j/k move · Space mark · Enter open · m compare · [ ] panel · c columns · t targets · Esc back · q quit";
 
 struct Entry {
     name: String,
@@ -59,6 +58,9 @@ struct View {
     /// axis is `None` for a view of text that is not a report, which has no columns to toggle.
     runs: Vec<RunFile>,
     axis: Option<report::Axis>,
+    /// Whether the summary shows one row per candidate or prompt, its targets pooled, rather than
+    /// one per target. The full report is the text `show` prints and ignores it.
+    collapsed: bool,
     scroll: usize,
     /// Columns cut off the left of every table line, so wide lines can be read to their end.
     hscroll: usize,
@@ -185,6 +187,7 @@ impl View {
             full: plain_rows(full, false),
             runs: Vec::new(),
             axis: None,
+            collapsed: true,
             scroll: 0,
             hscroll: 0,
             width: Cell::new(usize::MAX),
@@ -206,7 +209,7 @@ impl View {
             [run] => report::report(run, matrix.axis).to_string(),
             runs => report::Comparison(runs, matrix.axis).to_string(),
         };
-        self.summary = summary(&self.runs, &matrix);
+        self.summary = summary(&self.runs, &matrix, self.collapsed);
         self.full = plain_rows(&full, false);
         self.axis = Some(matrix.axis);
     }
@@ -215,6 +218,18 @@ impl View {
     fn toggle_columns(&mut self) {
         let Some(axis) = self.axis else { return };
         self.show_columns(axis.toggled());
+        self.clamp_scroll();
+    }
+
+    /// Swaps one summary row per target for one row per candidate or prompt, targets pooled.
+    fn toggle_targets(&mut self) {
+        let Some(axis) = self.axis else { return };
+        self.collapsed = !self.collapsed;
+        self.show_columns(axis);
+        self.clamp_scroll();
+    }
+
+    fn clamp_scroll(&mut self) {
         let rows = self.display(self.width.get()).len();
         self.scroll = self.scroll.min(rows.saturating_sub(1));
         self.hscroll = self.hscroll.min(self.widest().saturating_sub(1));
@@ -234,7 +249,16 @@ impl View {
         };
         match (self.panel, self.axis) {
             (Panel::Summary, Some(axis)) => {
-                format!("{} · {panel} (columns: {})", self.title, axis.name())
+                let pooled = if self.collapsed {
+                    ", targets pooled"
+                } else {
+                    ""
+                };
+                format!(
+                    "{} · {panel} (columns: {}{pooled})",
+                    self.title,
+                    axis.name()
+                )
             }
             _ => format!("{} · {panel}", self.title),
         }
@@ -296,12 +320,17 @@ fn delta_style(kind: report::DeltaKind) -> Style {
 
 /// The matrix as a table laid out like `Display for Matrix` (left aligned, two spaces between
 /// columns, no indent), each delta coloured by how it reads: the numbers stay in the text, so
-/// colour is never the only sign. The pooled row, when shown, follows a dim rule.
-fn matrix_lines(matrix: &report::Matrix, pooled: bool) -> Vec<Row> {
+/// colour is never the only sign. The pooled row, when shown, follows a dim rule. `collapsed`: one
+/// row per candidate or prompt, its targets pooled (`all`), instead of one per target.
+fn matrix_lines(matrix: &report::Matrix, pooled: bool, collapsed: bool) -> Vec<Row> {
     if matrix.columns.is_empty() {
         return Vec::new();
     }
-    let mut rows = matrix.table();
+    let mut rows = if collapsed {
+        matrix.grouped_table()
+    } else {
+        matrix.table()
+    };
     let pooled_at = rows.len();
     let pooled = pooled.then(|| matrix.pooled_row()).flatten();
     let shown = pooled.is_some();
@@ -349,8 +378,8 @@ fn matrix_lines(matrix: &report::Matrix, pooled: bool) -> Vec<Row> {
 
 /// What the summary panel shows for `runs`: for a comparison, first whether the Runs compare;
 /// then the matrix built from them. A single Run pools its rows only when it has several, as its
-/// report does.
-fn summary(runs: &[RunFile], matrix: &report::Matrix) -> Vec<Row> {
+/// report does; the collapsed table pools when it shows several rows.
+fn summary(runs: &[RunFile], matrix: &report::Matrix, collapsed: bool) -> Vec<Row> {
     let mut lines = Vec::new();
     if runs.len() > 1 {
         let (incomparable, head) = report::comparability(runs, matrix.axis);
@@ -365,10 +394,13 @@ fn summary(runs: &[RunFile], matrix: &report::Matrix) -> Vec<Row> {
         );
         lines.push(Row::prose(Line::default()));
     }
-    lines.extend(matrix_lines(
-        matrix,
-        runs.len() > 1 || matrix.rows.len() > 1,
-    ));
+    // Collapsed, the pooled row is a total only when there is more than one row to add up.
+    let pooled = if collapsed {
+        matrix.grouped().len() > 1
+    } else {
+        runs.len() > 1 || matrix.rows.len() > 1
+    };
+    lines.extend(matrix_lines(matrix, pooled, collapsed));
     lines
 }
 
@@ -467,6 +499,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             view.select(Panel::Full);
         } else if key.code == KeyCode::Char('c') {
             view.toggle_columns();
+        } else if key.code == KeyCode::Char('t') {
+            view.toggle_targets();
         } else if let Some(n) = nav(key) {
             view.scroll(n);
         }
@@ -642,8 +676,15 @@ mod tests {
 
     /// The summary's lines, without whether each is prose.
     fn summary_lines(runs: &[RunFile]) -> Vec<Line<'static>> {
+        summary_lines_with(runs, false)
+    }
+
+    fn summary_lines_with(runs: &[RunFile], collapsed: bool) -> Vec<Line<'static>> {
         let matrix = report::Matrix::from_runs(runs, report::Axis::Auto);
-        summary(runs, &matrix).into_iter().map(|r| r.line).collect()
+        summary(runs, &matrix, collapsed)
+            .into_iter()
+            .map(|r| r.line)
+            .collect()
     }
 
     #[test]
@@ -709,6 +750,51 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_rows_colour_their_deltas_like_the_expanded_ones() {
+        let lines = summary_lines_with(&[moving_run()], true);
+        let delta_of = |row: &str| {
+            let line = lines.iter().find(|l| plain(l).starts_with(row)).unwrap();
+            assert_eq!(plain(line).split_whitespace().nth(1), Some("all"));
+            line.spans
+                .iter()
+                .find(|s| s.content.starts_with('+'))
+                .unwrap_or_else(|| panic!("no delta in {}", plain(line)))
+                .clone()
+        };
+        let (gain, loss, noise) = (delta_of("c "), delta_of("d "), delta_of("e "));
+        assert_eq!(
+            (gain.content.as_ref(), gain.style.fg),
+            ("+6 -0", Some(theme::STATUS_OK))
+        );
+        assert_eq!(
+            (loss.content.as_ref(), loss.style.fg),
+            ("+0 -6", Some(theme::STATUS_FAIL))
+        );
+        assert_eq!(
+            (noise.content.as_ref(), noise.style),
+            ("+1 -0 ~", theme::dim())
+        );
+        assert!(lines[0].spans.iter().all(|s| s.style == theme::dim()));
+    }
+
+    #[test]
+    fn the_collapsed_pooled_row_shows_only_over_several_displayed_rows() {
+        let has_pooled = |lines: &[Line]| lines.iter().any(|l| plain(l).starts_with("pooled "));
+        assert!(has_pooled(&summary_lines_with(&[moving_run()], true)));
+        // One candidate and one target: one row either way, and no total of one row.
+        let one = || {
+            let mut run = run_of("X1", &[("c", 0, "c1", "low"), ("c", 1, "c1", "high")]);
+            run.manifest.candidates.truncate(1);
+            complete(run)
+        };
+        assert!(!has_pooled(&summary_lines_with(&[one()], true)));
+        assert!(!has_pooled(&summary_lines_with(&[one()], false)));
+        // Two runs of it: the expanded table still pools, the collapsed one has one row to show.
+        assert!(has_pooled(&summary_lines_with(&[one(), one()], false)));
+        assert!(!has_pooled(&summary_lines_with(&[one(), one()], true)));
+    }
+
+    #[test]
     fn a_compare_summary_opens_with_the_verdict_on_whether_the_runs_compare() {
         let (x, y) = (moving_run(), moving_run());
         // Neither Run has an end record: both are partial.
@@ -752,7 +838,10 @@ mod tests {
     #[test]
     fn toggling_the_columns_rebuilds_both_panels_from_the_same_engine() {
         let mut view = View::of_runs("report x".into(), vec![moving_run()]);
-        assert_eq!(view.title(), "report x · summary (columns: prompts)");
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts, targets pooled)"
+        );
         assert_eq!(header(&view), "candidate target p (baseline) q");
         view.select(Panel::Full);
         // Only the summary panel names the columns.
@@ -769,11 +858,17 @@ mod tests {
             expected.lines().map(String::from).collect::<Vec<_>>()
         );
         view.select(Panel::Summary);
-        assert_eq!(view.title(), "report x · summary (columns: candidates)");
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: candidates, targets pooled)"
+        );
         assert_eq!(header(&view), "prompt target c (baseline) d e");
 
         view.toggle_columns();
-        assert_eq!(view.title(), "report x · summary (columns: prompts)");
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts, targets pooled)"
+        );
         assert_eq!(
             texts(&view.full),
             report::report(&moving_run(), report::Axis::Auto)
@@ -806,6 +901,92 @@ mod tests {
         view.toggle_columns();
         assert_eq!(view.title(), "t · summary");
         assert_eq!(texts(&view.summary), ["a"]);
+    }
+
+    /// The first two words of each summary row that has a target column: its label and target.
+    fn label_and_target(view: &View) -> Vec<(String, String)> {
+        texts(&view.summary)
+            .iter()
+            .skip(1) // the header
+            .map(|l| {
+                l.split_whitespace()
+                    .take(2)
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|w| w.len() == 2 && w[0] != "pooled" && !w[0].starts_with('─'))
+            .map(|w| (w[0].clone(), w[1].clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_view_opens_with_targets_pooled_and_t_swaps_them_for_one_row_per_target() {
+        let mut view = View::of_runs("report x".into(), vec![moving_run()]);
+        let all = |label: &str| (label.to_string(), "all".to_string());
+        assert_eq!(label_and_target(&view)[..3], [all("c"), all("d"), all("e")]);
+        assert_eq!(header(&view), "candidate target p (baseline) q");
+        let full = texts(&view.full);
+
+        view.toggle_targets();
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts)",
+            "the title names the state"
+        );
+        let target = |label: &str| (label.to_string(), "sonnet".to_string());
+        assert_eq!(
+            label_and_target(&view)[..3],
+            [target("c"), target("d"), target("e")]
+        );
+        assert_eq!(header(&view), "candidate target p (baseline) q");
+
+        view.toggle_targets();
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts, targets pooled)"
+        );
+        assert_eq!(label_and_target(&view)[0], all("c"));
+        // The full report is what `show` prints, whichever way the targets are shown.
+        assert_eq!(texts(&view.full), full);
+    }
+
+    #[test]
+    fn t_keeps_the_axis_and_c_keeps_the_targets_state() {
+        let mut view = View::of_runs("t".into(), vec![moving_run()]);
+        view.toggle_targets();
+        view.toggle_columns();
+        assert_eq!(view.title(), "t · summary (columns: candidates)");
+        view.toggle_targets();
+        assert_eq!(
+            view.title(),
+            "t · summary (columns: candidates, targets pooled)"
+        );
+        view.toggle_columns();
+        assert_eq!(
+            view.title(),
+            "t · summary (columns: prompts, targets pooled)"
+        );
+    }
+
+    #[test]
+    fn toggling_the_targets_clamps_the_scroll_to_the_new_text() {
+        let mut view = View::of_runs("t".into(), vec![moving_run()]);
+        view.width.set(200);
+        view.scroll = 10_000;
+        view.hscroll = 10_000;
+        view.toggle_targets();
+        assert_eq!(view.scroll, view.display(200).len() - 1);
+        assert_eq!(view.hscroll, view.widest() - 1);
+    }
+
+    #[test]
+    fn a_view_without_runs_has_no_targets_to_toggle() {
+        let mut view = View::new("t".into(), plain_rows("a", false), "b");
+        view.toggle_targets();
+        assert_eq!(
+            (view.title(), texts(&view.summary)),
+            ("t · summary".into(), vec!["a".to_string()])
+        );
     }
 
     #[test]

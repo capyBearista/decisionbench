@@ -276,6 +276,9 @@ pub struct Cell {
     pub tally: Tally,
     /// `None` for the baseline column and when no trial pairs with the baseline's.
     pub delta: Option<Delta>,
+    /// The net change of each case behind `delta` (trials gained less lost, over the case's
+    /// repetitions), so cells can be pooled without counting one case twice; empty on a pooled cell.
+    pub case_nets: Vec<(String, i64)>,
 }
 
 /// How a delta reads: significantly more cases up than down, the reverse, or noise (not significant,
@@ -350,7 +353,8 @@ const DELTA_NOTE: &str = "+g -l = paired trials (case x repetition) gained and l
 pub struct MatrixRow {
     /// The candidate on the prompt axis, the prompt on the candidate axis.
     pub label: String,
-    pub target: Target,
+    /// `None` on a row of `Matrix::grouped`, which adds up all of the label's targets.
+    pub target: Option<Target>,
     /// `None` when that column's Run did not ask this candidate, target or prompt.
     pub cells: Vec<Option<Cell>>,
 }
@@ -435,6 +439,47 @@ fn resolve(runs: &[RunFile], axis: Axis) -> Axis {
     } else {
         Axis::Prompt
     }
+}
+
+/// Column `j` of the `rows` that have a cell in every column, added together, so all columns cover
+/// the same rows; `None` when no row qualifies. Trials and tallies add. A case counts once per row
+/// label however many targets it was graded on (its nets add across them), then up, down or, if
+/// they cancel, not at all; the delta is judged on those cases, so the sign test is not told that
+/// one response graded on several targets is several independent cases.
+fn pool<'a>(rows: impl IntoIterator<Item = &'a MatrixRow>, j: usize) -> Option<Cell> {
+    let cells: Vec<(&MatrixRow, &Cell)> = rows
+        .into_iter()
+        .filter(|row| row.cells.iter().all(Option::is_some))
+        .filter_map(|row| Some((row, row.cells[j].as_ref()?)))
+        .collect();
+    if cells.is_empty() {
+        return None;
+    }
+    let mut tally = Tally::default();
+    let (mut gained, mut lost, mut any) = (0, 0, false);
+    let mut nets: BTreeMap<(&str, &str), i64> = BTreeMap::new();
+    for (row, cell) in &cells {
+        tally.hit += cell.tally.hit;
+        tally.under += cell.tally.under;
+        tally.over += cell.tally.over;
+        tally.invalid += cell.tally.invalid;
+        tally.unscored += cell.tally.unscored;
+        if let Some(d) = &cell.delta {
+            gained += d.gained;
+            lost += d.lost;
+            any = true;
+            for (case, n) in &cell.case_nets {
+                *nets.entry((&row.label, case)).or_default() += n;
+            }
+        }
+    }
+    let up = nets.values().filter(|n| **n > 0).count();
+    let down = nets.values().filter(|n| **n < 0).count();
+    Some(Cell {
+        tally,
+        delta: any.then(|| Delta::new(gained, lost, up, down)),
+        case_nets: Vec::new(),
+    })
 }
 
 impl Matrix {
@@ -549,6 +594,7 @@ impl Matrix {
                         asked.then(|| Cell {
                             tally: tally(&group(run, candidate, ins), *target),
                             delta: None,
+                            case_nets: Vec::new(),
                         })
                     })
                     .collect();
@@ -574,50 +620,18 @@ impl Matrix {
                         let up = net.values().filter(|n| **n > 0).count();
                         let down = net.values().filter(|n| **n < 0).count();
                         cell.delta = (pairs > 0).then(|| Delta::new(gained, lost, up, down));
+                        cell.case_nets = net.iter().map(|(k, n)| (k.to_string(), *n)).collect();
                     }
                 }
                 rows.push(MatrixRow {
                     label: row_label.clone(),
-                    target: *target,
+                    target: Some(*target),
                     cells,
                 });
             }
         }
 
-        let pooled = sources
-            .iter()
-            .enumerate()
-            .map(|(j, _)| {
-                let cells: Vec<&Cell> = rows
-                    .iter()
-                    .filter(|row| row.cells.iter().all(Option::is_some))
-                    .filter_map(|row| row.cells[j].as_ref())
-                    .collect();
-                if cells.is_empty() {
-                    return None;
-                }
-                let mut tally = Tally::default();
-                let (mut gained, mut lost, mut up, mut down, mut any) = (0, 0, 0, 0, false);
-                for cell in &cells {
-                    tally.hit += cell.tally.hit;
-                    tally.under += cell.tally.under;
-                    tally.over += cell.tally.over;
-                    tally.invalid += cell.tally.invalid;
-                    tally.unscored += cell.tally.unscored;
-                    if let Some(d) = &cell.delta {
-                        gained += d.gained;
-                        lost += d.lost;
-                        up += d.cases_up;
-                        down += d.cases_down;
-                        any = true;
-                    }
-                }
-                Some(Cell {
-                    tally,
-                    delta: any.then(|| Delta::new(gained, lost, up, down)),
-                })
-            })
-            .collect();
+        let pooled = (0..sources.len()).map(|j| pool(&rows, j)).collect();
         Matrix {
             axis,
             columns,
@@ -626,14 +640,37 @@ impl Matrix {
         }
     }
 
+    /// One row per candidate or prompt with its targets pooled as the pooled row pools them (only
+    /// the targets every column has); a label with none shows `-` cells. The pooled row stays the
+    /// total over all labels.
+    pub fn grouped(&self) -> Vec<MatrixRow> {
+        self.rows
+            .chunk_by(|a, b| a.label == b.label)
+            .map(|group| MatrixRow {
+                label: group[0].label.clone(),
+                target: None,
+                cells: (0..self.columns.len()).map(|j| pool(group, j)).collect(),
+            })
+            .collect()
+    }
+
     /// The header, then one row per (candidate or prompt, target); see `pooled_row` for the last row.
     pub fn table(&self) -> Vec<Vec<CellText>> {
-        let rows = if self.axis == Axis::Candidate {
+        self.table_of(&self.rows)
+    }
+
+    /// `table` with the rows of `grouped`: the target column reads `all`.
+    pub fn grouped_table(&self) -> Vec<Vec<CellText>> {
+        self.table_of(&self.grouped())
+    }
+
+    fn table_of(&self, rows: &[MatrixRow]) -> Vec<Vec<CellText>> {
+        let label = if self.axis == Axis::Candidate {
             "prompt"
         } else {
             "candidate"
         };
-        let mut header = vec![CellText::plain(rows), CellText::plain("target")];
+        let mut header = vec![CellText::plain(label), CellText::plain("target")];
         header.extend(self.columns.iter().enumerate().map(|(i, c)| {
             CellText::plain(if i == 0 {
                 format!("{} (baseline)", c.label)
@@ -642,11 +679,11 @@ impl Matrix {
             })
         }));
         let mut table = vec![header];
-        for row in &self.rows {
+        for row in rows {
             table.push(
                 [
                     CellText::plain(&row.label),
-                    CellText::plain(row.target.to_string()),
+                    CellText::plain(row.target.map_or_else(|| "all".into(), |t| t.to_string())),
                 ]
                 .into_iter()
                 .chain(row.cells.iter().map(|c| cell_parts(c.as_ref())))
@@ -1327,6 +1364,26 @@ mod tests {
         candidates: &[&str],
         trials: &[(&str, usize, &str, u32, &str)],
     ) -> RunFile {
+        run_of_targets(
+            id,
+            repetitions,
+            instructions,
+            candidates,
+            trials,
+            &["sonnet"],
+        )
+    }
+
+    /// `run_of` over several targets (all label high). An effort is one value for every target or
+    /// one per target, comma separated, in the order of `targets`.
+    fn run_of_targets(
+        id: &str,
+        repetitions: u32,
+        instructions: &[(&str, &str)],
+        candidates: &[&str],
+        trials: &[(&str, usize, &str, u32, &str)],
+        targets: &[&str],
+    ) -> RunFile {
         let mut lines = vec![json!({
             "type": "run", "schema_version": crate::evidence::SCHEMA_VERSION, "id": id,
             "created_unix_ms": 1, "dataset": {"name": "d", "sha256": "d"},
@@ -1336,26 +1393,41 @@ mod tests {
             "candidates": candidates.iter()
                 .map(|c| json!({"name": c, "provider": "zen", "model": "m", "url": "u"}))
                 .collect::<Vec<_>>(),
-            "cases": ["c1"], "targets": ["sonnet"],
+            "cases": ["c1"], "targets": targets,
             "settings": {"repetitions": repetitions, "concurrency": 1, "timeout_secs": 60,
                 "retries": 0, "include_unscored": false},
             "planned_trials": trials.len(),
         })];
+        let labels: serde_json::Map<String, serde_json::Value> = targets
+            .iter()
+            .map(|t| (t.to_string(), json!("high")))
+            .collect();
         for (seq, (candidate, ins, case, repetition, effort)) in trials.iter().enumerate() {
             let attempt = if *effort == "-" {
                 json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "provider_error",
                     "http_status": 503, "raw_response": "busy", "error": null})
             } else {
-                let body =
-                    json!({"answers": {"effort_sonnet": {"type": "choice", "choice": effort}}});
+                let efforts: Vec<&str> = effort.split(',').collect();
+                let answers: serde_json::Map<String, serde_json::Value> = targets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let choice = efforts[i.min(efforts.len() - 1)];
+                        (
+                            format!("effort_{t}"),
+                            json!({"type": "choice", "choice": choice}),
+                        )
+                    })
+                    .collect();
+                let body = json!({ "answers": answers });
                 json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "answered",
                     "http_status": 200, "raw_response": body.to_string(), "error": null})
             };
             lines.push(json!({
                 "type": "trial", "seq": seq, "candidate": candidate,
                 "instructions": {"name": instructions[*ins].0, "sha256": instructions[*ins].1},
-                "case_id": case, "targets": ["sonnet"], "repetition": repetition,
-                "labels": {"sonnet": "high"}, "request": {}, "attempts": [attempt],
+                "case_id": case, "targets": targets, "repetition": repetition,
+                "labels": labels, "request": {}, "attempts": [attempt],
                 "started_unix_ms": 0, "elapsed_ms": 1,
             }));
         }
@@ -1390,6 +1462,10 @@ mod tests {
         close(sign_test_p(6, 3), 260.0 / 512.0);
         close(sign_test_p(10, 0), 2.0 / 1024.0);
         close(sign_test_p(4, 4), 1.0); // 2 * P(X <= 4) is above 1: capped
+        // Known large-n values: 2 / 2^60, relative to the value, and a symmetric split.
+        let tiny = sign_test_p(60, 0);
+        assert!((tiny / (2.0 / 2f64.powi(60)) - 1.0).abs() < 1e-9, "{tiny}");
+        close(sign_test_p(30, 30), 1.0);
         for (a, b) in [(6, 3), (7, 1), (0, 5), (2, 2)] {
             assert_eq!(sign_test_p(a, b), sign_test_p(b, a));
         }
@@ -1739,6 +1815,7 @@ mod tests {
                 ..Tally::default()
             },
             delta: d,
+            case_nets: Vec::new(),
         };
         let parts = |d| cell_parts(Some(&cell(d)));
         assert_eq!(cell_parts(None), CellText::plain("-"));
@@ -2041,6 +2118,207 @@ mod tests {
         // An explicit axis is kept.
         let m = Matrix::from_runs(&[run(&[p], &["c", "d"])], Axis::Prompt);
         assert_eq!(m.axis, Axis::Prompt);
+    }
+
+    /// A cell as [hit, under, over, gained, lost, cases up, cases down]; the deltas are 0 without one.
+    fn counts(cell: &Option<Cell>) -> Option<[usize; 7]> {
+        cell.as_ref().map(|c| {
+            let (g, l, u, d) = c.delta.as_ref().map_or((0, 0, 0, 0), |d| {
+                (d.gained, d.lost, d.cases_up, d.cases_down)
+            });
+            [c.tally.hit, c.tally.under, c.tally.over, g, l, u, d]
+        })
+    }
+
+    /// The rows of `rows` as squashed text.
+    fn squash(rows: Vec<Vec<CellText>>) -> Vec<String> {
+        rows.iter()
+            .map(|r| {
+                r.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grouped_pools_each_candidates_targets_over_the_rows_every_column_has() {
+        // Prompt p in X1 (candidates c, d; targets sonnet and opus), prompt q in Y1 (candidate c;
+        // sonnet only). Only c on sonnet is asked in both columns; d and c on opus are not.
+        let x = run_of_targets(
+            "X1",
+            1,
+            &[("p", "a")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "low,high"),
+                ("d", 0, "c1", 1, "high,high"),
+            ],
+            &["sonnet", "opus"],
+        );
+        let y = run_of("Y1", 1, &[("q", "b")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        assert_eq!(m.rows.len(), 4); // c and d, each on sonnet and opus
+        let groups = m.grouped();
+        let labels: Vec<_> = groups.iter().map(|g| g.label.as_str()).collect();
+        assert_eq!(labels, ["c", "d"]);
+        assert!(groups.iter().all(|g| g.target.is_none()));
+        // c: only the sonnet row counts, so its opus hit does not lift X1's rate.
+        assert_eq!(counts(&groups[0].cells[0]), Some([0, 1, 0, 0, 0, 0, 0]));
+        assert_eq!(counts(&groups[0].cells[1]), Some([1, 0, 0, 1, 0, 1, 0]));
+        // d was not asked in Y1 on any target: nothing to pool.
+        assert!(groups[1].cells.iter().all(Option::is_none));
+        assert_eq!(
+            squash(m.grouped_table()),
+            [
+                "candidate target p (baseline) q",
+                "c all 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~",
+                "d all - -",
+            ]
+        );
+        // The expanded rows are untouched.
+        assert_eq!(
+            squash(m.table())[1],
+            "c sonnet 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~"
+        );
+    }
+
+    #[test]
+    fn grouped_over_the_candidate_axis_sums_to_the_pooled_row() {
+        // c and d, prompts p and q, two targets: c misses p and hits q, d the reverse.
+        let m = Matrix::from_runs(
+            &[run_of_targets(
+                "X1",
+                1,
+                &[("p", "a"), ("q", "b")],
+                &["c", "d"],
+                &[
+                    ("c", 0, "c1", 1, "low"),
+                    ("c", 1, "c1", 1, "high"),
+                    ("d", 0, "c1", 1, "high"),
+                    ("d", 1, "c1", 1, "low"),
+                ],
+                &["sonnet", "opus"],
+            )],
+            Axis::Candidate,
+        );
+        let groups = m.grouped();
+        assert_eq!(
+            squash(m.grouped_table()),
+            [
+                "prompt target c (baseline) d",
+                "p all 0/2 (0.0%) 2/2 (100.0%) +2 -0 ~",
+                "q all 2/2 (100.0%) 0/2 (0.0%) +0 -2 ~",
+            ]
+        );
+        // Every row qualifies here, so the groups add up to the pooled row.
+        for j in 0..m.columns.len() {
+            let mut sum = [0; 7];
+            for g in &groups {
+                for (total, n) in sum.iter_mut().zip(counts(&g.cells[j]).unwrap()) {
+                    *total += n;
+                }
+            }
+            assert_eq!(Some(sum), counts(&m.pooled[j]), "column {j}");
+        }
+        // The same case on both targets of a prompt counts once: 1 case up and 1 down, noise.
+        assert_eq!(
+            m.pooled[1].as_ref().unwrap().delta,
+            delta((2, 2), (1, 1), true)
+        );
+    }
+
+    /// One Run, prompts p (baseline) and q, targets sonnet and opus. Each trial is (candidate,
+    /// case, p effort, q effort).
+    fn two_targets(trials: &[(&str, &str, &str, &str)], candidates: &[&str]) -> Matrix {
+        let trials: Vec<_> = trials
+            .iter()
+            .flat_map(|(c, case, p, q)| [(*c, 0, *case, 1, *p), (*c, 1, *case, 1, *q)])
+            .collect();
+        Matrix::from_runs(
+            &[run_of_targets(
+                "X1",
+                1,
+                &[("p", "a"), ("q", "b")],
+                candidates,
+                &trials,
+                &["sonnet", "opus"],
+            )],
+            Axis::Prompt,
+        )
+    }
+
+    #[test]
+    fn grouped_counts_a_case_once_however_many_targets_it_was_graded_on() {
+        let up = |c: &'static str, case: &'static str| (c, case, "low", "high");
+        // Three cases gained on both targets: six gained trials, but still only three cases, and
+        // three cases cannot be significant (the smallest p is 0.25).
+        let m = two_targets(&[up("c", "k1"), up("c", "k2"), up("c", "k3")], &["c"]);
+        assert!(
+            m.rows
+                .iter()
+                .all(|r| r.cells[1].as_ref().unwrap().delta == delta((3, 0), (3, 0), true))
+        );
+        assert_eq!(
+            m.grouped()[0].cells[1].as_ref().unwrap().delta,
+            delta((6, 0), (3, 0), true)
+        );
+        assert_eq!(
+            squash(m.grouped_table())[1],
+            "c all 0/6 (0.0%) 6/6 (100.0%) +6 -0 ~"
+        );
+        // Six distinct cases are significant (p = 0.03125).
+        let cases = ["k1", "k2", "k3", "k4", "k5", "k6"].map(|k| up("c", k));
+        let m = two_targets(&cases, &["c"]);
+        assert_eq!(
+            m.grouped()[0].cells[1].as_ref().unwrap().delta,
+            delta((12, 0), (6, 0), false)
+        );
+        // A case gained on one target and lost on the other nets to nothing and is ignored.
+        let m = two_targets(&[("c", "k1", "low,high", "high,low")], &["c"]);
+        assert_eq!(
+            m.grouped()[0].cells[1].as_ref().unwrap().delta,
+            delta((1, 1), (0, 0), true)
+        );
+    }
+
+    #[test]
+    fn pooling_counts_a_case_once_per_candidate_not_once_per_target() {
+        let up = |c: &'static str, case: &'static str| (c, case, "low", "high");
+        // c and d each gain the same three cases on both targets. Each candidate is its own
+        // observation, so the pooled row has six cases (significant) where each group has three.
+        let m = two_targets(
+            &[
+                up("c", "k1"),
+                up("c", "k2"),
+                up("c", "k3"),
+                up("d", "k1"),
+                up("d", "k2"),
+                up("d", "k3"),
+            ],
+            &["c", "d"],
+        );
+        let groups = m.grouped();
+        for group in &groups {
+            assert_eq!(
+                group.cells[1].as_ref().unwrap().delta,
+                delta((6, 0), (3, 0), true)
+            );
+        }
+        assert_eq!(
+            m.pooled[1].as_ref().unwrap().delta,
+            delta((12, 0), (6, 0), false)
+        );
+    }
+
+    #[test]
+    fn grouped_has_no_rows_when_the_matrix_has_none() {
+        let m = Matrix::from_runs(&[run_of("X1", 1, &[], &["c"], &[])], Axis::Auto);
+        assert!(m.grouped().is_empty());
     }
 
     #[test]
