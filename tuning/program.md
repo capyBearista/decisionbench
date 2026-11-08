@@ -84,7 +84,7 @@ Stop and report to the user when any of these happens:
 - A `score` or `judge` error you do not understand.
 - The user interrupts.
 
-When you stop for a provider problem, leave the experiment's `tune:` commit in place and do not log a verdict for it: it is **pending**. Otherwise keep going. The user may be away; do not stop to ask whether to continue.
+When you stop for a provider problem, leave the experiment's `tune:` commit in place and log no `keep` or `discard` for it: it is **pending**. Otherwise keep going. The user may be away; do not stop to ask whether to continue.
 
 ## Resuming
 
@@ -93,7 +93,7 @@ The user may ask you to continue a stopped session later, for example after a fr
 1. `cd` to the `worktree=` path in the preamble of `results.tsv`. Check that `git status` shows no uncommitted tracked changes and that the branch is the one in the preamble. If not, stop and tell the user.
 2. Rebuild the settings from the preamble: the binary, the flags and the budget. The models to run are `eligible_models` in `tuning/baseline.json`. Add up the requests already logged and subtract them from the budget.
 3. **Gate.** Send one request to each eligible model, as in the smoke test. If any fails, stop and report which, without running anything else. The quota has not come back.
-4. **Pending experiment.** If HEAD is a `tune:` commit that has no row in `results.tsv`, that experiment is pending. Run it again as in the loop (step 4), then score and judge it, and log it. Do not edit the prompt first.
+4. **Pending experiment.** If HEAD is a `tune:` commit that has no `keep` or `discard` row in `results.tsv` (a `rerun` row does not count), that experiment is pending. Run it again as in the loop (step 4), then score and judge it, and log it. Do not edit the prompt first.
 5. Then continue the loop.
 
 ## Report
