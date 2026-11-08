@@ -8,7 +8,7 @@ A terminal-first benchmark for **Decisions models**: specialised models that are
 - Raw predictions and confidence are kept as returned. The current effort is never sent as a hint.
 - Local TOML config and versioned JSON/JSONL evidence. No web UI, server, database or Docker.
 
-**Status: first release candidate.** Linux is the only supported platform. The test suite runs offline; see [Known limitations](#known-limitations).
+**Status: version 1.0.0, the first release.** Linux is the only supported platform. The test suite runs offline; see [Known limitations](#known-limitations).
 
 ## Install
 
