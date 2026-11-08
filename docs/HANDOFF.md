@@ -3,15 +3,15 @@
 ## Objective
 
 - **Original request:** After PR #18 merged, the user wanted the Results screen and `compare` to show prompt and model efficacy readably: several prompts per run, a prompt folder in Setup, a matrix with paired deltas and a pooled row, a candidate (model) axis with a toggle, a collapsed per-candidate grid (`t`), and a significance marker that is not fooled by small counts.
-- **Next-session goal:** Respond to review on the draft PR, then mark it ready. The user tests the TUI themselves and reports problems.
+- **Next-session goal:** Respond to review on PR #19. Do not merge without the user's go-ahead.
 
 ## Current state
 
-- **Status:** Implementation complete and verified. Committed; the PR is a draft (see the PR URL the opening session reported, or `gh pr list --head feat/prompts-axis-results-ui`).
+- **Status:** Implementation complete and verified. Committed and pushed; PR #19 (https://github.com/capyBearista/decisionbench/pull/19) is marked ready for review and CI passed. No issue is closed by it (open issues #1, #2, #12 are unrelated or umbrella).
 - **Repo / branch:** `/home/arjun/decisionbench`, branch `feat/prompts-axis-results-ui`, based on `main` (`37b906c`, PR #18's merge). Push with the explicit URL: `git push https://github.com/capyBearista/decisionbench.git feat/prompts-axis-results-ui` (SSH fails here).
 - **Last two code commits:** `b1dff62` collapsed summary and once-per-case sign test; `d31f613` docs for both.
 - **Verification (fresh, this session):** `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; `cargo test --locked`: lib 191, CLI 115, TUI 20, workflow 1, all passed. `show` on the real run `1793857680687-313790.jsonl` is byte-identical with and without the collapsed-grid changes. An independent review found 0 critical, 0 important, 2 minor (doc wording, fixed). The two doc-only fixes came after the last full test run.
-- **User checks:** the user looked at both Results views on that run and confirmed the numbers add up, and that `c` works. Not yet checked by the user: `[` `]`, scrolling in a short terminal, marking runs for compare, the hint line at narrow widths.
+- **User checks (manual, in a real terminal):** the user confirmed both Results views, `c`, `t` (also while scrolled), `[` `]`, marking and compare, scrolling with `h j k l` and the arrows, an unreadable run (error shown, `t` does nothing), the Setup prompt list (`Space`, `a`, `d`, `r`), the prompt folder row (`prompts_dir` is written to the config), the plan line, the cursor, long candidate names, and the Dataset bars and `Space`. The hint line does not wrap at low widths; the user accepts that.
 
 ## Decisions and constraints
 
@@ -41,8 +41,8 @@
 ## Remaining work
 
 1. Handle review comments on the PR: verify each against live code, fix, re-verify, push, reply per finding. Reply to Devin threads, never resolve them.
-2. Mark the PR ready when the user says so. Do not merge without the user's go-ahead.
-3. **Follow-ups, not started:** the Results hint line (about 110 columns) is cut off below that width; a per-group expand key if the global `t` is not enough; `summary()` calls `grouped()` only for its length and `matrix_lines` calls it again (trivial); issues #2 and #12 status.
+2. Do not merge without the user's go-ahead.
+3. **Follow-ups, not started:** the Results hint line (about 110 columns) is cut off, not wrapped, below that width (the user accepts this); a per-group expand key if the global `t` is not enough; `summary()` calls `grouped()` only for its length and `matrix_lines` calls it again (trivial); issues #2 and #12 status.
 
 ## Resume instructions
 
