@@ -132,18 +132,30 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<EffortRa
     }
 }
 
+/// Which part of the dataset a Case belongs to (ADR-0007). Prompt tuning runs on `Train`; `Holdout`
+/// is scored once, at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Split {
+    Train,
+    Holdout,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
     pub id: String,
     pub message: String,
     pub context: Option<String>,
+    pub split: Split,
     pub ok: Labels,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Summary {
     pub cases: usize,
+    /// Cases in `Split::Train` and in `Split::Holdout`.
+    pub splits: [usize; 2],
     /// Labelled Cases per Target Model, in `Target::ALL` order.
     pub labels: [usize; Target::ALL.len()],
 }
@@ -180,6 +192,8 @@ pub fn parse_cases(bytes: &[u8]) -> Result<Vec<Case>, String> {
 pub fn summarize(cases: &[Case]) -> Summary {
     Summary {
         cases: cases.len(),
+        splits: [Split::Train, Split::Holdout]
+            .map(|split| cases.iter().filter(|c| c.split == split).count()),
         labels: Target::ALL.map(|t| cases.iter().filter(|c| c.ok.get(t).is_some()).count()),
     }
 }
@@ -187,6 +201,11 @@ pub fn summarize(cases: &[Case]) -> Summary {
 impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "cases: {}", self.cases)?;
+        writeln!(
+            f,
+            "split: {} train, {} holdout",
+            self.splits[0], self.splits[1]
+        )?;
         for (target, labels) in Target::ALL.iter().zip(self.labels) {
             writeln!(
                 f,

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 const EXPECTED_COUNTS: &str = "\
 cases: 66
+split: 45 train, 21 holdout
 haiku labels: 66 (0 unscored)
 sonnet labels: 66 (0 unscored)
 opus labels: 66 (0 unscored)
@@ -81,7 +82,7 @@ fn inspect_explicit_path_prints_same_counts() {
     );
 }
 
-const VALID: &str = r#"{"id":"c001","message":"m","ok":{"sonnet":"low"}}"#;
+const VALID: &str = r#"{"id":"c001","message":"m","split":"train","ok":{"sonnet":"low"}}"#;
 
 fn dataset(cases: &str) -> String {
     format!("[{cases}]")
@@ -111,17 +112,29 @@ fn assert_rejected(name: &str, contents: &str, expected_fragment: &str) {
 fn accepts_single_levels_ranges_and_partial_labels() {
     let cases = [
         VALID,
-        r#"{"id":"c002","message":"n","context":"user: hi","ok":{"sonnet":"max","opus":"low-max"}}"#,
-        r#"{"id":"c003","message":"o","ok":{"opus":"medium-xhigh"}}"#,
-        r#"{"id":"c004","message":"p","ok":{"haiku":"low","fable":"max"}}"#,
+        r#"{"id":"c002","message":"n","context":"user: hi","split":"train","ok":{"sonnet":"max","opus":"low-max"}}"#,
+        r#"{"id":"c003","message":"o","split":"holdout","ok":{"opus":"medium-xhigh"}}"#,
+        r#"{"id":"c004","message":"p","split":"train","ok":{"haiku":"low","fable":"max"}}"#,
     ];
     let stdout = assert_accepted("valid.json", &dataset(&cases.join(",")));
     assert!(
         stdout.ends_with(
-            "cases: 4\nhaiku labels: 1 (3 unscored)\nsonnet labels: 2 (2 unscored)\nopus labels: 2 (2 unscored)\nfable labels: 1 (3 unscored)\n"
+            "cases: 4\nsplit: 3 train, 1 holdout\nhaiku labels: 1 (3 unscored)\nsonnet labels: 2 (2 unscored)\nopus labels: 2 (2 unscored)\nfable labels: 1 (3 unscored)\n"
         ),
         "{stdout}"
     );
+}
+
+#[test]
+fn rejects_missing_split() {
+    let bad = VALID.replace(r#""split":"train","#, "");
+    assert_rejected("nosplit.json", &dataset(&bad), "missing field `split`");
+}
+
+#[test]
+fn rejects_unknown_split() {
+    let bad = VALID.replace(r#""split":"train""#, r#""split":"test""#);
+    assert_rejected("badsplit.json", &dataset(&bad), "unknown variant `test`");
 }
 
 #[test]
@@ -277,12 +290,16 @@ fn rejects_empty_id() {
 fn rejects_null_target_label() {
     assert_rejected(
         "null_label.json",
-        &dataset(r#"{"id":"c001","message":"m","ok":{"sonnet":"low","opus":null}}"#),
+        &dataset(
+            r#"{"id":"c001","message":"m","split":"train","ok":{"sonnet":"low","opus":null}}"#,
+        ),
         "`null` label; omit the key to leave the target unscored",
     );
     assert_rejected(
         "null_sonnet.json",
-        &dataset(r#"{"id":"c001","message":"m","ok":{"sonnet":null,"opus":"low"}}"#),
+        &dataset(
+            r#"{"id":"c001","message":"m","split":"train","ok":{"sonnet":null,"opus":"low"}}"#,
+        ),
         "`null` label; omit the key to leave the target unscored",
     );
 }
@@ -313,8 +330,8 @@ fn assert_grade_rejected(predictions: &str, expected_fragment: &str) {
 #[test]
 fn grades_predictions_with_per_target_denominators() {
     let cases = dataset(
-        r#"{"id":"c001","message":"m","ok":{"sonnet":"medium-high"}},
-           {"id":"c002","message":"n","ok":{"opus":"max"}}"#,
+        r#"{"id":"c001","message":"m","split":"train","ok":{"sonnet":"medium-high"}},
+           {"id":"c002","message":"n","split":"train","ok":{"opus":"max"}}"#,
     );
     let predictions = r#"[
         {"case":"c001","target":"sonnet","effort":"high"},
@@ -372,7 +389,9 @@ fable: 0 predictions: 0 hit, 0 under, 0 over, 0 invalid, 0 unscored; accuracy 0/
 
 #[test]
 fn grades_haiku_and_fable_predictions() {
-    let cases = dataset(r#"{"id":"c001","message":"m","ok":{"haiku":"low","fable":"high-max"}}"#);
+    let cases = dataset(
+        r#"{"id":"c001","message":"m","split":"train","ok":{"haiku":"low","fable":"high-max"}}"#,
+    );
     let predictions = r#"[
         {"case":"c001","target":"haiku","effort":"low"},
         {"case":"c001","target":"fable","effort":"medium"},
@@ -1026,7 +1045,7 @@ fn one_request_per_case_asks_one_question_per_selected_target() {
     let dataset = temp_file(
         "paired-dataset.json",
         &dataset(
-            r#"{"id":"p1","message":"refactor it","context":"user: earlier\nassistant: ok","ok":{"sonnet":"low","opus":"medium"}}"#,
+            r#"{"id":"p1","message":"refactor it","context":"user: earlier\nassistant: ok","split":"train","ok":{"sonnet":"low","opus":"medium"}}"#,
         ),
     );
     let eval = openrouter_eval("paired", &stub);
@@ -1106,7 +1125,7 @@ fn each_target_is_graded_from_its_own_answer() {
     let dataset = temp_file(
         "own-answer-dataset.json",
         &dataset(
-            r#"{"id":"p1","message":"m","ok":{"haiku":"low","sonnet":"low","opus":"low","fable":"low"}}"#,
+            r#"{"id":"p1","message":"m","split":"train","ok":{"haiku":"low","sonnet":"low","opus":"low","fable":"low"}}"#,
         ),
     );
     let eval = openrouter_eval("own-answer", &stub);
@@ -1926,9 +1945,9 @@ fn selection_dataset(name: &str) -> PathBuf {
     temp_file(
         name,
         &dataset(
-            r#"{"id":"k1","message":"first","ok":{"sonnet":"low","opus":"low"}},
-               {"id":"k2","message":"second","ok":{"sonnet":"low","opus":"low"}},
-               {"id":"u1","message":"third","ok":{"sonnet":"low"}}"#,
+            r#"{"id":"k1","message":"first","split":"train","ok":{"sonnet":"low","opus":"low"}},
+               {"id":"k2","message":"second","split":"train","ok":{"sonnet":"low","opus":"low"}},
+               {"id":"u1","message":"third","split":"train","ok":{"sonnet":"low"}}"#,
         ),
     )
 }
@@ -3919,7 +3938,7 @@ fn a_sonnet_and_opus_run_asks_only_those_and_grades_each_from_its_own_label() {
     let dataset = temp_file(
         "sonnet-opus-dataset.json",
         &dataset(
-            r#"{"id":"p1","message":"m","ok":{"haiku":"low","sonnet":"low","opus":"medium","fable":"max"}}"#,
+            r#"{"id":"p1","message":"m","split":"train","ok":{"haiku":"low","sonnet":"low","opus":"medium","fable":"max"}}"#,
         ),
     );
     let eval = openrouter_eval("sonnet-opus", &stub);

@@ -200,8 +200,8 @@ mod tests {
 
     fn cases() -> Vec<Case> {
         parse_cases(
-            br#"[{"id":"a","message":"1","ok":{"sonnet":"low","opus":"low"}},
-                 {"id":"b","message":"2","ok":{"sonnet":"low"}}]"#,
+            br#"[{"id":"a","message":"1","split":"train","ok":{"sonnet":"low","opus":"low"}},
+                 {"id":"b","message":"2","split":"train","ok":{"sonnet":"low"}}]"#,
         )
         .unwrap()
     }

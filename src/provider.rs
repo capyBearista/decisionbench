@@ -680,7 +680,7 @@ mod tests {
     fn case(context: Option<&str>) -> Case {
         let context = context.map_or(String::new(), |c| format!(r#","context":"{c}""#));
         parse_cases(
-            format!(r#"[{{"id":"c1","message":"do it"{context},"ok":{{"opus":"low"}}}}]"#)
+            format!(r#"[{{"id":"c1","message":"do it"{context},"split":"train","ok":{{"opus":"low"}}}}]"#)
                 .as_bytes(),
         )
         .unwrap()
