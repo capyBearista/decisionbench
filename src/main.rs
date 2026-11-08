@@ -78,6 +78,19 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Score a saved run for prompt tuning: hit rate, fixed-answer floor and lift, as JSON (offline).
+    ///
+    /// Refuses a run that includes holdout Cases unless --allow-holdout is given, and a run whose
+    /// instructions quote a Case message.
+    Score {
+        file: PathBuf,
+        /// The dataset the run used; defaults to the bundled dataset.
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        /// Score a run that includes holdout Cases.
+        #[arg(long)]
+        allow_holdout: bool,
+    },
     /// Print the full report of a saved run file (offline).
     Show {
         file: PathBuf,
@@ -165,6 +178,11 @@ fn main() -> ExitCode {
             dataset,
             out,
         }),
+        Command::Score {
+            file,
+            dataset,
+            allow_holdout,
+        } => score(&file, dataset.as_deref(), allow_holdout).map(|()| ExitCode::SUCCESS),
         Command::Show { file, columns } => show(&file, columns).map(|()| ExitCode::SUCCESS),
         Command::Compare { files, columns } => compare(&files, columns).map(|()| ExitCode::SUCCESS),
         Command::Tui { config, out } => {
@@ -240,6 +258,17 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         RunState::Partial => ExitCode::from(130),
         RunState::Failed => ExitCode::FAILURE,
     })
+}
+
+fn score(path: &Path, dataset: Option<&Path>, allow_holdout: bool) -> Result<(), String> {
+    let run = load_run(path)?;
+    let (_, sha256, cases) = load_dataset(dataset)?;
+    let scored = decisionbench::score::score(&run, &sha256, &cases, allow_holdout)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&scored).map_err(|e| e.to_string())?
+    );
+    Ok(())
 }
 
 fn show(path: &Path, columns: Axis) -> Result<(), String> {

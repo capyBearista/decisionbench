@@ -507,6 +507,7 @@ impl Captured {
 }
 
 /// One scripted stub reply.
+#[derive(Clone)]
 struct Reply {
     status: u16,
     body: String,
@@ -4051,4 +4052,186 @@ fn a_sonnet_and_opus_run_asks_only_those_and_grades_each_from_its_own_label() {
         stderr(&out)
     );
     assert_eq!(eval.trials()[0]["targets"], json!(["sonnet", "opus"]));
+}
+
+// ---- score ----
+
+/// `t1`/`t2` train, `h1` holdout. Messages over 20 characters can leak into instructions.
+fn score_dataset(name: &str) -> PathBuf {
+    temp_file(
+        name,
+        &dataset(
+            r#"{"id":"t1","message":"refactor the sync engine carefully","split":"train","ok":{"sonnet":"low","opus":"high-max"}},
+               {"id":"t2","message":"short","split":"train","ok":{"sonnet":"medium","opus":"low-medium"}},
+               {"id":"h1","message":"held out","split":"holdout","ok":{"sonnet":"low","opus":"low"}}"#,
+        ),
+    )
+}
+
+/// Runs the `score_dataset` Cases `extra` selects, one reply per request, sonnet and opus only.
+fn scored_run(test: &str, replies: Vec<Reply>, extra: &[&str]) -> (Eval, PathBuf) {
+    let stub = scripted(replies);
+    let eval = Eval::new(test, &candidate_toml("a", "openrouter", "m-a"), &stub.url);
+    let dataset = score_dataset(&format!("{test}-dataset.json"));
+    let mut args = vec!["--candidate", "a", "--repetitions", "1", "--retries", "0"];
+    args.extend(["--target", "sonnet", "--target", "opus"]);
+    args.extend(["--dataset", dataset.to_str().unwrap()]);
+    args.extend(extra);
+    eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    (eval, dataset)
+}
+
+fn score(eval: &Eval, dataset: &Path, extra: &[&str]) -> Output {
+    let file = eval.file();
+    let mut args = vec!["score", file.to_str().unwrap()];
+    args.extend(["--dataset", dataset.to_str().unwrap()]);
+    args.extend(extra);
+    run(&args)
+}
+
+fn scored(out: &Output) -> Value {
+    serde_json::from_str(&stdout_of_success_ref(out)).expect("score prints JSON")
+}
+
+fn stdout_of_success_ref(out: &Output) -> String {
+    assert!(out.status.success(), "stderr: {}", stderr(out));
+    stdout(out)
+}
+
+fn two_cases(sonnet_opus: [(&str, &str); 2]) -> Vec<Reply> {
+    sonnet_opus
+        .map(|(s, o)| Reply::new(200, &reply_for(&[("sonnet", s), ("opus", o)])))
+        .to_vec()
+}
+
+#[test]
+fn score_reports_hit_rate_floor_and_lift_per_target_and_pooled() {
+    // t1: sonnet low (hit), opus medium (under high-max). t2: sonnet high (over medium), opus high
+    // (over low-medium). Sonnet 1/2, best constant 1/2. Opus 0/2, best constant 1/2.
+    let replies = two_cases([(r#""low""#, r#""medium""#), (r#""high""#, r#""high""#)]);
+    let (eval, dataset) = scored_run("score-basic", replies, &["--split", "train"]);
+    let out = scored(&score(&eval, &dataset, &[]));
+    let s = &out["scores"][0];
+    assert_eq!(
+        (s["candidate"].as_str(), s["instructions"].as_str()),
+        (Some("a"), Some("neutral"))
+    );
+    let (sonnet, opus, pooled) = (&s["targets"]["sonnet"], &s["targets"]["opus"], &s["pooled"]);
+    assert_eq!(
+        (
+            &sonnet["hit"],
+            &sonnet["under"],
+            &sonnet["over"],
+            &sonnet["invalid"]
+        ),
+        (&json!(1), &json!(0), &json!(1), &json!(0))
+    );
+    assert_eq!(
+        (&sonnet["hit_rate"], &sonnet["floor"], &sonnet["lift"]),
+        (&json!(0.5), &json!(0.5), &json!(0.0))
+    );
+    assert_eq!(
+        (&opus["hit_rate"], &opus["floor"], &opus["lift"]),
+        (&json!(0.0), &json!(0.5), &json!(-0.5))
+    );
+    // Pooled: 1 hit of 4; floor is the best constants' hits (1 + 1) over the same 4 rows.
+    assert_eq!(
+        (&pooled["hit_rate"], &pooled["floor"], &pooled["lift"]),
+        (&json!(0.25), &json!(0.5), &json!(-0.25))
+    );
+    assert_eq!(pooled["coverage"], 1.0);
+    assert!(s["targets"].get("haiku").is_none(), "only asked targets");
+}
+
+#[test]
+fn score_counts_invalid_as_a_miss_and_leaves_provider_failures_out() {
+    // t1: sonnet invalid (null), opus high (hit). t2: HTTP 500, so no valid answer at all.
+    let replies = vec![
+        Reply::new(
+            200,
+            &reply_for(&[("sonnet", "null"), ("opus", r#""high""#)]),
+        ),
+        Reply::new(500, "{}"),
+    ];
+    let (eval, dataset) = scored_run("score-failures", replies, &["--split", "train"]);
+    let out = scored(&score(&eval, &dataset, &[]));
+    let (sonnet, opus) = (
+        &out["scores"][0]["targets"]["sonnet"],
+        &out["scores"][0]["targets"]["opus"],
+    );
+    assert_eq!(
+        (&sonnet["invalid"], &sonnet["failed"], &sonnet["coverage"]),
+        (&json!(1), &json!(1), &json!(0.5))
+    );
+    // One row (t1), a miss; the best constant (low) hits it.
+    assert_eq!(
+        (&sonnet["hit_rate"], &sonnet["floor"], &sonnet["lift"]),
+        (&json!(0.0), &json!(1.0), &json!(-1.0))
+    );
+    assert_eq!(
+        (&opus["hit_rate"], &opus["failed"], &opus["lift"]),
+        (&json!(1.0), &json!(1), &json!(0.0))
+    );
+}
+
+#[test]
+fn score_refuses_holdout_unless_allowed() {
+    let replies = vec![
+        Reply::new(
+            200,
+            &reply_for(&[("sonnet", r#""low""#), ("opus", r#""low""#)])
+        );
+        3
+    ];
+    let (eval, dataset) = scored_run("score-holdout", replies, &[]);
+    let out = score(&eval, &dataset, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("holdout case h1"), "{}", stderr(&out));
+    assert!(out.stdout.is_empty());
+    scored(&score(&eval, &dataset, &["--allow-holdout"]));
+}
+
+#[test]
+fn score_refuses_a_different_dataset_revision() {
+    let replies = two_cases([(r#""low""#, r#""high""#), (r#""low""#, r#""high""#)]);
+    let (eval, _) = scored_run("score-revision", replies, &["--split", "train"]);
+    let other = temp_file("score-other.json", &dataset(VALID));
+    let out = score(&eval, &other, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("dataset revision"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn score_refuses_instructions_that_quote_a_case_message() {
+    let dir = fresh_dir("score-leak-prompts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let leaky = dir.join("leaky.md");
+    // Different case and spacing still count as the same message.
+    std::fs::write(
+        &leaky,
+        custom().replace("low desc", "e.g. Refactor  the SYNC engine carefully"),
+    )
+    .unwrap();
+    let replies = two_cases([(r#""low""#, r#""high""#), (r#""low""#, r#""high""#)]);
+    let (eval, dataset) = scored_run(
+        "score-leak",
+        replies,
+        &[
+            "--split",
+            "train",
+            "--instructions",
+            leaky.to_str().unwrap(),
+        ],
+    );
+    let out = score(&eval, &dataset, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("quotes the message of case t1"),
+        "{}",
+        stderr(&out)
+    );
 }

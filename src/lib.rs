@@ -8,6 +8,7 @@ pub mod instructions;
 pub mod provider;
 pub mod report;
 pub mod run;
+pub mod score;
 pub mod tui;
 
 /// Lowercase hex SHA-256 of `bytes`.
