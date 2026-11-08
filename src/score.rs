@@ -3,7 +3,8 @@
 //!
 //! This is the only place a number meant to be optimised is computed, and `show` and `compare` never
 //! print it (SPEC §6). It refuses to read holdout results unless asked, and refuses a Run whose
-//! instructions quote a Case message, so a tuned prompt cannot memorise the dataset.
+//! instructions quote a whole Case message. That is a tripwire for copying, not proof against
+//! memorisation: a fragment or a paraphrase passes, and only the holdout shows overfitting.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -91,17 +92,32 @@ pub fn score(
         ));
     }
     let by_id: HashMap<&str, &Case> = cases.iter().map(|c| (c.id.as_str(), c)).collect();
-    for trial in &run.trials {
-        let case = by_id.get(trial.case_id.as_str()).ok_or_else(|| {
-            format!(
-                "the run has a trial for case {}, not in the dataset",
-                trial.case_id
-            )
-        })?;
+    // The selection, not the recorded Trials: a run stopped before its holdout Trials still selected them.
+    for id in &run.manifest.cases {
+        let case = by_id
+            .get(id.as_str())
+            .ok_or_else(|| format!("the run selects case {id}, not in the dataset"))?;
         if case.split == Split::Holdout && !allow_holdout {
             return Err(format!(
-                "the run includes holdout case {}; pass --allow-holdout to score it (once, at the end of tuning)",
-                case.id
+                "the run includes holdout case {id}; pass --allow-holdout to score it (once, at the end of tuning)"
+            ));
+        }
+    }
+    for trial in &run.trials {
+        if !run.manifest.cases.contains(&trial.case_id) {
+            return Err(format!(
+                "the run has a trial for case {}, which the run did not select",
+                trial.case_id
+            ));
+        }
+        if let Some(t) = trial
+            .targets
+            .iter()
+            .find(|t| !run.manifest.targets.contains(t))
+        {
+            return Err(format!(
+                "trial {} asks about target {t}, which the run did not select",
+                trial.seq
             ));
         }
     }
@@ -134,13 +150,19 @@ pub fn score(
         }
     }
     for trial in &run.trials {
+        let key = (
+            trial.candidate.as_str(),
+            trial.instructions.name.as_str(),
+            trial.instructions.sha256.as_str(),
+        );
         groups
-            .entry((
-                trial.candidate.as_str(),
-                trial.instructions.name.as_str(),
-                trial.instructions.sha256.as_str(),
-            ))
-            .or_default()
+            .get_mut(&key)
+            .ok_or_else(|| {
+                format!(
+                    "trial {} is for candidate {} with instructions {}, which the run did not select",
+                    trial.seq, key.0, key.1
+                )
+            })?
             .push(trial);
     }
     let scores = groups

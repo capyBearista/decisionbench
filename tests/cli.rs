@@ -4434,3 +4434,122 @@ fn score_lists_a_selected_variant_that_has_no_recorded_trials() {
     );
     assert_eq!(out["recorded_trials"], 1);
 }
+
+/// Applies `edit` to every trial line of the run's evidence file.
+fn edit_trials(eval: &Eval, edit: impl Fn(&str) -> String) {
+    let file = eval.file();
+    let lines: Vec<String> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .map(|l| {
+            if l.contains(r#""type":"trial""#) {
+                edit(l)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn score_refuses_a_run_that_selected_holdout_cases_even_with_no_holdout_trial_recorded() {
+    let replies = vec![
+        Reply::new(
+            200,
+            &reply_for(&[("sonnet", r#""low""#), ("opus", r#""low""#)])
+        );
+        3
+    ];
+    let (eval, dataset) = scored_run("score-holdout-unrecorded", replies, &[]);
+    // As if the run had stopped before h1 started.
+    edit_trials(&eval, |l| {
+        if l.contains(r#""case_id":"h1""#) {
+            String::new()
+        } else {
+            l.to_string()
+        }
+    });
+    let out = score(&eval, &dataset, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("holdout case h1"), "{}", stderr(&out));
+}
+
+#[test]
+fn score_prints_evidence_warnings_to_stderr_and_keeps_stdout_json() {
+    let replies = two_cases([(r#""low""#, r#""high""#), (r#""low""#, r#""high""#)]);
+    let (eval, dataset) = scored_run("score-warnings", replies, &["--split", "train"]);
+    let file = eval.file();
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text + "{\"type\":\"tri").unwrap();
+    let out = score(&eval, &dataset, &[]);
+    scored(&out);
+    assert!(
+        stderr(&out).contains("warning: ignoring unreadable last line"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn score_refuses_a_trial_for_a_variant_or_target_the_run_did_not_select() {
+    let edits: [(&str, &str, &str); 3] = [
+        (r#""candidate":"a""#, r#""candidate":"zz""#, "candidate zz"),
+        (
+            r#""name":"neutral""#,
+            r#""name":"other""#,
+            "instructions other",
+        ),
+        (
+            r#""targets":["sonnet","opus"]"#,
+            r#""targets":["sonnet","opus","fable"]"#,
+            "target fable",
+        ),
+    ];
+    for (i, (from, to, expected)) in edits.into_iter().enumerate() {
+        let replies = two_cases([(r#""low""#, r#""high""#), (r#""low""#, r#""high""#)]);
+        let (eval, dataset) = scored_run(
+            &format!("score-unselected-{i}"),
+            replies,
+            &["--split", "train"],
+        );
+        let before = std::fs::read_to_string(eval.file()).unwrap();
+        edit_trials(&eval, |l| l.replacen(from, to, 1));
+        assert_ne!(
+            before,
+            std::fs::read_to_string(eval.file()).unwrap(),
+            "{from}"
+        );
+        let out = score(&eval, &dataset, &[]);
+        assert_eq!(out.status.code(), Some(1), "{from}: {}", stderr(&out));
+        assert!(stderr(&out).contains(expected), "{}", stderr(&out));
+    }
+}
+
+#[test]
+fn a_split_with_no_cases_says_so() {
+    let stub = scripted(vec![]);
+    let eval = Eval::new(
+        "split-empty",
+        &candidate_toml("a", "openrouter", "m"),
+        &stub.url,
+    );
+    let data = temp_file("split-empty-dataset.json", &dataset(VALID));
+    let out = eval.run(
+        &[
+            "--candidate",
+            "a",
+            "--split",
+            "holdout",
+            "--dataset",
+            data.to_str().unwrap(),
+        ],
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("has no Case in split holdout"),
+        "{}",
+        stderr(&out)
+    );
+}

@@ -262,6 +262,10 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
 
 fn score(path: &Path, dataset: Option<&Path>, allow_holdout: bool) -> Result<(), String> {
     let run = load_run(path)?;
+    // stderr, so stdout stays the JSON that tools read.
+    for warning in &run.warnings {
+        eprintln!("warning: {warning}");
+    }
     let (_, sha256, cases) = load_dataset(dataset)?;
     let scored = decisionbench::score::score(&run, &sha256, &cases, allow_holdout)?;
     println!(

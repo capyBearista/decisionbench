@@ -302,6 +302,12 @@ pub fn prepare(args: &RunArgs) -> Result<Prepared, String> {
     let (dataset_name, dataset_sha256, mut cases) = load_dataset(args.dataset.as_deref())?;
     if let Some(split) = args.split {
         cases.retain(|c| c.split == split);
+        if cases.is_empty() {
+            return Err(format!(
+                "{dataset_name} has no Case in split {}",
+                split.name()
+            ));
+        }
     }
     reject_duplicates("case", args.cases.iter().cloned())?;
     if let Some(id) = args
