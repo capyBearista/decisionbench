@@ -1,52 +1,51 @@
-# HANDOFF — feat/prompts-axis-results-ui: prompts and models as comparison axes, collapsed grid, sign test
+# HANDOFF — first-release verification (#12)
 
 ## Objective
 
-- **Original request:** After PR #18 merged, the user wanted the Results screen and `compare` to show prompt and model efficacy readably: several prompts per run, a prompt folder in Setup, a matrix with paired deltas and a pooled row, a candidate (model) axis with a toggle, a collapsed per-candidate grid (`t`), and a significance marker that is not fooled by small counts.
-- **Next-session goal:** Respond to review on PR #19. Do not merge without the user's go-ahead.
+- **Goal:** finish #12 (verify and document the first standalone release), under the umbrella spec #2.
+- **Plan:** `/home/arjun/.claude/plans/plan-this-sequence-hint-nifty-reef.md` (local to the planning machine; its content is summarised below).
 
 ## Current state
 
-- **Status:** Implementation complete and verified. Committed and pushed; PR #19 (https://github.com/capyBearista/decisionbench/pull/19) is marked ready for review and CI passed. No issue is closed by it (open issues #1, #2, #12 are unrelated or umbrella).
-- **Repo / branch:** `/home/arjun/decisionbench`, branch `feat/prompts-axis-results-ui`, based on `main` (`37b906c`, PR #18's merge). Push with the explicit URL: `git push https://github.com/capyBearista/decisionbench.git feat/prompts-axis-results-ui` (SSH fails here).
-- **Last two code commits:** `b1dff62` collapsed summary and once-per-case sign test; `d31f613` docs for both.
-- **Verification (fresh, this session):** `cargo fmt --check` clean; `cargo clippy --locked --all-targets -- -D warnings` clean; `cargo test --locked`: lib 192, CLI 115, TUI 20, workflow 1, all passed (rerun after the Devin fix). `show` on the real run `1793857680687-313790.jsonl` is byte-identical with and without the collapsed-grid changes. An independent review found 0 critical, 0 important, 2 minor (doc wording, fixed). The two doc-only fixes came after the last full test run.
-- **User checks (manual, in a real terminal):** the user confirmed both Results views, `c`, `t` (also while scrolled), `[` `]`, marking and compare, scrolling with `h j k l` and the arrows, an unreadable run (error shown, `t` does nothing), the Setup prompt list (`Space`, `a`, `d`, `r`), the prompt folder row (`prompts_dir` is written to the config), the plan line, the cursor, long candidate names, and the Dataset bars and `Space`. The hint line does not wrap at low widths; the user accepts that.
+- **Done:** PR #20 (wrap the TUI key hints between hints) merged into `main` as `913f15f`, CI and Devin Review green. The remote branch `fix/tui-hint-wrap` was kept.
+- **In progress:** branch `docs/first-release` (README rewrite, SPEC and ADR-0001 text, `rust-version = "1.89"`, this file). Not yet pushed or reviewed when this was written.
+- **Not started:** gap tests (step 3), issue edits, release record, clean-system run, spec review (step 4).
+- **Open issues:** #12 (this work), #2 (umbrella spec; its body is stale), #1 (deferred evidence export for external tools; its body still names a private project and must be rewritten generically).
 
-## Decisions and constraints
+## Decisions and constraints (settled, do not reopen)
 
-- **Matrix axes:** `--columns auto|prompt|candidate` on `show` and `compare`. Auto uses prompts when there are several distinct (name, hash) prompts across the runs, else candidates when there are several candidate names, else prompts. TUI `c` swaps the axis and rebuilds both panels; the Full report panel always equals the CLI text.
-- **Collapsed by default:** the TUI Summary opens with targets pooled (one row per candidate or prompt, target column `all`). `t` expands and collapses. TUI-only; `show` and `compare` print the full table.
-- **Significance:** `~` = exact two-sided sign test on the cases that changed against the baseline; p < 0.05 is significant. Repetitions collapse per case. A pooled cell (collapsed row or pooled row) adds a case's net change across targets and counts it once per row label (candidate, or prompt on the candidate axis), because one response answers every target. `+g -l` still counts paired trials. The 5% line is a convention.
-- **Pooled row in the collapsed view** shows only when more than one row is displayed.
-- **Settled, do not reopen:** prompts as columns with paired delta; pooled row over rows present in every column; TUI-only collapsed view defaulting to collapsed; sign test in this branch; no evidence schema change (stays 4).
+- A private project must not be named in this public repo or its issues. Remove it from #1, #2 and #12 and keep #1 as a generic "versioned evidence export for external tools" issue. Past commits and merged PR text still hold the name and are not rewritten.
+- Edit the GitHub issues directly (`gh api -X PATCH repos/capyBearista/decisionbench/issues/<n>`; `gh issue edit` fails on the deprecated Projects-classic field), then show the user the final text.
+- Hint wrapping is by whole hints (` · ` separators). The Candidates form hint is drawn inside its popup and is not wrapped.
+- Matrix, sign-test and evidence decisions from PR #19 stand (ADR-0006, SPEC §6–§7). Evidence schema stays 4.
 
-## Work completed
+## Evidence found while auditing #12
 
-- Engine (`src/report.rs`): axis-generic `Matrix::from_runs`, `Axis`, paired `Delta`, `sign_test_p` (log space), shared `pool()`, `grouped()`/`grouped_table()`, `Cell.case_nets`.
-- CLI (`src/main.rs`): `--columns` on `show` and `compare`; exit 2 on a bad value.
-- TUI: Setup prompt list and folder (`a` `d` `r`), plan line; Dataset effort bars; Results Summary and Full panels, mark order, `c` axis, `t` collapse, wrapped prose.
-- Config: optional top-level `prompts_dir`.
-- Docs: README, SPEC, ADR-0006 (with addenda), ADR-0004 pointer, GLOSSARY.
-- Devin review (PR #19): a single partial or failed run's summary hid its state and recorded-trial count. Fixed: `report::incomplete_note` feeds a warning line at the top of a single run's summary; the `moving_run()` test fixture is now complete and partial cases build their own.
-- Fixed this session: stale test `t_at_the_bottom_of_a_narrow_pane_keeps_the_last_row_in_view` (it asserted a `pooled =` note that a one-candidate collapsed view cannot show; it now checks that `k` scrolls one row up); stale doc passages (old noise rule, double-counting caveat).
-
-## Pitfalls
-
-- `gh pr edit` fails on the deprecated Projects-classic field; use `gh api -X PATCH repos/capyBearista/decisionbench/pulls/<n>`.
-- Subagent shells may block `grep`; `GLOSSARY.md` edits are blocked for subagents (edit in the main session).
-- The CLI test `transport_failure_exits_3_and_saves_evidence` uses a local server (closed ports hang in this sandbox).
-- The user's pasted tables sometimes lose the trailing `│`; that is a paste artefact.
-- Pooled `~` in `show`/`compare` text can differ from older commits because of the once-per-case rule; layout is unchanged.
+- `cargo fmt --check`, `clippy --locked --all-targets -D warnings` and `cargo test --locked` pass (194 lib, 115 CLI, 20 TUI, 1 workflow after #20).
+- Nine saved runs in `~/.local/share/decisionbench/runs` (all `complete` for schema 4). Four-target requests were answered over OpenRouter (`baseten/joey-1`, `perplexity/pplx-decider-flash-v1.2`) and Zen (`jev-1.13-free`); 120 of 120 Zen answers in the latest Zen run had a valid effort. The saved OpenRouter key appears in none of the files (spot check).
+- Dependencies declare Rust 1.89 as the highest minimum; only 1.99.1 was tested.
 
 ## Remaining work
 
-1. Handle review comments on the PR: verify each against live code, fix, re-verify, push, reply per finding. Reply to Devin threads, never resolve them.
-2. Do not merge without the user's go-ahead.
-3. **Follow-ups, not started:** the Results hint line (about 110 columns) is cut off, not wrapped, below that width (the user accepts this); a per-group expand key if the global `t` is not enough; `summary()` calls `grouped()` only for its length and `matrix_lines` calls it again (trivial); issues #2 and #12 status.
+1. Review and merge `docs/first-release`; reply to Devin threads, never resolve them.
+2. Gap tests, only where the existing tests prove a gap: a Sonnet-only and an Opus-only run end to end, cost unknown with a priced Candidate but no usage counters (CLI level), and that stdout and stderr of a keyed run never contain the key. First re-read `tests/cli.rs`; names alone were matched in the audit.
+3. Edit #1, #2 and #12 (see above); tick #12's boxes only with evidence.
+4. Post the release record as a comment on #12: date, commit SHA, Rust version, per-provider smoke result (ask before spending a fresh request), test counts, and what was not done.
+5. Clean-system journey in a throwaway `HOME` and `XDG_*` (clone, `cargo build --locked --release`, `--help`, `dataset inspect`, `grade`, a stub-based run, `tui` start and quit); say it is weaker evidence than a fresh machine.
+6. Spec review of the merged result with the code-reviewer agent; fix confirmed findings. Do not publish a release without approval.
+7. Optional follow-ups (ask first): `grouped()` is called twice in `summary()` and `matrix_lines` (trivial); a per-group expand key.
+
+## Pitfalls
+
+- SSH works: `git push -u origin <branch>` over SSH succeeded on 2026-11-08. The old HTTPS workaround is no longer needed.
+- Run commit, push and reply as separate commands; the auto-mode classifier has blocked combined ones.
+- Reply to Devin threads; never resolve them (standing rule). Repeat `closes` before each issue number in PR bodies.
+- Subagent shells may block `grep`; `GLOSSARY.md` edits are blocked for subagents (edit in the main session).
+- The CLI test `transport_failure_exits_3_and_saves_evidence` uses a local server (closed ports hang in this sandbox).
+- A heredoc with `<<'E'` keeps backslashes: do not escape backticks in a `gh pr create --body`.
+- Do not commit `.env` or print keys.
 
 ## Resume instructions
 
-- **Start here:** `cd /home/arjun/decisionbench && git status -sb && gh pr list --head feat/prompts-axis-results-ui`.
-- **Read first:** `docs/adr/0006-prompts-as-a-comparison-axis.md`, `docs/SPEC.md` §6–§7, `src/report.rs` (`pool`, `grouped`, `Delta`, `sign_test_p`), `src/tui/results.rs` (`View`, `toggle_targets`, `summary`).
-- **Avoid repeating:** the sign-test choice, the candidate-axis design, and weakening tests to pass. Do not commit `.env`, print keys, or resolve Devin threads.
+- **Start here:** `cd /home/arjun/decisionbench && git status -sb && gh issue list --state open && gh pr list`.
+- **Read first:** `docs/SPEC.md` (§5 evidence, §6–§7 reporting and UI), `README.md`, `docs/adr/0006-prompts-as-a-comparison-axis.md`, then issue #12.

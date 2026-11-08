@@ -2,7 +2,7 @@
 
 **Status:** Approved (2026-11-03)  
 **Scope:** Initial standalone release  
-**Sources:** Agreed design interview; [effortless source benchmark](https://github.com/capyBearista/effortless/blob/99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c/bench/judge-cases.json); [effortless judge implementation](https://github.com/capyBearista/effortless/blob/main/hooks/register.tsx); [deferred Valbench integration](https://github.com/capyBearista/decisionbench/issues/1)  
+**Sources:** Agreed design interview; [effortless source benchmark](https://github.com/capyBearista/effortless/blob/99c03f222d9a71dd1e0d2fa5824eb1cb59bbb20c/bench/judge-cases.json); [effortless judge implementation](https://github.com/capyBearista/effortless/blob/main/hooks/register.tsx); [deferred evidence export](https://github.com/capyBearista/decisionbench/issues/1)  
 **Domain terminology:** [GLOSSARY.md](../GLOSSARY.md)  
 **Architecture decisions:** [ADR-0001](adr/0001-standalone-engine.md), [ADR-0002](adr/0002-raw-model-relative-evaluation.md), [ADR-0003](adr/0003-owned-per-target-effort-ranges.md), [ADR-0004](adr/0004-judge-instructions-axis.md), [ADR-0005](adr/0005-one-request-per-case-four-targets.md), [ADR-0006](adr/0006-prompts-as-a-comparison-axis.md)
 
@@ -42,7 +42,7 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 18. As a user, I can review earlier runs and compare them with prompts side by side and with any dataset, model-route, or evaluation difference stated.
 19. As a user, I can use the TUI to manage candidates, browse data, run benchmarks, review results, configure rates, and compare history.
 20. As an automation caller, I can perform equivalent benchmark execution and read structured results via the headless CLI and versioned local files.
-21. As a future Valbench integrator, I can consume an export with verifiable provenance without importing Rust internals or fabricating Harbor trials.
+21. As a future integrator of another tool, I can consume an export with verifiable provenance without importing Rust internals.
 
 ## Implementation decisions
 
@@ -90,9 +90,9 @@ Start with **OpenCode Zen** and **OpenRouter Decisions API**. Support multiple m
 
 ### 4a. Provider routes and Judge Instructions (checked 2026-11-03)
 
-- Both routes document the same body: `{"model", "state", "questions"}`. decisionbench sends `state` as `{"task", "recent_conversation" (only when the Case has context), "next_message"}` and one `choice` question per selected target, named `effort_<target>` (`effort_haiku`, `effort_sonnet`, `effort_opus`, `effort_fable`). Each question is `{"type": "choice", "instructions", "criteria"}`, where `criteria` maps each effort name to its description; `task`, the instructions and the criteria come from the selected Judge Instructions. `state` is free-form, so `target_model`, `current_effort` and `current_model` are **omitted**, not nulled. OpenRouter accepted a single-question request of this kind live; the four-question body is the shape effortless uses and has not been checked here against every route (effortless itself asks only haiku, sonnet and opus today).
+- Both routes document the same body: `{"model", "state", "questions"}`. decisionbench sends `state` as `{"task", "recent_conversation" (only when the Case has context), "next_message"}` and one `choice` question per selected target, named `effort_<target>` (`effort_haiku`, `effort_sonnet`, `effort_opus`, `effort_fable`). Each question is `{"type": "choice", "instructions", "criteria"}`, where `criteria` maps each effort name to its description; `task`, the instructions and the criteria come from the selected Judge Instructions. `state` is free-form, so `target_model`, `current_effort` and `current_model` are **omitted**, not nulled. OpenRouter accepted a single-question request of this kind live, and both routes have since answered the four-question body for the models listed in the README; other models may restrict it.
 - **OpenRouter** (`POST https://openrouter.ai/api/alpha/decisions`, `Authorization: Bearer` with `OPENROUTER_API_KEY` or the saved `openrouter` key, required). A 200 reply is `{"id", "model", "provider", "answers": {"effort_<target>": {"choice", "confidence", "probabilities"}, …}, "usage": {"input_tokens", "output_tokens", "cost"}}`. The reply's `model` can be a dated revision of the requested one (`typesafe/jev-1.13` answered as `typesafe/jev-1.13-20260917`) and `provider` names the upstream host; both are kept as evidence. Errors are `{"error": {"code", "message"}}`.
-- **OpenCode Zen** (`POST https://opencode.ai/inference/systemone/v1/systemone`; the older `/zen/v1/systemone` shares its quota). Free models (`jev-1.13-free`) accept requests without a key; paid models answer `401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}` without `OPENCODE_API_KEY` or a saved `zen` key. Errors are `{"type": "error", "error": {"type", "message"}}`; a used-up free quota is `429 FreeUsageLimitError` with `Retry-After`. **Not yet observed:** a successful Zen reply, and so whether Zen accepts a `state` without `current_effort` (only quota and auth errors have come back so far). The reply is assumed to match OpenRouter's `answers` shape; any other shape grades as invalid for a labelled target, and its raw reply is kept.
+- **OpenCode Zen** (`POST https://opencode.ai/inference/systemone/v1/systemone`; the older `/zen/v1/systemone` shares its quota). Free models (`jev-1.13-free`) accept requests without a key; paid models answer `401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}` without `OPENCODE_API_KEY` or a saved `zen` key. Errors are `{"type": "error", "error": {"type", "message"}}`; a used-up free quota is `429 FreeUsageLimitError` with `Retry-After`. **Observed (2026-11-04 to 2026-11-05):** `jev-1.13-free` answered four-question requests without `current_effort`, with the OpenRouter `answers` shape (`choice` per `effort_<target>`) and `usage` carrying `input_tokens`, `output_tokens`, `cost` and an `opencode` object. Any other shape grades as invalid for a labelled target, and its raw reply is kept.
 - Individual models on a route can restrict the `state` shape and the question types they accept. `respan/span-01-lite:free` on OpenRouter (checked 2026-11-04) accepts `state` only as a string or an `input`/`output` message object and answers only yes/no questions, so it cannot run this benchmark; its 400 replies are recorded as provider errors like any other.
 - **Judge Instructions** are Markdown files (`prompts/<name>.md`): an intro (sent as `state.task`), then one `## <target>` section per Target Model in the order `haiku`, `sonnet`, `opus`, `fable`. Each section is an instructions paragraph followed by exactly five lines, `- low: …`, `- medium: …`, `- high: …`, `- xhigh: …`, `- max: …`, in that order. The parser is strict: a missing, extra, duplicated, misordered or empty part is rejected. A file may leave a target out, but asking about a target without a section is a usage error before anything is sent. Sets are selected per evaluation, recorded by name, SHA-256 and full text, and never edited through the CLI or TUI ([ADR-0004](adr/0004-judge-instructions-axis.md), format amended by [ADR-0005](adr/0005-one-request-per-case-four-targets.md)). A Run may use several sets, with distinct names: `--instructions` is repeatable, no flag means the bundled `neutral`, and any given path replaces it. The TUI also lists the `*.md` files of the optional config key `prompts_dir` ([ADR-0006](adr/0006-prompts-as-a-comparison-axis.md)).
 - Two sets ship with the repository; only `neutral` is bundled into the binary. `neutral` (the default) uses the same neutral criteria for every model and carries no effortless policy rules. `effortless` is the file `prompts/effortless.md`, selected with `--instructions prompts/effortless.md`; it mirrors effortless's task text, effort rules and per-model levels, plus a **drafted Fable section** that has not been measured.
@@ -164,9 +164,9 @@ Tests should cover:
 - Executing coding tasks or grading actual Claude task success.
 - Embedding into effortless, Claude Code, OpenCode V2, or another agent harness.
 - Reproducing effortless production fallback/retention logic inside the primary accuracy benchmark.
-- Automatic ground-truth generation or one-step Sonnet/Opus label conversion.
+- Automatic ground-truth generation or one-step label conversion between target models.
 - Direct TypeSafe and SubQ providers at launch; generic chat-completions provider adapters.
-- HTTP server, REST API, permanent background service, Docker packaging, and Valbench adapter/import implementation (see [Issue #1](https://github.com/capyBearista/decisionbench/issues/1)).
+- HTTP server, REST API, permanent background service, Docker packaging, and an export contract or adapter for other tools (see [Issue #1](https://github.com/capyBearista/decisionbench/issues/1)).
 - Cloud-hosted dashboard, browser frontend, user accounts, cloud synchronization, automatic price scraping, and a generalized benchmark marketplace.
 - A full ground-truth editing/reviewing TUI or a plugin loading subsystem before a concrete need emerges.
 
@@ -175,7 +175,7 @@ Tests should cover:
 1. **Documentation and contract review:** approved domain vocabulary, architecture, and this spec.
 2. **Rust foundation and offline case inspection:** a clean CLI build and deterministic dataset import/validation without network.
 3. **First tracer bullet:** choose one candidate and one case, issue one real Decisions request, preserve raw evidence, grade and read it back.
-4. **Second provider and paired targets:** validate distinct transport routes and Sonnet/Opus target switching.
+4. **Second provider and paired targets:** validate distinct transport routes and target switching.
 5. **Repetitions and resilience:** configurable batches, attempts/retries, cancellation and durable partial evidence.
 6. **Reporting and manual cost:** trustworthy per-target metrics, history, missing-data semantics.
 7. **Ratatui workflow and release verification:** full user path, CLI parity, offline tests and documented installation.
@@ -184,11 +184,11 @@ Each implementation slice should be **independently demonstrable end to end**, n
 
 ## Outstanding verification tasks (not permission to guess)
 
-- Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field. **Settled for OpenRouter** in #6/#7 (see §4a); **still open for Zen** until a successful reply is observed.
-- Verify effort choice options and response confidence/usage fields per route. **Settled for OpenRouter** (see §4a); **still open for Zen**.
-- Settle exact CLI flags, TUI keybindings, transport error taxonomy, and evidence schema field names during the relevant small implementation slices, while preserving the above domain-level invariants. **Settled for runs** in #8 (see §5 and the README); TUI keybindings remain open.
+- Verify per-provider Decisions request/response schemas and how to omit or null the old `current_effort` state field. **Settled for OpenRouter** in #6/#7 and **for Zen** by live runs (see §4a).
+- Verify effort choice options and response confidence/usage fields per route. **Settled for both routes** (see §4a); other models on a route may differ.
+- Settle exact CLI flags, TUI keybindings, transport error taxonomy, and evidence schema field names during the relevant small implementation slices, while preserving the above domain-level invariants. **Settled for runs** in #8 (see §5 and the README); TUI keybindings are settled and documented in the README.
 
 ## Related work
 
 - [effortless Issue #4: model-relative effort policy](https://github.com/capyBearista/effortless/issues/4) is a separate production-plugin concern.
-- [decisionbench Issue #1: eventual Valbench integration](https://github.com/capyBearista/decisionbench/issues/1) is intentionally deferred.
+- [decisionbench Issue #1: versioned evidence export for external tools](https://github.com/capyBearista/decisionbench/issues/1) is intentionally deferred.
