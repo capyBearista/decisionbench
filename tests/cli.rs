@@ -3892,3 +3892,60 @@ fn tui_without_a_terminal_exits_with_a_clear_error() {
         stderr(&out)
     );
 }
+
+#[test]
+fn a_priced_candidate_whose_reply_has_no_usage_counts_cost_as_unknown() {
+    let stub = stub(200, &reply("\"low\""));
+    let config = format!(
+        "{}[candidate.price]\ninput_per_million = 0.04\noutput_per_million = 0.08\n",
+        candidate_toml("jev-openrouter", "openrouter", "typesafe/jev-1.13")
+    );
+    let eval = Eval::new("no-usage", &config, &stub.url);
+    let out = eval.run(&C002_OPUS, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("  cost: 1 attempt unknown (no usage)\n"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_sonnet_and_opus_run_asks_only_those_and_grades_each_from_its_own_label() {
+    let stub = stub(
+        200,
+        &reply_for(&[("sonnet", r#""low""#), ("opus", r#""high""#)]),
+    );
+    let dataset = temp_file(
+        "sonnet-opus-dataset.json",
+        &dataset(
+            r#"{"id":"p1","message":"m","ok":{"haiku":"low","sonnet":"low","opus":"medium","fable":"max"}}"#,
+        ),
+    );
+    let eval = openrouter_eval("sonnet-opus", &stub);
+    let out = eval.run(
+        &[
+            "--candidate",
+            "jev-openrouter",
+            "--repetitions",
+            "1",
+            "--target",
+            "sonnet",
+            "--target",
+            "opus",
+            "--dataset",
+            dataset.to_str().unwrap(),
+        ],
+        &[("OPENROUTER_API_KEY", TEST_KEY)],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let body = stub.next().body;
+    let questions: Vec<&String> = body["questions"].as_object().unwrap().keys().collect();
+    assert_eq!(questions, ["effort_sonnet", "effort_opus"]);
+    assert!(
+        stderr(&out).contains("#1: sonnet hit · opus over ("),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(eval.trials()[0]["targets"], json!(["sonnet", "opus"]));
+}
