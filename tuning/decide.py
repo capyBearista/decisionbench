@@ -10,6 +10,7 @@ SCORE_* is the JSON printed by `decisionbench score`. `judge` exits 0 on keep, 1
 two models are eligible. See tuning/program.md.
 """
 import argparse
+import hashlib
 import json
 import sys
 
@@ -62,35 +63,55 @@ def baseline(a, b):
         if (why := usable(s)):
             fail(f"score {name}: {why}")
     ma, mb = by_model(a), by_model(b)
+    ia, ib = {r["instructions_sha256"] for r in a["scores"]}, {r["instructions_sha256"] for r in b["scores"]}
+    if ia != ib:
+        fail("the two calibration runs must use the same instructions")
     if a["dataset_sha256"] != b["dataset_sha256"] or set(ma) != set(mb) or any(size(ma[n]) != size(mb[n]) for n in ma):
         fail("the two runs must use the same dataset, candidates and selection")
     models = {}
     for name in sorted(ma):
         la, lb = ma[name]["lift"], mb[name]["lift"]
-        cover = min(ma[name]["coverage"], mb[name]["coverage"])
-        lift, noise = (la + lb) / 2, abs(la - lb)
-        models[name] = {
-            "predictions": size(ma[name]),
-            "lift": lift,
-            "noise": noise,
-            "coverage": cover,
-            "eligible": cover >= MIN_COVERAGE and lift > max(2 * noise, MIN_LIFT),
-        }
-    eligible = [m for m in models.values() if m["eligible"]]
-    noise = sum(m["noise"] for m in eligible) / len(eligible) if eligible else 0.0
+        cover = min(ma[name]["coverage"] or 0.0, mb[name]["coverage"] or 0.0)
+        if la is None or lb is None:  # no answered row at all: nothing to tune against
+            lift, noise, ok = 0.0, 0.0, False
+        else:
+            lift, noise = (la + lb) / 2, abs(la - lb)
+            ok = cover >= MIN_COVERAGE and lift > max(2 * noise, MIN_LIFT)
+        models[name] = {"predictions": size(ma[name]), "lift": lift, "noise": noise, "coverage": cover, "eligible": ok}
+    result = {"dataset_sha256": a["dataset_sha256"], "models": models}
+    result.update(derived(result))
+    return result
+
+
+def derived(base):
+    """Objective, delta and the eligible set, always recomputed from the per-model fields, so that
+    hand-editing a model's `eligible` flag in baseline.json cannot leave them stale."""
+    models = base["models"]
+    eligible = sorted(n for n, m in models.items() if m["eligible"])
+    noise = sum(models[n]["noise"] for n in eligible) / len(eligible) if eligible else 0.0
     return {
-        "dataset_sha256": a["dataset_sha256"],
+        "eligible_models": eligible,
         "delta": max(MIN_DELTA, 2 * noise),
-        "objective": sum(m["lift"] for m in eligible) / len(eligible) if eligible else None,
-        "models": models,
+        "objective": sum(models[n]["lift"] for n in eligible) / len(eligible) if eligible else None,
     }
+
+
+def fingerprint(base):
+    """Identifies the baseline a best.json belongs to."""
+    basis = {"d": base["dataset_sha256"], "m": {n: [m["eligible"], m["lift"], m["noise"]] for n, m in sorted(base["models"].items())}}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()
 
 
 def judge(score, base, best):
     """A verdict for one experiment against the best kept state."""
-    eligible = sorted(n for n, m in base["models"].items() if m["eligible"])
+    d = derived(base)
+    eligible = d["eligible_models"]
+    if len(eligible) < 2:
+        fail("fewer than two eligible models in the baseline")
     if score["dataset_sha256"] != base["dataset_sha256"]:
         fail("the dataset differs from the baseline's")
+    if best is not None and best.get("baseline") != fingerprint(base):
+        fail("best.json belongs to another baseline; delete it only if you are starting over")
     if (why := usable(score)):
         return {"verdict": "rerun", "reason": why}
     got = by_model(score)
@@ -98,25 +119,27 @@ def judge(score, base, best):
         fail(f"eligible models missing from the score: {missing}")
     if (other := {n: size(got[n]) for n in eligible if size(got[n]) != base["models"][n]["predictions"]}):
         fail(f"a different selection than the baseline's (predictions per model: {other})")
-    low = {n: got[n]["coverage"] for n in eligible if got[n]["coverage"] < MIN_COVERAGE}
+    low = {n: got[n]["coverage"] for n in eligible if (got[n]["coverage"] or 0.0) < MIN_COVERAGE}
     if low:
         return {"verdict": "rerun", "reason": f"coverage under {MIN_COVERAGE}: {low}"}
     lifts = {n: got[n]["lift"] for n in eligible}
+    if any(v is None for v in lifts.values()):
+        return {"verdict": "rerun", "reason": "a model has no answered rows"}
     objective = sum(lifts.values()) / len(lifts)
-    prev = best or {"objective": base["objective"], "lifts": {n: base["models"][n]["lift"] for n in eligible}}
+    prev = best or {"objective": d["objective"], "lifts": {n: base["models"][n]["lift"] for n in eligible}}
     gain = objective - prev["objective"]
     drops = {
         n: lifts[n] - prev["lifts"][n]
         for n in eligible
         if lifts[n] - prev["lifts"][n] < -max(2 * base["models"][n]["noise"], MIN_DELTA) - EPS
     }
-    keep = gain >= base["delta"] - EPS and not drops
+    keep = gain >= d["delta"] - EPS and not drops
     return {
         "verdict": "keep" if keep else "discard",
         "objective": objective,
         "previous_objective": prev["objective"],
         "gain": gain,
-        "needed": base["delta"],
+        "needed": d["delta"],
         "lifts": lifts,
         "worse_models": drops,
     }
@@ -137,13 +160,16 @@ def misses(path, limit):
                 answers = json.loads(t["attempts"][-1]["raw_response"])["answers"]
             except (ValueError, KeyError, TypeError):
                 continue
+            if not isinstance(answers, dict):
+                continue
             for target in t["targets"]:
                 label = t["labels"].get(target)
-                choice = (answers.get(f"effort_{target}") or {}).get("choice")
+                entry = answers.get(f"effort_{target}")
+                choice = entry.get("choice") if isinstance(entry, dict) else None
                 if label is None:
                     continue
                 lo, _, hi = label.partition("-")
-                if choice not in LEVEL_INDEX:
+                if not isinstance(choice, str) or choice not in LEVEL_INDEX:
                     kind = "invalid"
                 elif LEVEL_INDEX[choice] < LEVEL_INDEX[lo]:
                     kind = "under"
@@ -153,11 +179,14 @@ def misses(path, limit):
                     continue
                 counts[(target, kind)] = counts.get((target, kind), 0) + 1
                 rows.append({
-                    "case": t["case_id"], "target": target, "label": label, "predicted": choice, "kind": kind,
+                    "candidate": t["candidate"], "case": t["case_id"], "target": target, "label": label,
+                    "predicted": choice if isinstance(choice, str) else None, "kind": kind,
                     "message": t["request"]["state"]["next_message"][:300],
                     "recent_conversation": (t["request"]["state"].get("recent_conversation") or "")[-300:],
                 })
-    return {"counts": {f"{k[0]} {k[1]}": v for k, v in sorted(counts.items())}, "misses": rows[:limit]}
+    # Trials are written as they finish, so the first rows favour fast models: sample across the whole file.
+    step = max(1, -(-len(rows) // limit)) if limit > 0 else 1
+    return {"counts": {f"{k[0]} {k[1]}": v for k, v in sorted(counts.items())}, "misses": rows[::step][:limit]}
 
 
 def main():
@@ -182,7 +211,7 @@ def main():
             json.dump(result, f, indent=2)
             f.write("\n")
         print(json.dumps(result, indent=2))
-        sys.exit(0 if sum(m["eligible"] for m in result["models"].values()) >= 2 else 12)
+        sys.exit(0 if len(result["eligible_models"]) >= 2 else 12)
     if args.cmd == "judge":
         base = load(args.baseline)
         try:
@@ -192,7 +221,7 @@ def main():
         result = judge(load(args.score), base, best)
         if result["verdict"] == "keep":
             with open(args.best, "w") as f:
-                json.dump({"objective": result["objective"], "lifts": result["lifts"]}, f, indent=2)
+                json.dump({"baseline": fingerprint(base), "objective": result["objective"], "lifts": result["lifts"]}, f, indent=2)
                 f.write("\n")
         print(json.dumps(result, indent=2))
         sys.exit({"keep": 0, "discard": 10, "rerun": 11}[result["verdict"]])

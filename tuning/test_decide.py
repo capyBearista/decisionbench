@@ -61,15 +61,22 @@ class Baseline(unittest.TestCase):
             decide.baseline(score({"a": 0.1}), score({"b": 0.1}))
         with self.assertRaises(SystemExit):
             decide.baseline(score({"a": 0.1}), score({"a": 0.1}, predictions=200))
+        other = score({"a": 0.1})
+        other["scores"][0]["instructions_sha256"] = "different"
+        with self.assertRaises(SystemExit):
+            decide.baseline(score({"a": 0.1}), other)
 
 
-def base(lifts=None, noise=0.0, delta=0.01):
+def base(lifts=None, noise=0.0, delta=None):
+    """A baseline.json; `delta` is ignored: judge derives it from the noise, as the real file would."""
     lifts = lifts or {"a": 0.10, "b": 0.10, "x": 0.0}
     models = {n: {"predictions": 400, "lift": v, "noise": noise, "coverage": 1.0, "eligible": n != "x"}
               for n, v in lifts.items()}
-    eligible = [v for n, v in lifts.items() if n != "x"]
-    return {"dataset_sha256": "d1", "planned_trials": 100, "delta": delta,
-            "objective": sum(eligible) / len(eligible), "models": models}
+    return {"dataset_sha256": "d1", "models": models}
+
+
+def best_of(b, objective, lifts):
+    return {"baseline": decide.fingerprint(b), "objective": objective, "lifts": lifts}
 
 
 class Judge(unittest.TestCase):
@@ -83,8 +90,9 @@ class Judge(unittest.TestCase):
         self.assertEqual(decide.judge(score({"a": 0.109, "b": 0.109}), base(), None)["verdict"], "discard")
 
     def test_the_comparison_is_against_the_best_kept_state_not_the_baseline(self):
-        best = {"objective": 0.14, "lifts": {"a": 0.14, "b": 0.14}}
-        r = decide.judge(score({"a": 0.13, "b": 0.12}), base(), best)
+        b = base()
+        best = best_of(b, 0.14, {"a": 0.14, "b": 0.14})
+        r = decide.judge(score({"a": 0.13, "b": 0.12}), b, best)
         self.assertEqual(r["verdict"], "discard")
 
     def test_one_model_dropping_past_twice_its_noise_discards_despite_a_higher_mean(self):
@@ -111,6 +119,37 @@ class Judge(unittest.TestCase):
             score({"a": 0.5, "b": 0.5}, coverage=0.89),
         ):
             self.assertEqual(decide.judge(bad, base(), None)["verdict"], "rerun")
+
+    def test_flipping_an_eligible_flag_changes_what_is_compared(self):
+        b = base({"a": 0.10, "b": 0.20, "c": 0.10})
+        b["models"]["c"]["eligible"] = True
+        b["models"]["b"]["eligible"] = False  # the user dropped b: mean of a and c is 0.10, not 0.133
+        r = decide.judge(score({"a": 0.105, "c": 0.105}), b, None)
+        self.assertEqual(r["verdict"], "discard")
+        self.assertAlmostEqual(r["previous_objective"], 0.10)
+        self.assertEqual(decide.judge(score({"a": 0.12, "c": 0.12}), b, None)["verdict"], "keep")
+
+    def test_a_best_file_from_another_baseline_is_refused(self):
+        old = base({"a": 0.10, "b": 0.10, "x": 0.0})
+        stale = best_of(old, 0.5, {"a": 0.5, "b": 0.5})
+        edited = base({"a": 0.10, "b": 0.10, "x": 0.0})
+        edited["models"]["b"]["eligible"] = False
+        edited["models"]["x"]["eligible"] = True
+        with self.assertRaises(SystemExit):
+            decide.judge(score({"a": 0.2, "x": 0.2}), edited, stale)
+
+    def test_a_model_that_never_answered_is_not_a_crash(self):
+        failed = score({"a": 0.1, "b": 0.1})
+        failed["scores"][1]["pooled"].update({"lift": None, "coverage": 0.0})
+        base_ok = decide.baseline(score({"a": 0.1, "b": 0.1}), failed)
+        self.assertFalse(base_ok["models"]["b"]["eligible"])
+        mid_loop = score({"a": 0.5, "b": 0.5})
+        mid_loop["scores"][1]["pooled"].update({"lift": None, "coverage": None})
+        self.assertEqual(decide.judge(mid_loop, base(), None)["verdict"], "rerun")
+
+    def test_fewer_than_two_eligible_models_is_an_error(self):
+        with self.assertRaises(SystemExit):
+            decide.judge(score({"a": 0.5}), base({"a": 0.1, "x": 0.0}), None)
 
     def test_a_run_with_only_the_eligible_models_is_comparable_to_the_baseline(self):
         r = decide.judge(score({"a": 0.13, "b": 0.13}, planned=200), base(), None)  # baseline had three models
@@ -157,7 +196,7 @@ class Cli(unittest.TestCase):
 
 class Misses(unittest.TestCase):
     def trial(self, case, label, reply):
-        return {"type": "trial", "case_id": case, "targets": ["opus"], "labels": {"opus": label},
+        return {"type": "trial", "candidate": "m", "case_id": case, "targets": ["opus"], "labels": {"opus": label},
                 "request": {"state": {"next_message": f"message of {case}", "recent_conversation": "user: earlier"}},
                 "attempts": [{"disposition": "answered", "raw_response": json.dumps(reply)}]}
 
@@ -171,6 +210,8 @@ class Misses(unittest.TestCase):
             self.trial("c2", "medium-high", answer("low")),
             self.trial("c3", "low", answer("xhigh")),
             self.trial("c4", "low", answer("bogus")),
+            self.trial("c6", "low", {"answers": {"effort_opus": {"choice": ["low"]}}}),
+            self.trial("c7", "low", {"answers": "oops"}),
             {**self.trial("c5", "low", answer("low")), "attempts": [{"disposition": "transport_error"}]},
         ]
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
@@ -178,9 +219,9 @@ class Misses(unittest.TestCase):
         result = decide.misses(f.name, 10)
         os.unlink(f.name)
         self.assertEqual([(m["case"], m["kind"]) for m in result["misses"]],
-                         [("c2", "under"), ("c3", "over"), ("c4", "invalid")])
+                         [("c2", "under"), ("c3", "over"), ("c4", "invalid"), ("c6", "invalid")])
         self.assertEqual(result["misses"][0]["recent_conversation"], "user: earlier")
-        self.assertEqual(result["counts"], {"opus invalid": 1, "opus over": 1, "opus under": 1})
+        self.assertEqual(result["counts"], {"opus invalid": 2, "opus over": 1, "opus under": 1})
 
 
 if __name__ == "__main__":

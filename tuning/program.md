@@ -20,15 +20,15 @@ Rules for the prompt text:
 
 ## Setup (do this once, with the user)
 
-1. **Branch.** Agree a tag with the user (today's date, for example `nov8`). `git switch -c tune/<tag>` from the branch the user names. The branch must not exist yet.
+1. **Worktree.** Agree a tag with the user (today's date, for example `nov8`) and the committed branch to start from. Work in a fresh worktree, so that untracked files and uncommitted edits in the user's checkout (a review export, notes) are not in your tree and `git reset --hard` cannot touch the user's work: `git worktree add ../decisionbench-tune-<tag> -b tune/<tag> <branch>`, then `cd` there. The branch must not exist yet. Read nothing outside this worktree and the evidence folder, and do not read git history for the dataset (`git show`, `git log -p`) or inspect the binary for its embedded data.
 2. **Binary.** `cargo build --release --locked` once. Use `BIN=target/release/decisionbench` from now on. Do not rebuild: the dataset is compiled in, and a rebuild after a dataset change would change the scored Cases.
-3. **Candidates: the gate.** Ask the user for the Candidate names, one for each *distinct Decision Model*. Read the config to check them. Two routes to the same `decision_model` count once; keep one. Only Decisions endpoints are supported. Then smoke-test each: `$BIN run --candidate NAME --case c002 --target opus --repetitions 1`. Drop any Candidate that does not exit 0. If fewer than 5 distinct models pass, **stop and tell the user**. They decide whether to continue with fewer. Fewer than 2 means no loop.
+3. **Candidates: the gate.** Ask the user for the Candidate names, one for each *distinct Decision Model*. Read the config to check them. Two routes to the same `decision_model` count once; keep one. Only Decisions endpoints are supported. Then smoke-test each: `$BIN run --candidate NAME --split train --case c001 --target opus --repetitions 1` (a train Case, and always with `--split train`). Drop any Candidate that does not exit 0. Never use these smoke-test files for scoring. If fewer than 5 distinct models pass, **stop and tell the user**. They decide whether to continue with fewer. Fewer than 2 means no loop.
 4. **Budget.** Ask the user for the most requests (or dollars) you may spend, and write it down. One experiment sends about *models × train Cases × repetitions* requests (the count `run` prints as "up to N requests" is the ceiling, with retries). Track the running total in `tuning/results.tsv`.
-5. **Settings.** Use `--split train --repetitions 1 --concurrency 4 --retries 3` for every run below, so that runs stay comparable. Free tiers rate-limit; backoff is built in, and low coverage is handled by the rules below. If calibration shows a mean noise of 3 points or more (step 6), repeat the calibration once with `--repetitions 3` and use 3 from then on. Note the choice in the first line of `results.tsv`.
+5. **Settings.** Use `--split train --repetitions 1 --concurrency 4 --retries 3` for every run below, so that runs stay comparable. Free tiers rate-limit; backoff is built in, and low coverage is handled by the rules below. If calibration shows a mean noise of 3 points or more (step 6), repeat the calibration once with `--repetitions 3` and use 3 from then on. Put the flags in a shell variable and use it for every run: `FLAGS="--split train --instructions tuning/prompt.md --repetitions 1 --concurrency 4 --retries 3"`. Note the choice in the first line of `results.tsv`.
 6. **Calibrate.** Run the unchanged prompt twice with every passing Candidate, and score both. `run` prints `evidence: PATH` on its last line.
 
    ```sh
-   $BIN run --split train --instructions tuning/prompt.md --repetitions 1 --concurrency 4 --retries 3 \
+   $BIN run $FLAGS \
         --candidate A --candidate B --candidate C --candidate D --candidate E
    $BIN score PATH_1 > /tmp/score_a.json
    # run the same command again, then:
@@ -36,8 +36,8 @@ Rules for the prompt text:
    python3 tuning/decide.py baseline /tmp/score_a.json /tmp/score_b.json
    ```
 
-   `decide.py baseline` writes `tuning/baseline.json` and prints, per model, its neutral lift, its noise (the difference between the two runs) and whether it is **eligible**. Eligible means the lift beats the best fixed answer by more than twice the noise and at least 2 points, with coverage of 90% or better. It also prints `delta`, the smallest objective gain that counts: 1 point or twice the mean noise. It exits 12 when fewer than 2 models are eligible. In that case **stop and report**: there is no signal to tune against. Exit code 3 from `run` only means some Trials had no reply; keep going, and `score` will show the coverage.
-7. **Freeze.** Show the user `tuning/baseline.json`: models, eligibility, noise, delta. If they want to change an eligibility call, they edit the file. Then `git add tuning/baseline.json && git commit -m "tuning: baseline"`. Create `tuning/results.tsv` (untracked) with the header `commit	objective	gain	verdict	requests	description`. Log the baseline as the first row (verdict `baseline`).
+   `decide.py baseline` writes `tuning/baseline.json` and prints, per model, its neutral lift, its noise (the difference between the two runs) and whether it is **eligible**. Eligible means the lift over the best fixed answer is more than twice the noise and more than 2 points, with coverage of 90% or better. It also prints `delta`, the smallest objective gain that counts: 1 point or twice the mean noise. It exits 12 when fewer than 2 models are eligible. In that case **stop and report**: there is no signal to tune against. Exit code 3 from `run` only means some Trials had no reply; keep going, and `score` will show the coverage.
+7. **Freeze.** Show the user `tuning/baseline.json`: models, eligibility, noise, delta. If they want to change an eligibility call, they edit the file now (`decide.py` recomputes the objective and delta from the per-model fields). The file is fixed once the first experiment has run; changing it later makes `judge` refuse the old `tuning/best.json`, and you start over. Then `git add tuning/baseline.json && git commit -m "tuning: baseline"`. Create `tuning/results.tsv` (untracked) with the header `commit	objective	gain	verdict	requests	evidence	description`. Log the baseline as the first row (verdict `baseline`).
 
 From here on, only the **eligible** models are run (`--candidate` for each of them, nothing else). The objective is the mean of their pooled lift. You never compute it yourself; `decide.py` does.
 
@@ -45,11 +45,18 @@ From here on, only the **eligible** models are run (`--candidate` for each of th
 
 Repeat until you reach a stop condition.
 
-1. **Look.** Find what the current prompt gets wrong on the train set: `python3 tuning/decide.py misses PATH_OF_THE_LAST_RUN --limit 40`. It lists the missed Trials with counts of under- and over-predictions per target. Use it to form one hypothesis, such as "the models pick `low` for multi-step edits" or "xhigh is chosen for ordinary refactors". Under-predicting is the common failure, but check the counts.
+1. **Look.** Find what the current prompt gets wrong on the train set: `python3 tuning/decide.py misses PATH --limit 40`, where PATH is the run of the *current* prompt: the latest kept run (the `evidence` column of `results.tsv`), or calibration run 1 at the start. After a discard, the latest run belongs to a prompt that no longer exists; do not use it. It lists a sample of the missed Trials (with the Candidate) and counts of under- and over-predictions per target. Use it to form one hypothesis, such as "the models pick `low` for multi-step edits" or "xhigh is chosen for ordinary refactors". Under-predicting is the common failure, but check the counts.
 2. **Edit** `tuning/prompt.md` to test that one hypothesis. One idea per experiment, so that a keep or discard tells you something.
 3. **Commit** only the prompt: `git add tuning/prompt.md && git commit -m "tune: <what and why in one line>"`.
-4. **Run** the same command as in calibration with the eligible Candidates. Redirect output to a file; do not print the whole progress stream into your context. Take the `evidence:` path from the end of it.
-   If `run` exits 1, the prompt or the config is broken (for example a section without exactly five effort lines). Nothing was scored: fix the prompt, `git commit --amend`, and run again. Exit 3 is fine, see above. Exit 130 means the run was interrupted; run it again.
+4. **Run** the same command as in calibration with the eligible Candidates, in this form, so that the progress lines stay out of your context and the exit status stays visible:
+
+   ```sh
+   $BIN run $FLAGS --candidate A --candidate B > /tmp/run.log 2>&1; echo "exit $?"
+   grep '^evidence:' /tmp/run.log
+   ```
+
+   The path after `evidence:` is this experiment's run. If `run` exits 1, read `/tmp/run.log` first: a malformed prompt (for example a section without exactly five effort lines) means fix the prompt, `git commit --amend` and run again; a config or key problem, or an evidence write error, means stop and report.
+   Exit 3 is fine, see above. Exit 130 means the run was interrupted; run it again.
 5. **Score and judge.**
 
    ```sh
@@ -62,7 +69,7 @@ Repeat until you reach a stop condition.
    - `10` **discard**: `git reset --hard HEAD~1`.
    - `11` **rerun**: the run is not usable (it is partial, a Trial is missing, or a model's coverage is under 90%). Do not score it and do not count it as an experiment. Run the same commit again. If it comes back unusable three times in a row, stop (see below).
    - `1`: bad input (a different dataset or other selection than the baseline, or a missing model). Stop and report.
-6. **Log** one row to `tuning/results.tsv`: short commit hash, objective, gain, verdict (`keep`, `discard`, `rerun`), the requests used, and the description. Never commit `results.tsv`.
+6. **Log** one row to `tuning/results.tsv`: short commit hash, objective, gain, verdict (`keep`, `discard`, `rerun`), the requests used, the evidence path, and the description. Never commit `results.tsv`.
 7. Go to step 1.
 
 If `score` refuses (a holdout Case in the run, or a prompt that quotes a Case message), do not look for a way around it. The first means you ran without `--split train`; the second means your prompt copies a Case, so rewrite it in general terms.
@@ -83,4 +90,4 @@ Otherwise keep going. The user may be away; do not stop to ask whether to contin
 
 When you stop, give the user: the branch, the number of experiments kept and discarded, the baseline and best objective, each eligible model's baseline and best lift, the budget used, and a short list of the changes that worked. Keep the claims honest: these numbers come from the train Cases the prompt was tuned on, so they overstate what to expect. The labels are the maintainer's reviewed judgements, not measurements, so the loop optimises agreement with them.
 
-The holdout step belongs to the user, and you do it only when they ask for it in this session: run `--split holdout` once for `tuning/prompt.md` and once for `prompts/neutral.md` with the same Candidates, then `score --allow-holdout` on each, and report train and holdout side by side per model and target. A tuned prompt is worth promoting to `prompts/` only if it beats `neutral` on the holdout by more than the noise. The 59 holdout Cases give roughly ±6 points at 95% confidence, so small gains cannot be told apart from chance.
+The holdout step belongs to the user, and you do it only when they ask for it in this session. Tuning ends once holdout evidence exists; do not resume it, and do not inspect holdout evidence (no `show`, no `misses`), only score it: run `--split holdout` once for `tuning/prompt.md` and once for `prompts/neutral.md` with the same Candidates, then `score --allow-holdout` on each, and report train and holdout side by side per model and target. A tuned prompt is worth promoting to `prompts/` only if it beats `neutral` on the holdout by more than the noise. The holdout is small (see `dataset inspect`), roughly ±6 points at 95% confidence for 59 Cases, so small gains cannot be told apart from chance.
