@@ -3,6 +3,7 @@ name = "decisionbench"
 version = "0.1.0"
 edition = "2024"
 description = "Standalone benchmark for Decisions-model reasoning-effort selection"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/capyBearista/decisionbench"
 
