@@ -1167,3 +1167,50 @@ fn key_status_wording() {
         assert_eq!(text(provider, KeySource::Invalid, false), "! file error");
     }
 }
+
+const ALL_HINTS: [&str; 5] = [
+    candidates::HINTS,
+    dataset::HINTS,
+    setup::HINTS,
+    progress::HINTS,
+    results::HINTS,
+];
+
+#[test]
+fn wrapped_hints_keep_every_hint_whole_and_fit_the_width() {
+    for hints in ALL_HINTS {
+        for width in usize::from(MIN_WIDTH)..=130 {
+            let rows = wrap_hints(hints, width);
+            assert_eq!(rows.join(" · "), hints, "width {width}");
+            assert!(
+                rows.iter().all(|r| r.chars().count() <= width),
+                "width {width}: {rows:?}"
+            );
+        }
+    }
+    assert_eq!(wrap_hints(results::HINTS, 130).len(), 1);
+    assert!(wrap_hints(results::HINTS, usize::from(MIN_WIDTH)).len() > 1);
+}
+
+#[test]
+fn a_narrow_terminal_wraps_the_hint_line_instead_of_cutting_it() {
+    for screen in ['1', '2', '3', '4', '5'] {
+        let (mut app, _dir) = app();
+        press(&mut app, KeyCode::Char(screen));
+        let hints = match app.screen {
+            Screen::Candidates => candidates::HINTS,
+            Screen::Dataset => dataset::HINTS,
+            Screen::Setup => setup::HINTS,
+            Screen::Run => progress::HINTS,
+            Screen::Results => results::HINTS,
+        };
+        let last = hints.rsplit(" · ").next().unwrap();
+        for width in [MIN_WIDTH, 80, 110] {
+            let screen_text = draw(&app, width, MIN_HEIGHT).join("\n");
+            assert!(
+                screen_text.contains(last),
+                "{last:?} cut off at width {width}"
+            );
+        }
+    }
+}

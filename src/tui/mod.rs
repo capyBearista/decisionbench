@@ -296,11 +296,19 @@ pub fn render(frame: &mut Frame, app: &App) {
         frame.render_widget(Paragraph::new(text).style(theme::base()), area);
         return;
     }
+    let keys = match app.screen {
+        Screen::Candidates => candidates::HINTS,
+        Screen::Dataset => dataset::HINTS,
+        Screen::Setup => setup::HINTS,
+        Screen::Run => progress::HINTS,
+        Screen::Results => results::HINTS,
+    };
+    let key_rows = wrap_hints(keys, usize::from(area.width));
     let [tabs, body, message, hints] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(key_rows.len() as u16),
     ])
     .areas(area);
     frame.render_widget(
@@ -322,14 +330,26 @@ pub fn render(frame: &mut Frame, app: &App) {
         Paragraph::new(app.message.as_str()).style(theme::base()),
         message,
     );
-    let keys = match app.screen {
-        Screen::Candidates => candidates::HINTS,
-        Screen::Dataset => dataset::HINTS,
-        Screen::Setup => setup::HINTS,
-        Screen::Run => progress::HINTS,
-        Screen::Results => results::HINTS,
-    };
-    frame.render_widget(Paragraph::new(keys).style(theme::dim()), hints);
+    frame.render_widget(
+        Paragraph::new(key_rows.join("\n")).style(theme::dim()),
+        hints,
+    );
+}
+
+/// Packs the ` · `-separated hints into rows of at most `width` characters, so a narrow terminal
+/// wraps between hints instead of cutting one off. A single hint wider than `width` is not split.
+fn wrap_hints(hints: &str, width: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for hint in hints.split(" · ") {
+        match rows.last_mut() {
+            Some(row) if row.chars().count() + 3 + hint.chars().count() <= width => {
+                row.push_str(" · ");
+                row.push_str(hint);
+            }
+            _ => rows.push(hint.to_string()),
+        }
+    }
+    rows
 }
 
 /// Runs the TUI until the user quits. The terminal is restored on every way out; `ratatui::try_init`
