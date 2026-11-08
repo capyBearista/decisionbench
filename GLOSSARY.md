@@ -34,6 +34,15 @@ A versioned collection of Cases and their ground-truth labels.
 **Dataset Revision**  
 An immutable snapshot of dataset content and label decisions used by a Run. Changes to labels or Cases produce a new revision.
 
+**Split**  
+The part of the dataset a Case belongs to: `train` (used while tuning Judge Instructions) or `holdout` (scored once, at the end, to check for overfitting). Fixed when a Case is added and never changed ([ADR-0007](docs/adr/0007-split-and-tuning-objective.md)).
+
+**Floor**  
+The hit rate of the best single fixed effort on the same labelled predictions, chosen separately for each Target Model. A Decision Model at the floor is not choosing efforts better than a constant. Pooled, it is the sum of the per-target best hits over all rows.
+
+**Lift**  
+Hit rate minus Floor. Printed only by `score`, for tuning; it is not a ranking of Candidates.
+
 **Label / Acceptable-Effort Range**  
 A human-reviewed contiguous range of effort levels considered acceptable for one Case and one Target Model, written as one level (`max`) or `from-to` (`low-high`). Every effort in the range is equally acceptable.
 
