@@ -108,6 +108,26 @@ fn new_app(name: &str) -> (App, PathBuf) {
     (app, out)
 }
 
+/// The first Case labelled for opus (the only Target the test Apps ask about) and its position on
+/// the Dataset screen, so a reordered dataset does not matter.
+fn opus_case() -> (String, usize) {
+    let (_, _, cases) = decisionbench::batch::load_dataset(None).unwrap();
+    let at = cases
+        .iter()
+        .position(|c| c.ok.get(decisionbench::grade::Target::Opus).is_some())
+        .unwrap();
+    (cases[at].id.clone(), at)
+}
+
+/// Marks the Case at position `at` on the Dataset screen, by keys.
+fn mark_case(app: &mut App, at: usize) {
+    press(app, KeyCode::Char('2'));
+    for _ in 0..at {
+        press(app, KeyCode::Char('j'));
+    }
+    press(app, KeyCode::Char(' '));
+}
+
 /// Keys only: Setup screen, pick the first candidate, jump to Start and press Enter.
 fn start(app: &mut App) {
     press(app, KeyCode::Char('3'));
@@ -139,9 +159,11 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
     let file = only_file(&out);
     assert!(show(&file).contains("state: complete"));
 
-    // Enter on the Run screen opens the report in Results: the same text `show` prints.
+    // Enter on the Run screen opens the report in Results, on its summary; the full report panel
+    // is the same text `show` prints.
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.screen, Screen::Results);
+    press(&mut app, KeyCode::Char(']'));
     let screen = screen_text(&app);
     for line in show(&file).lines().filter(|l| !l.is_empty()) {
         assert!(screen.contains(line), "missing {line:?}");
@@ -174,6 +196,7 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
         "{text}"
     );
     press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char(']'));
     let screen = screen_text(&app);
     for line in text.lines().filter(|l| !l.is_empty()) {
         assert!(screen.contains(line), "missing {line:?}");
@@ -181,14 +204,49 @@ fn a_run_completes_and_a_cancelled_run_leaves_partial_evidence_that_show_reads()
 
     // One marked case on the Dataset screen: the run plans exactly that case.
     let (mut app, out) = new_app("tui-workflow-marked");
-    press(&mut app, KeyCode::Char('2'));
-    press(&mut app, KeyCode::Char('j')); // c002, labelled for opus
-    press(&mut app, KeyCode::Char(' '));
+    let (case, at) = opus_case();
+    mark_case(&mut app, at);
     assert!(screen_text(&app).contains("[x]"));
     press(&mut app, KeyCode::Char('3'));
-    assert!(screen_text(&app).contains("cases: 1 selected (c002)"));
+    assert!(screen_text(&app).contains(&format!("cases: 1 selected ({case})")));
     start(&mut app);
     until(&mut app, "the marked run to end", |a| !a.run.active());
     assert_eq!(app.run.planned, 1);
     assert!(show(&only_file(&out)).contains("state: complete"));
+
+    // The bundled prompt plus a second one added on the Setup screen: two trials for the one case.
+    let (mut app, out) = new_app("tui-workflow-prompts");
+    let second = out.with_file_name("second.md");
+    std::fs::copy("prompts/neutral.md", &second).unwrap();
+    mark_case(&mut app, opus_case().1);
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char(' ')); // the candidate
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Char('j')); // past the targets, onto the bundled prompt
+    }
+    press(&mut app, KeyCode::Char('a'));
+    for c in second.display().to_string().chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        screen_text(&app).contains("[x] prompt second"),
+        "{}",
+        app.message
+    );
+    assert!(screen_text(&app).contains("plan: 1 candidate × 2 prompts × 1 case"));
+    press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.screen, Screen::Run, "{}", app.message);
+    until(&mut app, "the two-prompt run to end", |a| !a.run.active());
+    assert_eq!(app.run.planned, 2);
+    let run = decisionbench::batch::load_run(&only_file(&out)).unwrap();
+    let names: Vec<_> = run
+        .manifest
+        .instructions
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect();
+    assert_eq!(names, ["neutral", "second"]);
+    assert_eq!(run.trials.len(), 2);
 }

@@ -2,8 +2,10 @@
 //! Accuracy, validity, reliability and latency are reported separately and never merged into one
 //! number; there is no overall micro-average because label imbalance makes it misleading.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+
+use clap::ValueEnum;
 
 use crate::cost::{CostTally, attempt_cost};
 use crate::dataset::Effort;
@@ -14,13 +16,42 @@ use crate::provider::{Disposition, normalize};
 /// An instruction set as a column: name and full sha256.
 type InsId = (String, String);
 
-pub struct Report<'a>(&'a RunFile);
-
-pub fn report(run: &RunFile) -> Report<'_> {
-    Report(run)
+/// What the columns of the summary matrix are. `Auto` picks one; a built `Matrix` never holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Axis {
+    /// Prompts when there are several, else candidates when there are several, else prompts.
+    Auto,
+    /// One column per prompt in each run; rows are candidate x target.
+    Prompt,
+    /// One column per candidate in each run; rows are prompt x target.
+    Candidate,
 }
 
-pub struct Comparison<'a>(pub &'a [RunFile]);
+impl Axis {
+    /// What the columns are called in the text.
+    pub fn name(self) -> &'static str {
+        match self {
+            Axis::Candidate => "candidates",
+            _ => "prompts",
+        }
+    }
+
+    /// Prompts become candidates and candidates prompts; `Auto` is not either, so it too gives candidates.
+    pub fn toggled(self) -> Axis {
+        match self {
+            Axis::Candidate => Axis::Prompt,
+            _ => Axis::Candidate,
+        }
+    }
+}
+
+pub struct Report<'a>(&'a RunFile, Axis);
+
+pub fn report(run: &RunFile, axis: Axis) -> Report<'_> {
+    Report(run, axis)
+}
+
+pub struct Comparison<'a>(pub &'a [RunFile], pub Axis);
 
 fn state(run: &RunFile) -> RunState {
     run.end.as_ref().map_or(RunState::Partial, |e| e.state)
@@ -34,6 +65,20 @@ fn state_text(run: &RunFile) -> String {
         (Some(_), RunState::Failed) => format!("failed ({NOT_COMPARABLE})"),
         (Some(_), RunState::Complete) => "complete".to_string(),
     }
+}
+
+/// What a single Run's summary must say when the Run is not complete: its state and how many of
+/// its planned Trials were recorded, so a rate over the recorded ones is not read as the whole
+/// Run's. `None` for a complete Run.
+pub fn incomplete_note(run: &RunFile) -> Option<String> {
+    (state(run) != RunState::Complete).then(|| {
+        format!(
+            "state: {}; trials: {} recorded of {} planned",
+            state_text(run),
+            run.trials.len(),
+            run.manifest.planned_trials
+        )
+    })
 }
 
 fn short(sha: &str) -> String {
@@ -194,6 +239,533 @@ fn table(indent: &str, rows: &[Vec<String>]) -> String {
         .collect()
 }
 
+/// One prompt or candidate in one Run: a column of the matrix. The first column is the baseline.
+pub struct Column {
+    pub label: String,
+    pub run_id: String,
+}
+
+/// Paired trials gained and lost against the baseline, and the cases behind them: `cases_up` and
+/// `cases_down` count the cases whose net change over their repetitions is up or down (a case that
+/// netted zero is left out). `noise`: an exact two-sided sign test on those cases is not
+/// significant (`p >= 0.05`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delta {
+    pub gained: usize,
+    pub lost: usize,
+    pub cases_up: usize,
+    pub cases_down: usize,
+    pub noise: bool,
+}
+
+impl Delta {
+    fn new(gained: usize, lost: usize, cases_up: usize, cases_down: usize) -> Self {
+        Self {
+            gained,
+            lost,
+            cases_up,
+            cases_down,
+            noise: sign_test_p(cases_up, cases_down) >= 0.05,
+        }
+    }
+}
+
+/// Exact two-sided sign test: the chance, if each changed case were equally likely to move either
+/// way, of a split at least as lopsided as `up` against `down`. Summed in log space so that a count
+/// in the thousands neither overflows nor panics; the terms are at most 1 and may underflow to 0.
+fn sign_test_p(up: usize, down: usize) -> f64 {
+    let (n, k) = (up + down, up.min(down));
+    let mut log_choose = 0.0; // ln C(n, i), built up from i = 0
+    let mut tail = 0.0;
+    for i in 0..=k {
+        if i > 0 {
+            log_choose += ((n - i + 1) as f64).ln() - (i as f64).ln();
+        }
+        tail += (log_choose - n as f64 * std::f64::consts::LN_2).exp();
+    }
+    (2.0 * tail).min(1.0)
+}
+
+pub struct Cell {
+    pub tally: Tally,
+    /// `None` for the baseline column and when no trial pairs with the baseline's.
+    pub delta: Option<Delta>,
+    /// The net change of each case behind `delta` (trials gained less lost, over the case's
+    /// repetitions), so cells can be pooled without counting one case twice; empty on a pooled cell.
+    pub case_nets: Vec<(String, i64)>,
+}
+
+/// How a delta reads: significantly more cases up than down, the reverse, or noise (not significant,
+/// which includes no changed case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaKind {
+    Gained,
+    Lost,
+    Noise,
+}
+
+/// A matrix cell as text: the counts, and the paired delta (`+g -l`, then ` ~` when not significant) when
+/// there is one. `Display` joins them as `Display for Matrix` prints them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellText {
+    pub counts: String,
+    pub delta: Option<(String, DeltaKind)>,
+}
+
+impl CellText {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            counts: text.into(),
+            delta: None,
+        }
+    }
+}
+
+impl fmt::Display for CellText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.counts)?;
+        if let Some((delta, _)) = &self.delta {
+            write!(f, "  {delta}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The text of one matrix cell; `-` when the Run did not ask it.
+pub fn cell_parts(cell: Option<&Cell>) -> CellText {
+    let Some(cell) = cell else {
+        return CellText::plain("-");
+    };
+    CellText {
+        counts: accuracy_cell(&cell.tally),
+        delta: cell.delta.as_ref().map(|d| {
+            let kind = if d.noise {
+                DeltaKind::Noise
+            } else if d.cases_up > d.cases_down {
+                DeltaKind::Gained
+            } else {
+                DeltaKind::Lost
+            };
+            let noise = if d.noise { " ~" } else { "" };
+            (format!("+{} -{}{noise}", d.gained, d.lost), kind)
+        }),
+    }
+}
+
+fn pooled_note(axis: Axis) -> &'static str {
+    match axis {
+        Axis::Candidate => {
+            "pooled = rows present in every column, all prompts and targets together, over valid scored predictions; it is not a score"
+        }
+        _ => {
+            "pooled = rows present in every column, all candidates and targets together, over valid scored predictions; it is not a score"
+        }
+    }
+}
+const DELTA_NOTE: &str = "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)";
+
+pub struct MatrixRow {
+    /// The candidate on the prompt axis, the prompt on the candidate axis.
+    pub label: String,
+    /// `None` on a row of `Matrix::grouped`, which adds up all of the label's targets.
+    pub target: Option<Target>,
+    /// `None` when that column's Run did not ask this candidate, target or prompt.
+    pub cells: Vec<Option<Cell>>,
+}
+
+/// Accuracy per row and column, with paired deltas against the first column. On the prompt axis the
+/// columns are prompts and the rows (candidate, target); on the candidate axis the columns are
+/// candidates and the rows (prompt, target).
+pub struct Matrix {
+    /// The axis the columns are on; never `Auto`.
+    pub axis: Axis,
+    pub columns: Vec<Column>,
+    pub rows: Vec<MatrixRow>,
+    /// Per column: the rows present in every column added together, so all columns cover the same
+    /// rows; `None` when no row is present in every column.
+    pub pooled: Vec<Option<Cell>>,
+}
+
+/// The name; plus the hash when another of `ids` shares the name with other content.
+fn named(ids: &[&InsId]) -> Vec<String> {
+    ids.iter()
+        .enumerate()
+        .map(|(i, ins)| {
+            if ids
+                .iter()
+                .enumerate()
+                .any(|(j, o)| j != i && o.0 == ins.0 && o.1 != ins.1)
+            {
+                label(ins)
+            } else {
+                ins.0.clone()
+            }
+        })
+        .collect()
+}
+
+/// `labels`, plus ` in <run id>` where another label is the same (the same name in several Runs).
+fn apart(labels: Vec<String>, run_ids: &[&str]) -> Vec<String> {
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if labels.iter().enumerate().any(|(j, o)| j != i && o == l) {
+                format!("{l} in {}", run_ids[i])
+            } else {
+                l.clone()
+            }
+        })
+        .collect()
+}
+
+/// The valid scored grade of the target's prediction in each (case, repetition) Trial.
+fn scored<'a>(
+    run: &'a RunFile,
+    candidate: &str,
+    ins: &InsId,
+    target: Target,
+) -> BTreeMap<(&'a str, u32), Grade> {
+    group(run, candidate, ins)
+        .into_iter()
+        .filter_map(|t| {
+            let (_, grade) = t.grades()?.into_iter().find(|(x, _)| *x == target)?;
+            matches!(grade, Grade::Hit | Grade::Under | Grade::Over)
+                .then(|| ((t.case_id.as_str(), t.repetition), grade))
+        })
+        .collect()
+}
+
+/// The axis `Auto` stands for: prompts when the Runs between them have several, else candidates when
+/// they have several, else prompts. Any other axis is kept.
+fn resolve(runs: &[RunFile], axis: Axis) -> Axis {
+    if axis != Axis::Auto {
+        return axis;
+    }
+    let prompts: BTreeSet<InsId> = runs.iter().flat_map(instruction_ids).collect();
+    let candidates: BTreeSet<&str> = runs
+        .iter()
+        .flat_map(|r| &r.manifest.candidates)
+        .map(|c| c.candidate.name.as_str())
+        .collect();
+    if prompts.len() <= 1 && candidates.len() > 1 {
+        Axis::Candidate
+    } else {
+        Axis::Prompt
+    }
+}
+
+/// Column `j` of the `rows` that have a cell in every column, added together, so all columns cover
+/// the same rows; `None` when no row qualifies. Trials and tallies add. A case counts once per row
+/// label however many targets it was graded on (its nets add across them), then up, down or, if
+/// they cancel, not at all; the delta is judged on those cases, so the sign test is not told that
+/// one response graded on several targets is several independent cases.
+fn pool<'a>(rows: impl IntoIterator<Item = &'a MatrixRow>, j: usize) -> Option<Cell> {
+    let cells: Vec<(&MatrixRow, &Cell)> = rows
+        .into_iter()
+        .filter(|row| row.cells.iter().all(Option::is_some))
+        .filter_map(|row| Some((row, row.cells[j].as_ref()?)))
+        .collect();
+    if cells.is_empty() {
+        return None;
+    }
+    let mut tally = Tally::default();
+    let (mut gained, mut lost, mut any) = (0, 0, false);
+    let mut nets: BTreeMap<(&str, &str), i64> = BTreeMap::new();
+    for (row, cell) in &cells {
+        tally.hit += cell.tally.hit;
+        tally.under += cell.tally.under;
+        tally.over += cell.tally.over;
+        tally.invalid += cell.tally.invalid;
+        tally.unscored += cell.tally.unscored;
+        if let Some(d) = &cell.delta {
+            gained += d.gained;
+            lost += d.lost;
+            any = true;
+            for (case, n) in &cell.case_nets {
+                *nets.entry((&row.label, case)).or_default() += n;
+            }
+        }
+    }
+    let up = nets.values().filter(|n| **n > 0).count();
+    let down = nets.values().filter(|n| **n < 0).count();
+    Some(Cell {
+        tally,
+        delta: any.then(|| Delta::new(gained, lost, up, down)),
+        case_nets: Vec::new(),
+    })
+}
+
+impl Matrix {
+    pub fn from_runs(runs: &[RunFile], axis: Axis) -> Matrix {
+        let axis = resolve(runs, axis);
+        let by_prompt = axis == Axis::Prompt;
+        // Every prompt and candidate of the Runs, first seen first. A column is a Run and an index
+        // into one of them (the one the axis names); a row is an index into the other.
+        let mut prompts: Vec<InsId> = Vec::new();
+        let mut candidates: Vec<&str> = Vec::new();
+        for run in runs {
+            for ins in instruction_ids(run) {
+                if !prompts.contains(&ins) {
+                    prompts.push(ins);
+                }
+            }
+            for c in &run.manifest.candidates {
+                if !candidates.contains(&c.candidate.name.as_str()) {
+                    candidates.push(&c.candidate.name);
+                }
+            }
+        }
+        // With no prompt or no candidate there is nothing to compare, on either axis.
+        let nothing = prompts.is_empty() || candidates.is_empty();
+        let sources: Vec<(usize, usize)> = runs
+            .iter()
+            .enumerate()
+            .filter(|_| !nothing)
+            .flat_map(|(r, run)| {
+                let found: Vec<usize> = if by_prompt {
+                    instruction_ids(run)
+                        .iter()
+                        .filter_map(|i| prompts.iter().position(|p| p == i))
+                        .collect()
+                } else {
+                    run.manifest
+                        .candidates
+                        .iter()
+                        .filter_map(|c| candidates.iter().position(|n| *n == c.candidate.name))
+                        .collect()
+                };
+                found.into_iter().map(move |k| (r, k))
+            })
+            .collect();
+        let pair = |column: usize, row: usize| {
+            if by_prompt {
+                (candidates[row], &prompts[column])
+            } else {
+                (candidates[column], &prompts[row])
+            }
+        };
+        let run_ids: Vec<&str> = sources
+            .iter()
+            .map(|(r, _)| runs[*r].manifest.id.as_str())
+            .collect();
+        let names = if by_prompt {
+            named(
+                &sources
+                    .iter()
+                    .map(|(_, k)| &prompts[*k])
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            sources
+                .iter()
+                .map(|(_, k)| candidates[*k].to_string())
+                .collect()
+        };
+        let columns: Vec<Column> = apart(names, &run_ids)
+            .into_iter()
+            .zip(&run_ids)
+            .map(|(label, run_id)| Column {
+                label,
+                run_id: run_id.to_string(),
+            })
+            .collect();
+        let Some(base) = sources.first() else {
+            return Matrix {
+                axis,
+                columns,
+                rows: Vec::new(),
+                pooled: Vec::new(),
+            };
+        };
+        let row_labels: Vec<String> = if by_prompt {
+            candidates.iter().map(ToString::to_string).collect()
+        } else {
+            named(&prompts.iter().collect::<Vec<_>>())
+        };
+        let mut targets: Vec<Target> = runs
+            .iter()
+            .flat_map(|run| run.manifest.targets.iter().copied())
+            .collect();
+        targets.sort();
+        targets.dedup();
+
+        let mut rows = Vec::new();
+        for (row, row_label) in row_labels.iter().enumerate() {
+            for target in &targets {
+                let mut cells: Vec<Option<Cell>> = sources
+                    .iter()
+                    .map(|(r, k)| {
+                        let run = &runs[*r];
+                        let (candidate, ins) = pair(*k, row);
+                        let asked = run
+                            .manifest
+                            .candidates
+                            .iter()
+                            .any(|c| c.candidate.name == candidate)
+                            && instruction_ids(run).contains(ins)
+                            && run.manifest.targets.contains(target);
+                        asked.then(|| Cell {
+                            tally: tally(&group(run, candidate, ins), *target),
+                            delta: None,
+                            case_nets: Vec::new(),
+                        })
+                    })
+                    .collect();
+                if cells[0].is_some() {
+                    let (candidate, ins) = pair(base.1, row);
+                    let before = scored(&runs[base.0], candidate, ins, *target);
+                    for (j, (r, k)) in sources.iter().enumerate().skip(1) {
+                        let Some(cell) = cells[j].as_mut() else {
+                            continue;
+                        };
+                        let (candidate, ins) = pair(*k, row);
+                        let after = scored(&runs[*r], candidate, ins, *target);
+                        let (mut gained, mut lost, mut pairs) = (0, 0, 0);
+                        let mut net: BTreeMap<&str, i64> = BTreeMap::new();
+                        for (key, was) in &before {
+                            let Some(now) = after.get(key) else { continue };
+                            pairs += 1;
+                            let up = *was != Grade::Hit && *now == Grade::Hit;
+                            let down = *was == Grade::Hit && *now != Grade::Hit;
+                            (gained, lost) = (gained + usize::from(up), lost + usize::from(down));
+                            *net.entry(key.0).or_default() += i64::from(up) - i64::from(down);
+                        }
+                        let up = net.values().filter(|n| **n > 0).count();
+                        let down = net.values().filter(|n| **n < 0).count();
+                        cell.delta = (pairs > 0).then(|| Delta::new(gained, lost, up, down));
+                        cell.case_nets = net.iter().map(|(k, n)| (k.to_string(), *n)).collect();
+                    }
+                }
+                rows.push(MatrixRow {
+                    label: row_label.clone(),
+                    target: Some(*target),
+                    cells,
+                });
+            }
+        }
+
+        let pooled = (0..sources.len()).map(|j| pool(&rows, j)).collect();
+        Matrix {
+            axis,
+            columns,
+            rows,
+            pooled,
+        }
+    }
+
+    /// One row per candidate or prompt with its targets pooled as the pooled row pools them (only
+    /// the targets every column has); a label with none shows `-` cells. The pooled row stays the
+    /// total over all labels.
+    pub fn grouped(&self) -> Vec<MatrixRow> {
+        self.rows
+            .chunk_by(|a, b| a.label == b.label)
+            .map(|group| MatrixRow {
+                label: group[0].label.clone(),
+                target: None,
+                cells: (0..self.columns.len()).map(|j| pool(group, j)).collect(),
+            })
+            .collect()
+    }
+
+    /// The header, then one row per (candidate or prompt, target); see `pooled_row` for the last row.
+    pub fn table(&self) -> Vec<Vec<CellText>> {
+        self.table_of(&self.rows)
+    }
+
+    /// `table` with the rows of `grouped`: the target column reads `all`.
+    pub fn grouped_table(&self) -> Vec<Vec<CellText>> {
+        self.table_of(&self.grouped())
+    }
+
+    fn table_of(&self, rows: &[MatrixRow]) -> Vec<Vec<CellText>> {
+        let label = if self.axis == Axis::Candidate {
+            "prompt"
+        } else {
+            "candidate"
+        };
+        let mut header = vec![CellText::plain(label), CellText::plain("target")];
+        header.extend(self.columns.iter().enumerate().map(|(i, c)| {
+            CellText::plain(if i == 0 {
+                format!("{} (baseline)", c.label)
+            } else {
+                c.label.clone()
+            })
+        }));
+        let mut table = vec![header];
+        for row in rows {
+            table.push(
+                [
+                    CellText::plain(&row.label),
+                    CellText::plain(row.target.map_or_else(|| "all".into(), |t| t.to_string())),
+                ]
+                .into_iter()
+                .chain(row.cells.iter().map(|c| cell_parts(c.as_ref())))
+                .collect(),
+            );
+        }
+        table
+    }
+
+    /// The rows present in every column added together; `None` when there is nothing to pool.
+    pub fn pooled_row(&self) -> Option<Vec<CellText>> {
+        self.pooled.iter().any(Option::is_some).then(|| {
+            [CellText::plain("pooled"), CellText::plain("all")]
+                .into_iter()
+                .chain(self.pooled.iter().map(|c| cell_parts(c.as_ref())))
+                .collect()
+        })
+    }
+
+    /// The lines under the table: what the pooled row (when shown) and the deltas mean.
+    pub fn notes(&self, pooled: bool) -> Vec<&'static str> {
+        let mut notes = Vec::new();
+        if pooled {
+            notes.push(pooled_note(self.axis));
+        }
+        if self
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().flatten().any(|c| c.delta.is_some()))
+        {
+            notes.push(DELTA_NOTE);
+        }
+        notes
+    }
+
+    /// The table text; the pooled row only when asked for and there is something to pool.
+    fn render(&self, pooled: bool) -> String {
+        let labels: Vec<&str> = self.columns.iter().map(|c| c.label.as_str()).collect();
+        let Some(baseline) = labels.first() else {
+            return String::new();
+        };
+        let mut cells = self.table();
+        let pooled = pooled.then(|| self.pooled_row()).flatten();
+        let shown = pooled.is_some();
+        cells.extend(pooled);
+        let text: Vec<Vec<String>> = cells
+            .iter()
+            .map(|row| row.iter().map(ToString::to_string).collect())
+            .collect();
+        let mut out = format!(
+            "  baseline: {baseline}\n  columns: {} ({})\n{}",
+            labels.join(", "),
+            self.axis.name(),
+            table("  ", &text)
+        );
+        for note in self.notes(shown) {
+            out += &format!("  {note}\n");
+        }
+        out
+    }
+}
+
+impl fmt::Display for Matrix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.render(true))
+    }
+}
+
 fn duplicate_hash_warnings(ids: &[InsId]) -> Vec<String> {
     let mut names: Vec<&str> = Vec::new();
     for (name, _) in ids {
@@ -243,6 +815,10 @@ impl fmt::Display for Report<'_> {
         )?;
         writeln!(f, "grading revision: {}", m.grading_revision)?;
         writeln!(f, "schema: {}", m.schema_version)?;
+
+        writeln!(f, "\n== Summary ==")?;
+        let summary = Matrix::from_runs(std::slice::from_ref(run), self.1);
+        write!(f, "{}", summary.render(summary.rows.len() > 1))?;
 
         writeln!(
             f,
@@ -450,7 +1026,9 @@ impl fmt::Display for Report<'_> {
 }
 
 /// Every way the other Runs differ from the first, which would make a side-by-side misleading.
-fn mismatches(runs: &[RunFile]) -> Vec<String> {
+/// What makes the Runs not directly comparable. With the candidates as the columns, a Candidate in
+/// only some Runs is a column, not a difference (as a prompt is on the prompt axis).
+fn mismatches(runs: &[RunFile], axis: Axis) -> Vec<String> {
     let first = &runs[0].manifest;
     let mut found = Vec::new();
     for run in runs {
@@ -536,33 +1114,6 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
                 only_in(&first.id, &theirs, &ours),
             ));
         }
-        for i in &m.instructions {
-            if let Some(j) = first.instructions.iter().find(|j| j.name == i.name)
-                && j.sha256 != i.sha256
-            {
-                found.push(format!(
-                    "{}: instructions `{}` differ in content ({} vs {})",
-                    m.id,
-                    i.name,
-                    short(&i.sha256),
-                    short(&j.sha256)
-                ));
-            }
-        }
-        let missing_instructions = |from: &Manifest, other: &Manifest| {
-            from.instructions
-                .iter()
-                .filter(|i| !other.instructions.iter().any(|j| j.name == i.name))
-                .map(|i| {
-                    format!(
-                        "{}: instructions `{}` is not in {}",
-                        from.id, i.name, other.id
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        found.extend(missing_instructions(m, first));
-        found.extend(missing_instructions(first, m));
         let missing = |from: &Manifest, other: &Manifest| {
             from.candidates
                 .iter()
@@ -580,8 +1131,10 @@ fn mismatches(runs: &[RunFile]) -> Vec<String> {
                 })
                 .collect::<Vec<_>>()
         };
-        found.extend(missing(m, first));
-        found.extend(missing(first, m));
+        if axis != Axis::Candidate {
+            found.extend(missing(m, first));
+            found.extend(missing(first, m));
+        }
         for c in &m.candidates {
             let route = |c: &CandidateRecord| {
                 format!(
@@ -641,20 +1194,33 @@ fn setting_differences(runs: &[RunFile]) -> Vec<String> {
         .collect()
 }
 
+/// What a comparison opens with: whether the Runs are not directly comparable, and the lines that
+/// say so (or that nothing differs). `axis` is the one the matrix uses, `Auto` resolved as it does.
+pub fn comparability(runs: &[RunFile], axis: Axis) -> (bool, Vec<String>) {
+    let axis = resolve(runs, axis);
+    let found = mismatches(runs, axis);
+    if found.is_empty() {
+        let candidates = if axis == Axis::Candidate {
+            " and"
+        } else {
+            ", candidates and"
+        };
+        let none = format!(
+            "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion{candidates} routes"
+        );
+        return (false, vec![none]);
+    }
+    let lines = std::iter::once("Not directly comparable:".to_string())
+        .chain(found.into_iter().map(|line| format!("  - {line}")))
+        .collect();
+    (true, lines)
+}
+
 impl fmt::Display for Comparison<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let runs = self.0;
-        let found = mismatches(runs);
-        if found.is_empty() {
-            writeln!(
-                f,
-                "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, instructions, candidates and routes"
-            )?;
-        } else {
-            writeln!(f, "Not directly comparable:")?;
-            for line in found {
-                writeln!(f, "  - {line}")?;
-            }
+        for line in comparability(runs, self.1).1 {
+            writeln!(f, "{line}")?;
         }
         let settings = setting_differences(runs);
         if !settings.is_empty() {
@@ -666,54 +1232,14 @@ impl fmt::Display for Comparison<'_> {
                 writeln!(f, "  - {line}")?;
             }
         }
-        writeln!(f, "\nAccuracy: hit / valid scored per Run")?;
-        let mut keys: Vec<(String, InsId)> = Vec::new();
-        let mut targets: Vec<Target> = Vec::new();
-        for run in runs {
-            for c in &run.manifest.candidates {
-                for i in instruction_ids(run) {
-                    let key = (c.candidate.name.clone(), i);
-                    if !keys.contains(&key) {
-                        keys.push(key);
-                    }
-                }
-            }
-            targets.extend(&run.manifest.targets);
-        }
-        targets.sort();
-        targets.dedup();
-        let mut rows = vec![
-            ["candidate", "instructions", "target"]
-                .map(String::from)
-                .into_iter()
-                .chain(runs.iter().map(|r| r.manifest.id.clone()))
-                .collect::<Vec<_>>(),
-        ];
-        for (name, ins) in &keys {
-            for target in &targets {
-                let cells = runs.iter().map(|run| {
-                    let asked = run
-                        .manifest
-                        .candidates
-                        .iter()
-                        .any(|c| &c.candidate.name == name)
-                        && instruction_ids(run).contains(ins)
-                        && run.manifest.targets.contains(target);
-                    if asked {
-                        accuracy_cell(&tally(&group(run, name, ins), *target))
-                    } else {
-                        "-".to_string()
-                    }
-                });
-                rows.push(
-                    [name.clone(), label(ins), target.to_string()]
-                        .into_iter()
-                        .chain(cells)
-                        .collect(),
-                );
-            }
-        }
-        write!(f, "{}", table("  ", &rows))
+        let matrix = Matrix::from_runs(runs, self.1);
+        let per = if matrix.axis == Axis::Candidate {
+            "candidate"
+        } else {
+            "prompt"
+        };
+        writeln!(f, "\nAccuracy: hit / valid scored per {per}")?;
+        write!(f, "{matrix}")
     }
 }
 
@@ -841,6 +1367,972 @@ mod tests {
         let mut invalid = all("low", "max", "low");
         invalid[1].1 = None;
         assert_eq!(cross_model(&t, &invalid), (None, 0, 0));
+    }
+
+    /// A Run of target `sonnet` (label high) built through the file reader. Each trial is
+    /// (candidate, instruction index, case, repetition, effort); "-" is an unanswered Trial.
+    fn run_of(
+        id: &str,
+        repetitions: u32,
+        instructions: &[(&str, &str)],
+        candidates: &[&str],
+        trials: &[(&str, usize, &str, u32, &str)],
+    ) -> RunFile {
+        run_of_targets(
+            id,
+            repetitions,
+            instructions,
+            candidates,
+            trials,
+            &["sonnet"],
+        )
+    }
+
+    /// `run_of` over several targets (all label high). An effort is one value for every target or
+    /// one per target, comma separated, in the order of `targets`.
+    fn run_of_targets(
+        id: &str,
+        repetitions: u32,
+        instructions: &[(&str, &str)],
+        candidates: &[&str],
+        trials: &[(&str, usize, &str, u32, &str)],
+        targets: &[&str],
+    ) -> RunFile {
+        let mut lines = vec![json!({
+            "type": "run", "schema_version": crate::evidence::SCHEMA_VERSION, "id": id,
+            "created_unix_ms": 1, "dataset": {"name": "d", "sha256": "d"},
+            "instructions": instructions.iter()
+                .map(|(n, s)| json!({"name": n, "sha256": s, "text": "t"})).collect::<Vec<_>>(),
+            "grading_revision": crate::evidence::GRADING_REVISION,
+            "candidates": candidates.iter()
+                .map(|c| json!({"name": c, "provider": "zen", "model": "m", "url": "u"}))
+                .collect::<Vec<_>>(),
+            "cases": ["c1"], "targets": targets,
+            "settings": {"repetitions": repetitions, "concurrency": 1, "timeout_secs": 60,
+                "retries": 0, "include_unscored": false},
+            "planned_trials": trials.len(),
+        })];
+        let labels: serde_json::Map<String, serde_json::Value> = targets
+            .iter()
+            .map(|t| (t.to_string(), json!("high")))
+            .collect();
+        for (seq, (candidate, ins, case, repetition, effort)) in trials.iter().enumerate() {
+            let attempt = if *effort == "-" {
+                json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "provider_error",
+                    "http_status": 503, "raw_response": "busy", "error": null})
+            } else {
+                let efforts: Vec<&str> = effort.split(',').collect();
+                let answers: serde_json::Map<String, serde_json::Value> = targets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let choice = efforts[i.min(efforts.len() - 1)];
+                        (
+                            format!("effort_{t}"),
+                            json!({"type": "choice", "choice": choice}),
+                        )
+                    })
+                    .collect();
+                let body = json!({ "answers": answers });
+                json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "answered",
+                    "http_status": 200, "raw_response": body.to_string(), "error": null})
+            };
+            lines.push(json!({
+                "type": "trial", "seq": seq, "candidate": candidate,
+                "instructions": {"name": instructions[*ins].0, "sha256": instructions[*ins].1},
+                "case_id": case, "targets": targets, "repetition": repetition,
+                "labels": labels, "request": {}, "attempts": [attempt],
+                "started_unix_ms": 0, "elapsed_ms": 1,
+            }));
+        }
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        crate::evidence::read_run(text.as_bytes()).unwrap()
+    }
+
+    fn labels(m: &Matrix) -> Vec<&str> {
+        m.columns.iter().map(|c| c.label.as_str()).collect()
+    }
+
+    fn delta(
+        (gained, lost): (usize, usize),
+        (cases_up, cases_down): (usize, usize),
+        noise: bool,
+    ) -> Option<Delta> {
+        Some(Delta {
+            gained,
+            lost,
+            cases_up,
+            cases_down,
+            noise,
+        })
+    }
+
+    #[test]
+    fn sign_test_p_is_the_exact_two_sided_binomial_tail() {
+        let close = |got: f64, want: f64| assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        close(sign_test_p(0, 0), 1.0);
+        close(sign_test_p(3, 0), 0.25);
+        close(sign_test_p(0, 6), 0.03125);
+        close(sign_test_p(6, 3), 260.0 / 512.0);
+        close(sign_test_p(10, 0), 2.0 / 1024.0);
+        close(sign_test_p(4, 4), 1.0); // 2 * P(X <= 4) is above 1: capped
+        // Known large-n values: 2 / 2^60, relative to the value, and a symmetric split.
+        let tiny = sign_test_p(60, 0);
+        assert!((tiny / (2.0 / 2f64.powi(60)) - 1.0).abs() < 1e-9, "{tiny}");
+        close(sign_test_p(30, 30), 1.0);
+        for (a, b) in [(6, 3), (7, 1), (0, 5), (2, 2)] {
+            assert_eq!(sign_test_p(a, b), sign_test_p(b, a));
+        }
+        // Thousands of cases neither overflow nor underflow into a panic or a NaN.
+        for (a, b) in [(500, 450), (5000, 0), (0, 4000), (3000, 2900)] {
+            let p = sign_test_p(a, b);
+            assert!((0.0..=1.0).contains(&p), "({a}, {b}) gave {p}");
+        }
+        assert!(sign_test_p(500, 450) > 0.05);
+        assert!(sign_test_p(600, 400) < 0.001);
+    }
+
+    #[test]
+    fn matrix_columns_are_prompts_with_the_first_as_baseline() {
+        let x = run_of(
+            "X1",
+            1,
+            &[("neutral", "aaa"), ("effortless", "bbb")],
+            &["c"],
+            &[],
+        );
+        let y = run_of("Y1", 1, &[("terse", "ccc")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        assert_eq!(labels(&m), ["neutral", "effortless", "terse"]);
+        assert_eq!(m.columns[0].run_id, "X1");
+        assert_eq!(m.columns[2].run_id, "Y1");
+    }
+
+    #[test]
+    fn matrix_labels_stay_unique_when_names_collide() {
+        // Same name, different content: the hash tells them apart.
+        let x = run_of("X1", 1, &[("neutral", "aaaaaaaaaaaaaaaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "bbbbbbbbbbbbbbbb")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        assert_eq!(
+            labels(&m),
+            ["neutral (aaaaaaaaaaaa)", "neutral (bbbbbbbbbbbb)"]
+        );
+        // Same content in two runs: the run id tells them apart.
+        let x = run_of("X1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        assert_eq!(labels(&m), ["neutral in X1", "neutral in Y1"]);
+        // Both rules at once: only the colliding pair gets the run id.
+        let x = run_of("X1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let z = run_of("Z1", 1, &[("neutral", "bbb")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y, z], Axis::Prompt);
+        assert_eq!(
+            labels(&m),
+            [
+                "neutral (aaa) in X1",
+                "neutral (aaa) in Y1",
+                "neutral (bbb)"
+            ]
+        );
+    }
+
+    #[test]
+    fn matrix_marks_what_a_run_did_not_ask_and_counts_what_it_did() {
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let y = run_of(
+            "Y1",
+            1,
+            &[("q", "b")],
+            &["c", "d"],
+            &[("d", 0, "c1", 1, "low"), ("c", 0, "c1", 1, "max")],
+        );
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        let rows: Vec<_> = m.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(rows, ["c", "d"]);
+        // Different prompts in different runs: every cell is its own, `d` was not asked in X1.
+        assert_eq!(m.rows[0].cells[0].as_ref().unwrap().tally.hit, 1);
+        assert_eq!(m.rows[0].cells[1].as_ref().unwrap().tally.over, 1);
+        assert!(m.rows[1].cells[0].is_none());
+        assert_eq!(m.rows[1].cells[1].as_ref().unwrap().tally.under, 1);
+        assert!(m.rows[0].cells[0].as_ref().unwrap().delta.is_none());
+        // `d` has no baseline cell, so no delta either.
+        assert!(m.rows[1].cells[1].as_ref().unwrap().delta.is_none());
+    }
+
+    /// Baseline `p` and variant `q` in one run, one candidate, repetition 1.
+    /// (case, baseline effort, variant effort); a missing side is `None`.
+    fn paired(repetitions: u32, cases: &[(&str, Option<&str>, Option<&str>)]) -> Matrix {
+        let mut trials = Vec::new();
+        for (case, base, variant) in cases {
+            for (ins, effort) in [(0, base), (1, variant)] {
+                if let Some(effort) = effort {
+                    trials.push(("c", ins, *case, 1, *effort));
+                }
+            }
+        }
+        Matrix::from_runs(
+            &[run_of(
+                "X1",
+                repetitions,
+                &[("p", "a"), ("q", "b")],
+                &["c"],
+                &trials,
+            )],
+            Axis::Prompt,
+        )
+    }
+
+    #[test]
+    fn matrix_delta_counts_only_pairs_of_valid_scored_predictions() {
+        let m = paired(
+            1,
+            &[
+                ("a", Some("high"), Some("high")), // hit -> hit: no change
+                ("b", Some("low"), Some("high")),  // gained
+                ("c", Some("max"), Some("high")),  // gained
+                ("d", Some("high"), Some("low")),  // lost
+                ("e", Some("?"), Some("high")),    // invalid baseline: ignored
+                ("f", Some("high"), Some("-")),    // unanswered variant: ignored
+                ("g", Some("high"), None),         // missing from the variant: ignored
+                ("h", None, Some("high")),         // missing from the baseline: ignored
+                ("i", Some("low"), Some("max")),   // miss -> miss: no change
+            ],
+        );
+        let cell = m.rows[0].cells[1].as_ref().unwrap();
+        assert_eq!(cell.delta, delta((2, 1), (2, 1), true));
+        // The baseline column never carries a delta.
+        assert!(m.rows[0].cells[0].as_ref().unwrap().delta.is_none());
+    }
+
+    #[test]
+    fn matrix_delta_has_none_without_pairs() {
+        let m = paired(1, &[("a", Some("high"), None), ("b", None, Some("high"))]);
+        assert!(m.rows[0].cells[1].as_ref().unwrap().delta.is_none());
+    }
+
+    #[test]
+    fn matrix_delta_is_significant_only_by_a_sign_test_on_the_cases_that_changed() {
+        let gains = |n: usize, losses: usize| {
+            let ids: Vec<String> = (0..n + losses).map(|i| format!("k{i}")).collect();
+            let cases: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let (b, v) = if i < n {
+                        ("low", "high")
+                    } else {
+                        ("high", "low")
+                    };
+                    (id.as_str(), Some(b), Some(v))
+                })
+                .collect();
+            paired(1, &cases).rows[0].cells[1]
+                .as_ref()
+                .unwrap()
+                .delta
+                .clone()
+        };
+        assert_eq!(gains(5, 0), delta((5, 0), (5, 0), true)); // p = 0.0625
+        assert_eq!(gains(6, 0), delta((6, 0), (6, 0), false)); // p = 0.03125
+        assert_eq!(gains(0, 6), delta((0, 6), (0, 6), false));
+        assert_eq!(gains(7, 1), delta((7, 1), (7, 1), true)); // p = 0.0703
+        assert_eq!(gains(8, 1), delta((8, 1), (8, 1), false)); // p = 0.0391
+        assert_eq!(gains(1, 3), delta((1, 3), (1, 3), true));
+        assert_eq!(gains(0, 0), None);
+    }
+
+    #[test]
+    fn matrix_delta_counts_a_case_once_however_many_repetitions_flip() {
+        // Every case gains in both repetitions: `+2` trials per case, but one flipped case each.
+        let flips = |cases: usize| {
+            let ids: Vec<String> = (0..cases).map(|i| format!("k{i}")).collect();
+            let mut trials = Vec::new();
+            for id in &ids {
+                for rep in [1, 2] {
+                    trials.push(("c", 0, id.as_str(), rep, "low"));
+                    trials.push(("c", 1, id.as_str(), rep, "high"));
+                }
+            }
+            let run = run_of("X1", 2, &[("p", "a"), ("q", "b")], &["c"], &trials);
+            Matrix::from_runs(&[run], Axis::Prompt).rows[0].cells[1]
+                .as_ref()
+                .unwrap()
+                .delta
+                .clone()
+        };
+        // Three cases x two repetitions: 6 trials gained, but 3 cases, p = 0.25.
+        assert_eq!(flips(3), delta((6, 0), (3, 0), true));
+        // Six cases: p = 0.03125, however the trials are counted.
+        assert_eq!(flips(6), delta((12, 0), (6, 0), false));
+    }
+
+    #[test]
+    fn matrix_delta_ignores_a_case_whose_repetitions_cancel() {
+        // k0 gains in repetition 1 and loses in repetition 2: two flipped trials, no flipped case.
+        let run = run_of(
+            "X1",
+            2,
+            &[("p", "a"), ("q", "b")],
+            &["c"],
+            &[
+                ("c", 0, "k0", 1, "low"),
+                ("c", 1, "k0", 1, "high"),
+                ("c", 0, "k0", 2, "high"),
+                ("c", 1, "k0", 2, "low"),
+            ],
+        );
+        let m = Matrix::from_runs(&[run], Axis::Prompt);
+        assert_eq!(
+            m.rows[0].cells[1].as_ref().unwrap().delta,
+            delta((1, 1), (0, 0), true)
+        );
+    }
+
+    #[test]
+    fn matrix_pools_every_row_per_column() {
+        let base = run_of(
+            "X1",
+            1,
+            &[("p", "a")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "high"),
+                ("c", 0, "c2", 1, "low"),
+                ("d", 0, "c1", 1, "low"),
+                ("d", 0, "c2", 1, "?"),
+            ],
+        );
+        let variant = run_of(
+            "Y1",
+            1,
+            &[("q", "b")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "low"),  // c1: lost
+                ("c", 0, "c2", 1, "high"), // c2: gained
+                ("d", 0, "c1", 1, "high"), // gained
+                ("d", 0, "c2", 1, "high"), // baseline invalid: ignored
+            ],
+        );
+        let m = Matrix::from_runs(&[base, variant], Axis::Prompt);
+        let (b, v) = (m.pooled[0].as_ref().unwrap(), m.pooled[1].as_ref().unwrap());
+        assert_eq!((b.tally.hit, b.tally.under, b.tally.invalid), (1, 2, 1));
+        assert_eq!((v.tally.hit, v.tally.under), (3, 1));
+        assert!(b.delta.is_none());
+        assert_eq!(v.delta, delta((2, 1), (2, 1), true));
+    }
+
+    #[test]
+    fn matrix_pools_only_rows_present_in_every_column() {
+        // `d` was only asked in Y1, so its hits must not lift Y1's pooled rate above X1's.
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "low")]);
+        let y = run_of(
+            "Y1",
+            1,
+            &[("q", "b")],
+            &["c", "d"],
+            &[("c", 0, "c1", 1, "low"), ("d", 0, "c1", 1, "high")],
+        );
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        // The row itself still shows everything.
+        assert_eq!(m.rows[1].cells[1].as_ref().unwrap().tally.hit, 1);
+        let (b, v) = (m.pooled[0].as_ref().unwrap(), m.pooled[1].as_ref().unwrap());
+        assert_eq!((b.tally.hit, b.tally.under), (0, 1));
+        assert_eq!((v.tally.hit, v.tally.under), (0, 1));
+        assert_eq!(v.delta, delta((0, 0), (0, 0), true));
+    }
+
+    #[test]
+    fn matrix_without_a_row_in_every_column_has_no_pooled_row() {
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let y = run_of("Y1", 1, &[("q", "b")], &["d"], &[("d", 0, "c1", 1, "high")]);
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        assert!(m.pooled.iter().all(Option::is_none));
+        assert!(m.pooled_row().is_none());
+        assert!(!m.to_string().contains("pooled"), "{m}");
+    }
+
+    #[test]
+    fn matrix_from_one_run_with_three_prompts_has_three_columns() {
+        let m = paired(1, &[("a", Some("high"), Some("high"))]);
+        assert_eq!(labels(&m), ["p", "q"]);
+        let x = run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b"), ("r", "c")],
+            &["c"],
+            &[
+                ("c", 0, "c1", 1, "low"),
+                ("c", 1, "c1", 1, "high"),
+                ("c", 2, "c1", 1, "low"),
+            ],
+        );
+        let m = Matrix::from_runs(&[x], Axis::Prompt);
+        assert_eq!(labels(&m), ["p", "q", "r"]);
+        let deltas: Vec<_> = m.rows[0]
+            .cells
+            .iter()
+            .map(|c| c.as_ref().unwrap().delta.clone())
+            .collect();
+        assert_eq!(
+            deltas,
+            [
+                None,
+                delta((1, 0), (1, 0), true),
+                delta((0, 0), (0, 0), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn matrix_text_has_the_baseline_columns_deltas_and_pooled_row() {
+        let x = run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "low"),
+                ("c", 1, "c1", 1, "high"),
+                ("c", 0, "c2", 1, "high"),
+                ("c", 1, "c2", 1, "high"),
+                ("d", 0, "c1", 1, "high"),
+            ],
+        );
+        let text = Matrix::from_runs(&[x], Axis::Prompt).to_string();
+        let lines: Vec<String> = text
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "baseline: p",
+                "columns: p, q (prompts)",
+                "candidate target p (baseline) q",
+                "c sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~",
+                "d sonnet 1/1 (100.0%) n/a (0 valid scored)",
+                "pooled all 2/3 (66.7%) 2/2 (100.0%) +1 -0 ~",
+                "pooled = rows present in every column, all candidates and targets together, over valid scored predictions; it is not a score",
+                "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)",
+            ]
+        );
+    }
+
+    #[test]
+    fn cell_parts_split_the_counts_from_a_delta_and_say_how_to_read_it() {
+        let cell = |d| Cell {
+            tally: Tally {
+                hit: 1,
+                ..Tally::default()
+            },
+            delta: d,
+            case_nets: Vec::new(),
+        };
+        let parts = |d| cell_parts(Some(&cell(d)));
+        assert_eq!(cell_parts(None), CellText::plain("-"));
+        assert_eq!(parts(None), CellText::plain("1/1 (100.0%)"));
+        let read = |p: CellText| p.delta.unwrap();
+        // Significant: the colour follows which side has more flipped cases.
+        assert_eq!(
+            read(parts(delta((9, 2), (7, 1), false))),
+            ("+9 -2".into(), DeltaKind::Gained)
+        );
+        assert_eq!(
+            read(parts(delta((2, 9), (1, 7), false))),
+            ("+2 -9".into(), DeltaKind::Lost)
+        );
+        // Not significant is dim and marked, whichever side is ahead.
+        assert_eq!(
+            read(parts(delta((3, 1), (3, 1), true))),
+            ("+3 -1 ~".into(), DeltaKind::Noise)
+        );
+        assert_eq!(
+            read(parts(delta((2, 2), (0, 0), true))),
+            ("+2 -2 ~".into(), DeltaKind::Noise)
+        );
+        assert_eq!(
+            parts(delta((9, 2), (7, 1), false)).to_string(),
+            "1/1 (100.0%)  +9 -2"
+        );
+    }
+
+    #[test]
+    fn matrix_table_is_the_text_the_display_prints() {
+        let x = run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b")],
+            &["c"],
+            &[("c", 0, "c1", 1, "low"), ("c", 1, "c1", 1, "high")],
+        );
+        let m = Matrix::from_runs(&[x], Axis::Prompt);
+        let rows: Vec<Vec<String>> = m
+            .table()
+            .iter()
+            .chain(m.pooled_row().iter())
+            .map(|r| r.iter().map(ToString::to_string).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                vec!["candidate", "target", "p (baseline)", "q"],
+                vec!["c", "sonnet", "0/1 (0.0%)", "1/1 (100.0%)  +1 -0 ~"],
+                vec!["pooled", "all", "0/1 (0.0%)", "1/1 (100.0%)  +1 -0 ~"],
+            ]
+        );
+        assert_eq!(m.notes(true).len(), 2);
+        assert_eq!(m.notes(false), [DELTA_NOTE]);
+    }
+
+    #[test]
+    fn comparability_is_the_text_the_comparison_opens_with() {
+        let complete = |id, repetitions| {
+            let mut run = run_of(id, repetitions, &[("p", "a")], &["c"], &[]);
+            run.end = Some(crate::evidence::EndRecord {
+                state: RunState::Complete,
+                finished_unix_ms: 9,
+            });
+            run
+        };
+        let (incomparable, lines) =
+            comparability(&[complete("X1", 1), complete("Y1", 1)], Axis::Auto);
+        assert!(!incomparable);
+        assert!(lines.len() == 1 && lines[0].starts_with("no differences found in: "));
+        let (incomparable, lines) =
+            comparability(&[complete("X1", 1), complete("Y1", 2)], Axis::Auto);
+        assert!(incomparable);
+        assert_eq!(lines[0], "Not directly comparable:");
+        assert!(lines[1].starts_with("  - Y1: repetitions differs from X1"));
+    }
+
+    #[test]
+    fn candidates_are_not_a_difference_when_they_are_the_columns() {
+        let run = |id, candidates: &[&str]| {
+            let mut run = run_of(id, 1, &[("p", "a")], candidates, &[]);
+            run.end = Some(crate::evidence::EndRecord {
+                state: RunState::Complete,
+                finished_unix_ms: 9,
+            });
+            run
+        };
+        let runs = [run("X1", &["c", "d"]), run("Y1", &["d", "e"])];
+        let lines = |axis| comparability(&runs, axis).1.join("\n");
+        // One prompt, different candidates: Auto puts the candidates in the columns.
+        for axis in [Axis::Auto, Axis::Candidate] {
+            let text = lines(axis);
+            assert!(!text.contains("is not in"), "{text}");
+            assert!(text.ends_with("unscored inclusion and routes"), "{text}");
+        }
+        let text = lines(Axis::Prompt);
+        assert!(text.contains("X1: candidate `c` is not in Y1"), "{text}");
+        assert!(text.contains("Y1: candidate `e` is not in X1"), "{text}");
+        // Routes are still compared: `d` differs in model.
+        let mut y = run("Y1", &["d"]);
+        y.manifest.candidates[0].candidate.model = "other".into();
+        let text = comparability(&[run("X1", &["d"]), y], Axis::Candidate)
+            .1
+            .join("\n");
+        assert!(text.contains("candidate `d` route differs"), "{text}");
+        // The comparison prints the same lines.
+        let printed = Comparison(&runs, Axis::Auto).to_string();
+        assert!(!printed.contains("is not in"), "{printed}");
+    }
+
+    #[test]
+    fn matrix_of_candidates_without_prompts_is_empty_on_every_axis() {
+        for axis in [Axis::Auto, Axis::Prompt, Axis::Candidate] {
+            let m = Matrix::from_runs(&[run_of("X1", 1, &[], &["c", "d"], &[])], axis);
+            assert!(m.columns.is_empty() && m.rows.is_empty() && m.pooled.is_empty());
+            assert_eq!(m.to_string(), "");
+        }
+    }
+
+    #[test]
+    fn matrix_of_a_run_with_no_prompts_is_empty() {
+        let m = Matrix::from_runs(&[run_of("X1", 1, &[], &["c"], &[])], Axis::Auto);
+        assert!(m.columns.is_empty() && m.rows.is_empty() && m.pooled.is_empty());
+        assert_eq!(m.to_string(), "");
+    }
+
+    #[test]
+    fn matrix_text_without_a_delta_has_no_legend() {
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let text = Matrix::from_runs(&[x], Axis::Prompt).to_string();
+        assert!(!text.contains("+g -l"), "{text}");
+        assert!(
+            text.contains("\n  c          sonnet  1/1 (100.0%)\n"),
+            "{text}"
+        );
+    }
+
+    /// Lines of a matrix's text with runs of spaces collapsed.
+    fn squashed(m: &Matrix) -> Vec<String> {
+        m.to_string()
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// Candidates c (baseline) and d, prompts p and q, one case: c misses p and hits q, d the reverse.
+    fn crossed() -> RunFile {
+        run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "low"),
+                ("c", 1, "c1", 1, "high"),
+                ("d", 0, "c1", 1, "high"),
+                ("d", 1, "c1", 1, "low"),
+            ],
+        )
+    }
+
+    #[test]
+    fn candidate_axis_has_candidate_columns_prompt_rows_and_a_paired_delta_between_candidates() {
+        let m = Matrix::from_runs(&[crossed()], Axis::Candidate);
+        assert_eq!(m.axis, Axis::Candidate);
+        assert_eq!(m.axis.toggled(), Axis::Prompt);
+        assert_eq!(labels(&m), ["c", "d"]);
+        let rows: Vec<_> = m.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(rows, ["p", "q"]);
+        // d against the baseline c, for the same prompt: gained on p, lost on q.
+        assert_eq!(
+            m.rows[0].cells[1].as_ref().unwrap().delta,
+            delta((1, 0), (1, 0), true)
+        );
+        assert_eq!(
+            m.rows[1].cells[1].as_ref().unwrap().delta,
+            delta((0, 1), (0, 1), true)
+        );
+        assert!(m.rows[0].cells[0].as_ref().unwrap().delta.is_none());
+        assert_eq!(
+            squashed(&m),
+            [
+                "baseline: c",
+                "columns: c, d (candidates)",
+                "prompt target c (baseline) d",
+                "p sonnet 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~",
+                "q sonnet 1/1 (100.0%) 0/1 (0.0%) +0 -1 ~",
+                "pooled all 1/2 (50.0%) 1/2 (50.0%) +1 -1 ~",
+                "pooled = rows present in every column, all prompts and targets together, over valid scored predictions; it is not a score",
+                "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)",
+            ]
+        );
+        // The prompt axis of the same run is the transpose: it keeps its own words and header.
+        let m = Matrix::from_runs(&[crossed()], Axis::Prompt);
+        assert_eq!((m.axis, m.axis.toggled()), (Axis::Prompt, Axis::Candidate));
+        assert_eq!(squashed(&m)[1], "columns: p, q (prompts)");
+        assert_eq!(squashed(&m)[2], "candidate target p (baseline) q");
+    }
+
+    #[test]
+    fn candidate_axis_labels_a_column_with_its_run_and_a_row_with_its_hash_only_on_a_collision() {
+        let x = run_of("X1", 1, &[("neutral", "aaaaaaaaaaaaaaaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "bbbbbbbbbbbbbbbb")], &["c"], &[]);
+        let m = Matrix::from_runs(&[x, y], Axis::Candidate);
+        assert_eq!(labels(&m), ["c in X1", "c in Y1"]);
+        let rows: Vec<_> = m.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(rows, ["neutral (aaaaaaaaaaaa)", "neutral (bbbbbbbbbbbb)"]);
+        // The same prompt in both runs is one row, and a candidate alone in its run needs no run id.
+        let x = run_of("X1", 1, &[("neutral", "aaa")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("neutral", "aaa")], &["c", "d"], &[]);
+        let m = Matrix::from_runs(&[x, y], Axis::Candidate);
+        assert_eq!(labels(&m), ["c in X1", "c in Y1", "d"]);
+        assert_eq!(m.rows.len(), 1);
+        assert_eq!(m.rows[0].label, "neutral");
+        assert_eq!(m.columns[1].run_id, "Y1");
+    }
+
+    #[test]
+    fn candidate_axis_marks_what_a_run_did_not_ask_and_pools_only_rows_every_column_has() {
+        let x = run_of(
+            "X1",
+            1,
+            &[("p", "a"), ("q", "b")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "high"),
+                ("c", 1, "c1", 1, "high"),
+                ("d", 0, "c1", 1, "low"),
+                ("d", 1, "c1", 1, "high"),
+            ],
+        );
+        let y = run_of(
+            "Y1",
+            1,
+            &[("r", "c"), ("p", "a")],
+            &["c"],
+            &[("c", 1, "c1", 1, "low")],
+        );
+        let m = Matrix::from_runs(&[x, y], Axis::Candidate);
+        assert_eq!(labels(&m), ["c in X1", "d", "c in Y1"]);
+        // Prompts in first-seen order across the runs.
+        let rows: Vec<_> = m.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(rows, ["p", "q", "r"]);
+        let asked: Vec<Vec<bool>> = m
+            .rows
+            .iter()
+            .map(|r| r.cells.iter().map(Option::is_some).collect())
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                [true, true, true],
+                [true, true, false],
+                [false, false, true]
+            ]
+        );
+        assert!(
+            squashed(&m).contains(&"q sonnet 1/1 (100.0%) 1/1 (100.0%) +0 -0 ~ -".to_string()),
+            "{m}"
+        );
+        // Only prompt p is in every column: q's hits must not lift X1's pooled rate.
+        let pooled: Vec<_> = m.pooled.iter().map(|c| c.as_ref().unwrap()).collect();
+        assert_eq!(
+            pooled.iter().map(|c| c.tally.hit).collect::<Vec<_>>(),
+            [1, 0, 0]
+        );
+        assert_eq!(
+            pooled.iter().map(|c| c.tally.under).collect::<Vec<_>>(),
+            [0, 1, 1]
+        );
+        assert_eq!(pooled[1].delta, delta((0, 1), (0, 1), true));
+        assert_eq!(pooled[2].delta, delta((0, 1), (0, 1), true));
+        // With no prompt in every column there is nothing to pool.
+        let x = run_of("X1", 1, &[("p", "a")], &["c"], &[]);
+        let y = run_of("Y1", 1, &[("q", "b")], &["d"], &[]);
+        let m = Matrix::from_runs(&[x, y], Axis::Candidate);
+        assert!(m.pooled.iter().all(Option::is_none) && m.pooled_row().is_none());
+    }
+
+    #[test]
+    fn auto_picks_prompts_for_several_prompts_else_candidates_for_several_candidates() {
+        let axis = |runs: &[RunFile]| Matrix::from_runs(runs, Axis::Auto).axis;
+        let run = |ins: &[(&str, &str)], candidates: &[&str]| run_of("X1", 1, ins, candidates, &[]);
+        let (p, q) = (("p", "a"), ("q", "b"));
+        assert_eq!(axis(&[run(&[p, q], &["c"])]), Axis::Prompt);
+        assert_eq!(axis(&[run(&[p], &["c", "d"])]), Axis::Candidate);
+        assert_eq!(axis(&[run(&[p, q], &["c", "d"])]), Axis::Prompt);
+        assert_eq!(axis(&[run(&[p], &["c"])]), Axis::Prompt);
+        // Prompts and candidates are counted across the runs: the same prompt does not make two.
+        let y = run_of("Y1", 1, &[p], &["d"], &[]);
+        assert_eq!(axis(&[run(&[p], &["c"]), y]), Axis::Candidate);
+        let y = run_of("Y1", 1, &[p], &["c"], &[]);
+        assert_eq!(axis(&[run(&[p], &["c"]), y]), Axis::Prompt);
+        let y = run_of("Y1", 1, &[q], &["c"], &[]);
+        assert_eq!(axis(&[run(&[p], &["c"]), y]), Axis::Prompt);
+        // A same-named prompt with other content is another prompt.
+        let y = run_of("Y1", 1, &[("p", "z")], &["d"], &[]);
+        assert_eq!(axis(&[run(&[p], &["c"]), y]), Axis::Prompt);
+        // An explicit axis is kept.
+        let m = Matrix::from_runs(&[run(&[p], &["c", "d"])], Axis::Prompt);
+        assert_eq!(m.axis, Axis::Prompt);
+    }
+
+    /// A cell as [hit, under, over, gained, lost, cases up, cases down]; the deltas are 0 without one.
+    fn counts(cell: &Option<Cell>) -> Option<[usize; 7]> {
+        cell.as_ref().map(|c| {
+            let (g, l, u, d) = c.delta.as_ref().map_or((0, 0, 0, 0), |d| {
+                (d.gained, d.lost, d.cases_up, d.cases_down)
+            });
+            [c.tally.hit, c.tally.under, c.tally.over, g, l, u, d]
+        })
+    }
+
+    /// The rows of `rows` as squashed text.
+    fn squash(rows: Vec<Vec<CellText>>) -> Vec<String> {
+        rows.iter()
+            .map(|r| {
+                r.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grouped_pools_each_candidates_targets_over_the_rows_every_column_has() {
+        // Prompt p in X1 (candidates c, d; targets sonnet and opus), prompt q in Y1 (candidate c;
+        // sonnet only). Only c on sonnet is asked in both columns; d and c on opus are not.
+        let x = run_of_targets(
+            "X1",
+            1,
+            &[("p", "a")],
+            &["c", "d"],
+            &[
+                ("c", 0, "c1", 1, "low,high"),
+                ("d", 0, "c1", 1, "high,high"),
+            ],
+            &["sonnet", "opus"],
+        );
+        let y = run_of("Y1", 1, &[("q", "b")], &["c"], &[("c", 0, "c1", 1, "high")]);
+        let m = Matrix::from_runs(&[x, y], Axis::Prompt);
+        assert_eq!(m.rows.len(), 4); // c and d, each on sonnet and opus
+        let groups = m.grouped();
+        let labels: Vec<_> = groups.iter().map(|g| g.label.as_str()).collect();
+        assert_eq!(labels, ["c", "d"]);
+        assert!(groups.iter().all(|g| g.target.is_none()));
+        // c: only the sonnet row counts, so its opus hit does not lift X1's rate.
+        assert_eq!(counts(&groups[0].cells[0]), Some([0, 1, 0, 0, 0, 0, 0]));
+        assert_eq!(counts(&groups[0].cells[1]), Some([1, 0, 0, 1, 0, 1, 0]));
+        // d was not asked in Y1 on any target: nothing to pool.
+        assert!(groups[1].cells.iter().all(Option::is_none));
+        assert_eq!(
+            squash(m.grouped_table()),
+            [
+                "candidate target p (baseline) q",
+                "c all 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~",
+                "d all - -",
+            ]
+        );
+        // The expanded rows are untouched.
+        assert_eq!(
+            squash(m.table())[1],
+            "c sonnet 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~"
+        );
+    }
+
+    #[test]
+    fn grouped_over_the_candidate_axis_sums_to_the_pooled_row() {
+        // c and d, prompts p and q, two targets: c misses p and hits q, d the reverse.
+        let m = Matrix::from_runs(
+            &[run_of_targets(
+                "X1",
+                1,
+                &[("p", "a"), ("q", "b")],
+                &["c", "d"],
+                &[
+                    ("c", 0, "c1", 1, "low"),
+                    ("c", 1, "c1", 1, "high"),
+                    ("d", 0, "c1", 1, "high"),
+                    ("d", 1, "c1", 1, "low"),
+                ],
+                &["sonnet", "opus"],
+            )],
+            Axis::Candidate,
+        );
+        let groups = m.grouped();
+        assert_eq!(
+            squash(m.grouped_table()),
+            [
+                "prompt target c (baseline) d",
+                "p all 0/2 (0.0%) 2/2 (100.0%) +2 -0 ~",
+                "q all 2/2 (100.0%) 0/2 (0.0%) +0 -2 ~",
+            ]
+        );
+        // Every row qualifies here, so the groups add up to the pooled row.
+        for j in 0..m.columns.len() {
+            let mut sum = [0; 7];
+            for g in &groups {
+                for (total, n) in sum.iter_mut().zip(counts(&g.cells[j]).unwrap()) {
+                    *total += n;
+                }
+            }
+            assert_eq!(Some(sum), counts(&m.pooled[j]), "column {j}");
+        }
+        // The same case on both targets of a prompt counts once: 1 case up and 1 down, noise.
+        assert_eq!(
+            m.pooled[1].as_ref().unwrap().delta,
+            delta((2, 2), (1, 1), true)
+        );
+    }
+
+    /// One Run, prompts p (baseline) and q, targets sonnet and opus. Each trial is (candidate,
+    /// case, p effort, q effort).
+    fn two_targets(trials: &[(&str, &str, &str, &str)], candidates: &[&str]) -> Matrix {
+        let trials: Vec<_> = trials
+            .iter()
+            .flat_map(|(c, case, p, q)| [(*c, 0, *case, 1, *p), (*c, 1, *case, 1, *q)])
+            .collect();
+        Matrix::from_runs(
+            &[run_of_targets(
+                "X1",
+                1,
+                &[("p", "a"), ("q", "b")],
+                candidates,
+                &trials,
+                &["sonnet", "opus"],
+            )],
+            Axis::Prompt,
+        )
+    }
+
+    #[test]
+    fn grouped_counts_a_case_once_however_many_targets_it_was_graded_on() {
+        let up = |c: &'static str, case: &'static str| (c, case, "low", "high");
+        // Three cases gained on both targets: six gained trials, but still only three cases, and
+        // three cases cannot be significant (the smallest p is 0.25).
+        let m = two_targets(&[up("c", "k1"), up("c", "k2"), up("c", "k3")], &["c"]);
+        assert!(
+            m.rows
+                .iter()
+                .all(|r| r.cells[1].as_ref().unwrap().delta == delta((3, 0), (3, 0), true))
+        );
+        assert_eq!(
+            m.grouped()[0].cells[1].as_ref().unwrap().delta,
+            delta((6, 0), (3, 0), true)
+        );
+        assert_eq!(
+            squash(m.grouped_table())[1],
+            "c all 0/6 (0.0%) 6/6 (100.0%) +6 -0 ~"
+        );
+        // Six distinct cases are significant (p = 0.03125).
+        let cases = ["k1", "k2", "k3", "k4", "k5", "k6"].map(|k| up("c", k));
+        let m = two_targets(&cases, &["c"]);
+        assert_eq!(
+            m.grouped()[0].cells[1].as_ref().unwrap().delta,
+            delta((12, 0), (6, 0), false)
+        );
+        // A case gained on one target and lost on the other nets to nothing and is ignored.
+        let m = two_targets(&[("c", "k1", "low,high", "high,low")], &["c"]);
+        assert_eq!(
+            m.grouped()[0].cells[1].as_ref().unwrap().delta,
+            delta((1, 1), (0, 0), true)
+        );
+    }
+
+    #[test]
+    fn pooling_counts_a_case_once_per_candidate_not_once_per_target() {
+        let up = |c: &'static str, case: &'static str| (c, case, "low", "high");
+        // c and d each gain the same three cases on both targets. Each candidate is its own
+        // observation, so the pooled row has six cases (significant) where each group has three.
+        let m = two_targets(
+            &[
+                up("c", "k1"),
+                up("c", "k2"),
+                up("c", "k3"),
+                up("d", "k1"),
+                up("d", "k2"),
+                up("d", "k3"),
+            ],
+            &["c", "d"],
+        );
+        let groups = m.grouped();
+        for group in &groups {
+            assert_eq!(
+                group.cells[1].as_ref().unwrap().delta,
+                delta((6, 0), (3, 0), true)
+            );
+        }
+        assert_eq!(
+            m.pooled[1].as_ref().unwrap().delta,
+            delta((12, 0), (6, 0), false)
+        );
+    }
+
+    #[test]
+    fn grouped_has_no_rows_when_the_matrix_has_none() {
+        let m = Matrix::from_runs(&[run_of("X1", 1, &[], &["c"], &[])], Axis::Auto);
+        assert!(m.grouped().is_empty());
     }
 
     #[test]

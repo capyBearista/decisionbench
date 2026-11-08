@@ -1217,10 +1217,19 @@ fn provider_failure_exits_3_and_keeps_the_raw_body() {
 
 #[test]
 fn transport_failure_exits_3_and_saves_evidence() {
+    // A server that accepts and hangs up without answering: a transport error that does not depend
+    // on how the host treats connections to a closed port (some sandboxes drop them silently).
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            drop(stream);
+        }
+    });
     let eval = Eval::new(
         "transport",
         &candidate_toml("jev-openrouter", "openrouter", "m"),
-        "http://127.0.0.1:1",
+        &url,
     );
     let out = eval.run(
         &args_with(&C002_OPUS, &["--retries", "0"]),
@@ -1608,6 +1617,44 @@ fn custom_instructions_are_sent_and_recorded_by_name_and_hash() {
 }
 
 #[test]
+fn every_instructions_flag_adds_an_instruction_set_to_the_plan() {
+    let stub = stub(200, OPENROUTER_REPLY);
+    let eval = openrouter_eval("two-sets", &stub);
+    let dir = fresh_dir("two-sets-prompts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+    std::fs::write(&a, custom()).unwrap();
+    std::fs::write(&b, custom().replace("low desc", "other desc")).unwrap();
+    let args = args_with(
+        &C002_OPUS,
+        &[
+            "--instructions",
+            a.to_str().unwrap(),
+            "--instructions",
+            b.to_str().unwrap(),
+        ],
+    );
+    let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(
+            "planned: 1 candidate × 2 instruction sets × 1 case (0 unlabelled skipped) × 1 repetition = 2 trials, up to 4 requests"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let manifest = eval.manifest();
+    assert_eq!(manifest["planned_trials"], 2);
+    let names: Vec<_> = manifest["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("a"), json!("b")]);
+}
+
+#[test]
 fn default_instructions_are_recorded_as_neutral() {
     let stub = stub(200, OPENROUTER_REPLY);
     let eval = openrouter_eval("neutral", &stub);
@@ -1712,8 +1759,8 @@ fn a_truncated_body_keeps_the_http_status() {
     let url = format!("http://{}/decisions", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            let mut buf = [0; 4096];
-            let _ = stream.read(&mut buf);
+            // Drain the request so closing does not reset the connection before the reply lands.
+            let _ = read_request(&mut stream);
             let _ = stream.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\nconnection: close\r\n\r\nshort",
             );
@@ -1741,8 +1788,9 @@ fn a_non_utf8_error_body_is_kept_as_a_provider_error() {
     let url = format!("http://{}/decisions", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
-            let mut buf = [0; 4096];
-            let _ = stream.read(&mut buf);
+            // Drain the whole request first: closing with unread request bytes makes the kernel
+            // reset the connection, and the client then loses the reply body.
+            let _ = read_request(&mut stream);
             let body = b"Bad gateway: caf\xe9 down";
             let head = format!(
                 "HTTP/1.1 502 Bad Gateway\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -3173,7 +3221,7 @@ fn compare_run(
 }
 
 #[test]
-fn compare_lines_up_matching_runs_one_column_each() {
+fn compare_labels_the_same_prompt_in_two_runs_by_run_id() {
     // X: high (hit), low (under) -> 1/2. Y: high, high -> 2/2.
     let x = compare_run(
         "cmp-x.jsonl",
@@ -3198,14 +3246,19 @@ fn compare_lines_up_matching_runs_one_column_each() {
     let out = stdout_of_success(run(&["compare", x.to_str().unwrap(), y.to_str().unwrap()]));
     assert_has_line(
         &out,
-        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, instructions, candidates and routes",
+        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, candidates and routes",
     );
     assert!(!out.contains("Not directly comparable"), "{out}");
-    assert_has_line(&out, "candidate instructions target X1 Y1");
+    assert_has_line(&out, "Accuracy: hit / valid scored per prompt");
+    assert_has_line(&out, "baseline: neutral in X1");
+    assert_has_line(&out, "columns: neutral in X1, neutral in Y1 (prompts)");
     assert_has_line(
         &out,
-        "c1 neutral (aaaaaaaaaaaa) sonnet 1/2 (50.0%) 2/2 (100.0%)",
+        "candidate target neutral in X1 (baseline) neutral in Y1",
     );
+    // Repetition 2 missed in X and hit in Y: one case gained, too few changed cases for a sign test to call it significant.
+    assert_has_line(&out, "c1 sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~");
+    assert_has_line(&out, "pooled all 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~");
 }
 
 #[test]
@@ -3233,12 +3286,13 @@ fn compare_lists_every_mismatch_before_the_table() {
     );
     let out = stdout_of_success(run(&["compare", x.to_str().unwrap(), z.to_str().unwrap()]));
     let head = out.find("Not directly comparable:").expect(&out);
-    let table = out.find("candidate").expect(&out);
+    let table = out
+        .find("Accuracy: hit / valid scored per prompt")
+        .expect(&out);
     assert!(head < table, "{out}");
     assert!(!out.contains("comparable: same"), "{out}");
     for expected in [
         "Z1: dataset differs from X1 (fedcba987654 vs 0123456789ab)",
-        "Z1: instructions `neutral` differ in content (bbbbbbbbbbbb vs aaaaaaaaaaaa)",
         "Z1: candidate `c1` route differs (openrouter m1 vs zen m1)",
         "Z1: partial run (not comparable to a complete run)",
     ] {
@@ -3247,9 +3301,13 @@ fn compare_lists_every_mismatch_before_the_table() {
             "missing {expected:?} in:\n{out}"
         );
     }
-    // Rows are keyed by instruction hash, so the differing one is its own row with `-` gaps.
-    assert_has_line(&out, "c1 neutral (aaaaaaaaaaaa) sonnet 1/2 (50.0%) -");
-    assert_has_line(&out, "c1 neutral (bbbbbbbbbbbb) sonnet - 2/2 (100.0%)");
+    // A prompt that differs in content is a column of its own, not a mismatch.
+    assert!(!out.contains("instructions"), "{out}");
+    assert_has_line(
+        &out,
+        "candidate target neutral (aaaaaaaaaaaa) (baseline) neutral (bbbbbbbbbbbb)",
+    );
+    assert_has_line(&out, "c1 sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~");
 }
 
 #[test]
@@ -3274,10 +3332,7 @@ fn compare_flags_different_target_sets_and_needs_two_readable_files() {
         "- T2: target set differs from X1 (sonnet, opus vs sonnet)",
     );
     // opus was not asked in X1: `-`; asked but never answered in T2: n/a.
-    assert_has_line(
-        &out,
-        "c1 neutral (aaaaaaaaaaaa) opus - n/a (0 valid scored)",
-    );
+    assert_has_line(&out, "c1 opus - n/a (0 valid scored)");
 
     assert_eq!(
         run(&["compare", x.to_str().unwrap()]).status.code(),
@@ -3443,23 +3498,342 @@ fn compare_flags_candidates_missing_from_either_run() {
             {"name": "c2", "provider": "zen", "model": "m2", "url": "http://stub"}
         ));
     });
-    assert_has_line(&compare_pair(&x, &y), "- V2: candidate `c2` is not in X1");
-    assert_has_line(&compare_pair(&y, &x), "- V2: candidate `c2` is not in X1");
+    // One prompt and two candidates: auto makes the candidates the columns, so this is no difference.
+    assert!(!compare_pair(&x, &y).contains("is not in"));
+    let prompts = |a: &Path, b: &Path| {
+        let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+        stdout_of_success(run(&["compare", a, b, "--columns", "prompt"]))
+    };
+    assert_has_line(&prompts(&x, &y), "- V2: candidate `c2` is not in X1");
+    assert_has_line(&prompts(&y, &x), "- V2: candidate `c2` is not in X1");
 }
 
 #[test]
-fn compare_flags_instructions_missing_from_either_run() {
+fn compare_puts_different_prompts_in_columns_with_a_paired_delta() {
     let x = compare_base("cmp-ins-x.jsonl");
-    let y = variant_of(&x, "cmp-ins-y.jsonl", |l| {
+    let y = compare_run(
+        "cmp-ins-y0.jsonl",
+        "Y1",
+        2,
+        DATASET_SHA,
+        SHA_B,
+        "zen",
+        ["high", "high"],
+        Some("complete"),
+    );
+    let y = variant_of(&y, "cmp-ins-y.jsonl", |l| {
         l[0]["instructions"][0]["name"] = json!("effortless");
         for t in &mut l[1..3] {
             t["instructions"]["name"] = json!("effortless");
         }
     });
     let out = compare_pair(&x, &y);
-    assert_has_line(&out, "- V2: instructions `effortless` is not in X1");
-    assert_has_line(&out, "- X1: instructions `neutral` is not in V2");
-    assert!(!out.contains("no differences found"), "{out}");
+    assert!(!out.contains("Not directly comparable"), "{out}");
+    assert_has_line(
+        &out,
+        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, candidates and routes",
+    );
+    assert_has_line(&out, "baseline: neutral");
+    assert_has_line(&out, "columns: neutral, effortless (prompts)");
+    assert_has_line(&out, "candidate target neutral (baseline) effortless");
+    assert_has_line(&out, "c1 sonnet 1/2 (50.0%) 2/2 (100.0%) +1 -0 ~");
+    assert_has_line(
+        &out,
+        "+g -l = paired trials (case x repetition) gained and lost against the baseline; ~ = not significant (exact sign test on the cases that changed, p >= 0.05)",
+    );
+}
+
+#[test]
+fn compare_pairs_only_the_cases_both_runs_have() {
+    let x = compare_base("cmp-pair-x.jsonl");
+    let y = compare_run(
+        "cmp-pair-y0.jsonl",
+        "Y1",
+        2,
+        DATASET_SHA,
+        SHA_A,
+        "zen",
+        ["high", "high"],
+        Some("complete"),
+    );
+    let y = variant_of(&y, "cmp-pair-y.jsonl", |l| {
+        l[0]["cases"] = json!(["c1", "c2"]);
+        let extra = trial_line(
+            2,
+            "c1",
+            NEUTRAL,
+            "c2",
+            1,
+            &["sonnet"],
+            json!({"sonnet": "high"}),
+            vec![attempt_line(10, "answered", &[("sonnet", "low")])],
+            11,
+        );
+        l.insert(3, extra);
+    });
+    let out = compare_pair(&x, &y);
+    assert_has_line(
+        &out,
+        "- V2: case selection differs from X1 (2 vs 1 cases; only in V2: c2)",
+    );
+    // V2 has three predictions (2 hits), but only the two shared cases pair: one gained.
+    assert_has_line(&out, "c1 sonnet 1/2 (50.0%) 2/3 (66.7%) +1 -0 ~");
+}
+
+#[test]
+fn show_summarizes_a_run_with_several_prompts_as_columns() {
+    let t = ["sonnet"];
+    let labels = json!({"sonnet": "high"});
+    let prompts = [("p1", SHA_A), ("p2", SHA_B), ("p3", DATASET_SHA)];
+    let efforts = ["low", "high", "low"];
+    let mut lines = vec![manifest_line(
+        "S1",
+        1,
+        DATASET_SHA,
+        &prompts,
+        &[("c1", "zen", "m1")],
+        &t,
+        3,
+    )];
+    for (i, (ins, effort)) in prompts.iter().zip(efforts).enumerate() {
+        lines.push(trial_line(
+            i,
+            "c1",
+            *ins,
+            "c1",
+            1,
+            &t,
+            labels.clone(),
+            vec![attempt_line(10, "answered", &[("sonnet", effort)])],
+            11,
+        ));
+    }
+    lines.push(end_line("complete"));
+    let out = show_text(&write_run("show-prompts.jsonl", &lines));
+    let (run, summary, accuracy) = (
+        out.find("== Run ==").expect(&out),
+        out.find("== Summary ==").expect(&out),
+        out.find("== Accuracy").expect(&out),
+    );
+    assert!(run < summary && summary < accuracy, "{out}");
+    assert_has_line(&out, "baseline: p1");
+    assert_has_line(&out, "columns: p1, p2, p3 (prompts)");
+    assert_has_line(&out, "candidate target p1 (baseline) p2 p3");
+    assert_has_line(
+        &out,
+        "c1 sonnet 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~ 0/1 (0.0%) +0 -0 ~",
+    );
+    // One row: pooling it would repeat the row.
+    assert!(!out.contains("pooled"), "{out}");
+}
+
+/// Candidates `a` and `b` on prompts `p1` and `p2`, one case, target sonnet (label high).
+/// `a` answers `a_p1` on p1 and high on p2; `b` answers high on p1 and low on p2.
+fn crossed_run(file: &str, id: &str, prompts: &[(&str, &str)], a_p1: &str) -> PathBuf {
+    let t = ["sonnet"];
+    let labels = json!({"sonnet": "high"});
+    let answers: Vec<_> = [
+        ("a", 0, a_p1),
+        ("a", 1, "high"),
+        ("b", 0, "high"),
+        ("b", 1, "low"),
+    ]
+    .into_iter()
+    .filter(|(_, ins, _)| *ins < prompts.len())
+    .collect();
+    let mut lines = vec![manifest_line(
+        id,
+        1,
+        DATASET_SHA,
+        prompts,
+        &[("a", "zen", "m1"), ("b", "zen", "m2")],
+        &t,
+        answers.len(),
+    )];
+    for (seq, (candidate, ins, effort)) in answers.into_iter().enumerate() {
+        lines.push(trial_line(
+            seq,
+            candidate,
+            prompts[ins],
+            "c1",
+            1,
+            &t,
+            labels.clone(),
+            vec![attempt_line(10, "answered", &[("sonnet", effort)])],
+            11,
+        ));
+    }
+    lines.push(end_line("complete"));
+    write_run(file, &lines)
+}
+
+const TWO_PROMPTS: [(&str, &str); 2] = [("p1", SHA_A), ("p2", SHA_B)];
+
+#[test]
+fn show_columns_candidate_puts_candidates_in_columns_and_prompts_in_rows() {
+    let file = crossed_run("cols-show.jsonl", "K1", &TWO_PROMPTS, "low");
+    let out = stdout_of_success(run(&[
+        "show",
+        file.to_str().unwrap(),
+        "--columns",
+        "candidate",
+    ]));
+    assert_has_line(&out, "baseline: a");
+    assert_has_line(&out, "columns: a, b (candidates)");
+    assert_has_line(&out, "prompt target a (baseline) b");
+    // b against a on the same prompt: gained on p1, lost on p2.
+    assert_has_line(&out, "p1 sonnet 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~");
+    assert_has_line(&out, "p2 sonnet 1/1 (100.0%) 0/1 (0.0%) +0 -1 ~");
+    assert_has_line(&out, "pooled all 1/2 (50.0%) 1/2 (50.0%) +1 -1 ~");
+    assert_has_line(
+        &out,
+        "pooled = rows present in every column, all prompts and targets together, over valid scored predictions; it is not a score",
+    );
+    // The rest of the report is unchanged by the columns.
+    assert!(
+        out.contains("== Run ==") && out.contains("== Accuracy"),
+        "{out}"
+    );
+}
+
+#[test]
+fn show_picks_prompt_columns_for_several_prompts_and_candidate_columns_for_one_prompt() {
+    let file = crossed_run("cols-auto.jsonl", "K1", &TWO_PROMPTS, "low");
+    let auto = show_text(&file);
+    assert_has_line(&auto, "columns: p1, p2 (prompts)");
+    assert_has_line(&auto, "candidate target p1 (baseline) p2");
+    assert_eq!(
+        auto,
+        stdout_of_success(run(&["show", file.to_str().unwrap(), "--columns", "auto"]))
+    );
+    let prompt = stdout_of_success(run(&[
+        "show",
+        file.to_str().unwrap(),
+        "--columns",
+        "prompt",
+    ]));
+    assert_eq!(auto, prompt);
+
+    // One prompt, two candidates: the candidates are what differs.
+    let file = crossed_run("cols-auto-one.jsonl", "K2", &TWO_PROMPTS[..1], "low");
+    let auto = show_text(&file);
+    assert_has_line(&auto, "columns: a, b (candidates)");
+    assert_has_line(&auto, "p1 sonnet 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~");
+    // Asking for prompts anyway gives the one column.
+    let prompt = stdout_of_success(run(&[
+        "show",
+        file.to_str().unwrap(),
+        "--columns",
+        "prompt",
+    ]));
+    assert_has_line(&prompt, "columns: p1 (prompts)");
+}
+
+#[test]
+fn compare_columns_candidate_puts_every_runs_candidates_side_by_side() {
+    let x = crossed_run("cols-cmp-x.jsonl", "K1", &TWO_PROMPTS, "low");
+    let y = crossed_run("cols-cmp-y.jsonl", "K2", &TWO_PROMPTS, "high");
+    let (x, y) = (x.to_str().unwrap(), y.to_str().unwrap());
+    let out = stdout_of_success(run(&["compare", x, y, "--columns", "candidate"]));
+    assert_has_line(&out, "Accuracy: hit / valid scored per candidate");
+    assert_has_line(&out, "baseline: a in K1");
+    assert_has_line(
+        &out,
+        "columns: a in K1, b in K1, a in K2, b in K2 (candidates)",
+    );
+    assert_has_line(
+        &out,
+        "prompt target a in K1 (baseline) b in K1 a in K2 b in K2",
+    );
+    assert_has_line(
+        &out,
+        "p1 sonnet 0/1 (0.0%) 1/1 (100.0%) +1 -0 ~ 1/1 (100.0%) +1 -0 ~ 1/1 (100.0%) +1 -0 ~",
+    );
+    assert_has_line(
+        &out,
+        "p2 sonnet 1/1 (100.0%) 0/1 (0.0%) +0 -1 ~ 1/1 (100.0%) +0 -0 ~ 0/1 (0.0%) +0 -1 ~",
+    );
+    // Without the flag two prompts mean prompt columns, as before.
+    let auto = stdout_of_success(run(&["compare", x, y]));
+    assert_has_line(&auto, "Accuracy: hit / valid scored per prompt");
+    assert_has_line(
+        &auto,
+        "columns: p1 in K1, p2 in K1, p1 in K2, p2 in K2 (prompts)",
+    );
+}
+
+/// One prompt `p1`, one case, target sonnet (label high); each candidate answers as given.
+fn one_prompt_run(file: &str, id: &str, answers: &[(&str, &str)]) -> PathBuf {
+    let t = ["sonnet"];
+    let candidates: Vec<_> = answers.iter().map(|(c, _)| (*c, "zen", "m1")).collect();
+    let mut lines = vec![manifest_line(
+        id,
+        1,
+        DATASET_SHA,
+        &TWO_PROMPTS[..1],
+        &candidates,
+        &t,
+        answers.len(),
+    )];
+    for (seq, (candidate, effort)) in answers.iter().enumerate() {
+        lines.push(trial_line(
+            seq,
+            candidate,
+            TWO_PROMPTS[0],
+            "c1",
+            1,
+            &t,
+            json!({"sonnet": "high"}),
+            vec![attempt_line(10, "answered", &[("sonnet", effort)])],
+            11,
+        ));
+    }
+    lines.push(end_line("complete"));
+    write_run(file, &lines)
+}
+
+#[test]
+fn compare_with_candidates_as_columns_does_not_flag_candidates_missing_from_a_run() {
+    // One prompt, different candidates per run: auto uses the candidates as the columns.
+    let x = one_prompt_run("cols-cand-x.jsonl", "K1", &[("a", "high"), ("b", "low")]);
+    let y = one_prompt_run("cols-cand-y.jsonl", "K2", &[("b", "high"), ("c", "high")]);
+    let (x, y) = (x.to_str().unwrap(), y.to_str().unwrap());
+    let out = stdout_of_success(run(&["compare", x, y]));
+    assert!(!out.contains("is not in"), "{out}");
+    assert!(!out.contains("Not directly comparable"), "{out}");
+    assert_has_line(
+        &out,
+        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion and routes",
+    );
+    assert_has_line(&out, "columns: a, b in K1, b in K2, c (candidates)");
+    // b in K2 is the shared candidate: compared with the baseline `a` on the same prompt.
+    assert_has_line(
+        &out,
+        "p1 sonnet 1/1 (100.0%) 0/1 (0.0%) +0 -1 ~ 1/1 (100.0%) +0 -0 ~ 1/1 (100.0%) +0 -0 ~",
+    );
+    // Asking for prompts as the columns makes the missing candidates a difference again.
+    let out = stdout_of_success(run(&["compare", x, y, "--columns", "prompt"]));
+    assert_has_line(&out, "- K1: candidate `a` is not in K2");
+    assert_has_line(&out, "- K2: candidate `c` is not in K1");
+}
+
+#[test]
+fn columns_rejects_a_value_that_is_not_an_axis() {
+    let file = crossed_run("cols-bad.jsonl", "K1", &TWO_PROMPTS, "low");
+    let f = file.to_str().unwrap();
+    for args in [
+        vec!["show", f, "--columns", "target"],
+        vec!["compare", f, f, "--columns", "target"],
+    ] {
+        let out = run(&args);
+        assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+        let err = stderr(&out);
+        assert!(
+            err.contains("invalid value 'target'") && err.contains("candidate"),
+            "{err}"
+        );
+        assert!(out.stdout.is_empty());
+    }
 }
 
 #[test]
@@ -3473,7 +3847,7 @@ fn compare_reports_reliability_settings_apart_from_comparability() {
     let out = compare_pair(&x, &y);
     assert_has_line(
         &out,
-        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, instructions, candidates and routes",
+        "no differences found in: dataset, grading, schema, targets, cases, repetitions, unscored inclusion, candidates and routes",
     );
     assert_has_line(
         &out,

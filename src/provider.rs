@@ -121,17 +121,21 @@ pub struct Candidate {
     pub price: Option<Price>,
 }
 
-#[derive(Deserialize)]
+/// The parsed config file.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Config {
-    candidate: Vec<Candidate>,
+pub struct ConfigFile {
+    #[serde(default, rename = "candidate")]
+    pub candidates: Vec<Candidate>,
+    /// A folder of prompt `.md` files; relative to the config file's folder, `~` not expanded.
+    pub prompts_dir: Option<String>,
 }
 
 /// Parses the TOML config; Candidate names must be unique.
-pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, String> {
-    let config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
-    for (i, candidate) in config.candidate.iter().enumerate() {
-        if config.candidate[..i]
+pub fn parse_config(text: &str) -> Result<ConfigFile, String> {
+    let config: ConfigFile = toml::from_str(text).map_err(|e| e.to_string())?;
+    for (i, candidate) in config.candidates.iter().enumerate() {
+        if config.candidates[..i]
             .iter()
             .any(|c| c.name == candidate.name)
         {
@@ -143,12 +147,12 @@ pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, String> {
                 .map_err(|e| format!("candidate `{}` price: {e}", candidate.name))?;
         }
     }
-    Ok(config.candidate)
+    Ok(config)
 }
 
 /// The config file text for `candidates`. With the `existing` text, its `[[candidate]]` tables are
 /// updated in place (matched by name) so comments and other content survive. The result parses
-/// back through `parse_candidates` into exactly `candidates`, which also rejects what the loader
+/// back through `parse_config` into exactly `candidates`, which also rejects what the loader
 /// would (duplicate names, bad prices).
 pub fn candidates_toml(existing: Option<&str>, candidates: &[Candidate]) -> Result<String, String> {
     #[derive(Serialize)]
@@ -203,7 +207,7 @@ pub fn candidates_toml(existing: Option<&str>, candidates: &[Candidate]) -> Resu
             doc.to_string()
         }
     };
-    if parse_candidates(&text)? != candidates {
+    if parse_config(&text)?.candidates != candidates {
         return Err("the updated config does not match the candidates".into());
     }
     Ok(text)
@@ -431,6 +435,10 @@ mod tests {
     use crate::dataset::{Effort, parse_cases};
     use crate::instructions::parse_instructions;
 
+    fn parse_candidates(text: &str) -> Result<Vec<Candidate>, String> {
+        parse_config(text).map(|config| config.candidates)
+    }
+
     const OPENROUTER_200: &str = r#"{"model":"typesafe/jev-1.13-20260917","answers":{"effort_sonnet":{"type":"choice","choice":"low","probabilities":{"low":0.83,"medium":0.17,"high":0,"xhigh":0,"max":0},"confidence":0.79},"effort_opus":{"type":"choice","choice":"high"}},"usage":{"input_tokens":488,"output_tokens":54,"cost":2.0496e-05},"id":"gen-dec-1793762009-oxb0hWCuUBlv6AKzC6ON","provider":"TypeSafe"}"#;
 
     /// A credentials file with the given text in a fresh temp directory.
@@ -512,6 +520,53 @@ mod tests {
         assert_eq!(
             parse_candidates(&candidates_toml(None, &[]).unwrap()).unwrap(),
             []
+        );
+    }
+
+    #[test]
+    fn a_config_may_name_a_prompts_folder() {
+        let candidate = "[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n";
+        let without = parse_config(candidate).unwrap();
+        assert_eq!(without.prompts_dir, None);
+        let with = parse_config(&format!("prompts_dir = \"prompts\"\n{candidate}")).unwrap();
+        assert_eq!(with.prompts_dir.as_deref(), Some("prompts"));
+        assert_eq!(with.candidates, without.candidates);
+        // Only the folder: a new config can hold it before any Candidate exists.
+        assert_eq!(
+            parse_config("prompts_dir = \"p\"\n").unwrap().candidates,
+            []
+        );
+        // Any other top-level key is still an error, and the folder must be a string.
+        assert!(parse_config(&format!("prompt_dir = \"p\"\n{candidate}")).is_err());
+        assert!(parse_config(&format!("prompts_dir = 5\n{candidate}")).is_err());
+    }
+
+    #[test]
+    fn updating_candidates_keeps_the_prompts_folder_and_its_comments() {
+        let existing = "# where my prompts live\nprompts_dir = \"mine\" # relative\n\n[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n";
+        let mut candidates = parse_candidates(existing).unwrap();
+        candidates[0].model = "m2".into();
+        let saved = candidates_toml(Some(existing), &candidates).unwrap();
+        for kept in [
+            "# where my prompts live\nprompts_dir = \"mine\" # relative\n",
+            "model = \"m2\"",
+        ] {
+            assert!(saved.contains(kept), "{kept} missing from:\n{saved}");
+        }
+        let config = parse_config(&saved).unwrap();
+        assert_eq!(config.prompts_dir.as_deref(), Some("mine"));
+        assert_eq!(config.candidates, candidates);
+        // A fresh config never gets a folder from here.
+        assert!(
+            !candidates_toml(None, &candidates)
+                .unwrap()
+                .contains("prompts_dir")
+        );
+        // Emptying the list keeps the folder too.
+        let emptied = candidates_toml(Some(&saved), &[]).unwrap();
+        assert_eq!(
+            parse_config(&emptied).unwrap().prompts_dir.as_deref(),
+            Some("mine")
         );
     }
 

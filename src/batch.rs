@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 
+use toml_edit::{DocumentMut, TomlError, value};
+
 use crate::cost::plural;
 use crate::credentials;
 use crate::dataset::{BUNDLED_CASES, Case, parse_cases};
@@ -18,7 +20,9 @@ use crate::evidence::{
 };
 use crate::grade::Target;
 use crate::instructions::{BUNDLED_NAME, BUNDLED_TEXT, JudgeInstructions, parse_instructions};
-use crate::provider::{Candidate, env_nonempty, now_unix_ms, parse_candidates, request_url};
+use crate::provider::{
+    Candidate, ConfigFile, env_nonempty, now_unix_ms, parse_config, request_url,
+};
 use crate::run::{self, Job, Plan, Settings};
 use crate::sha256_hex;
 
@@ -112,11 +116,61 @@ pub fn runs_dir(given: Option<&Path>) -> Result<PathBuf, String> {
     }
 }
 
-/// The Candidates configured in `path`.
-pub fn load_config(path: &Path) -> Result<Vec<Candidate>, String> {
+/// The config in `path`: its Candidates and prompt folder.
+pub fn load_config(path: &Path) -> Result<ConfigFile, String> {
     let text = String::from_utf8(read(path)?)
         .map_err(|_| format!("invalid config {}: not UTF-8", path.display()))?;
-    parse_candidates(&text).map_err(|e| format!("invalid config {}: {e}", path.display()))
+    parse_config(&text).map_err(|e| format!("invalid config {}: {e}", path.display()))
+}
+
+/// Rewrites the config at `path` (a missing one reads as `None`) with the text `edit` returns. A
+/// symlinked config is written through, so the link survives the rename; an existing config keeps
+/// its mode and a new one is private.
+pub fn edit_config(
+    path: &Path,
+    edit: impl FnOnce(Option<&str>) -> Result<String, String>,
+) -> Result<(), String> {
+    let config = resolve_links(path)?;
+    let existing = match std::fs::read_to_string(&config) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {}: {e}", config.display())),
+    };
+    let text = edit(existing.as_deref())?;
+    if let Some(dir) = config.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let permissions = std::fs::metadata(&config)
+        .map(|m| m.permissions())
+        .unwrap_or_else(|_| Permissions::from_mode(0o600));
+    write_atomic(&config, &text, permissions)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Sets (non-blank `dir`) or removes (`None` or blank) the config's `prompts_dir`, leaving the rest
+/// of the file as it is.
+pub fn set_prompts_dir(config: &Path, dir: Option<&str>) -> Result<(), String> {
+    edit_config(config, |existing| {
+        let mut doc: DocumentMut = existing
+            .unwrap_or_default()
+            .parse()
+            .map_err(|e: TomlError| e.to_string())?;
+        match dir.map(str::trim).filter(|dir| !dir.is_empty()) {
+            Some(dir) => doc["prompts_dir"] = value(dir),
+            None => {
+                doc.remove("prompts_dir");
+            }
+        }
+        let text = doc.to_string();
+        parse_config(&text)?;
+        Ok(text)
+    })
+}
+
+/// The prompt folder `dir` names: a relative one is beside the config file, an absolute one as is.
+pub fn prompts_dir_path(config: &Path, dir: &str) -> PathBuf {
+    config.parent().unwrap_or(Path::new("")).join(dir)
 }
 
 pub fn load_instructions(path: Option<&Path>) -> Result<JudgeInstructions, String> {
@@ -173,7 +227,8 @@ fn reject_duplicates(kind: &str, items: impl IntoIterator<Item = String>) -> Res
 
 pub struct RunArgs {
     pub candidates: Vec<String>,
-    pub instructions: Vec<PathBuf>,
+    /// `None` is the bundled `neutral`, `Some` an instructions file.
+    pub instructions: Vec<Option<PathBuf>>,
     pub cases: Vec<String>,
     pub targets: Vec<Target>,
     pub settings: Settings,
@@ -218,7 +273,7 @@ pub struct Prepared {
 pub fn prepare(args: &RunArgs) -> Result<Prepared, String> {
     let config = config_path(args.config.as_deref())?;
     let out = runs_dir(args.out.as_deref())?;
-    let configured = load_config(&config)?;
+    let configured = load_config(&config)?.candidates;
     reject_duplicates("candidate", args.candidates.iter().cloned())?;
     let candidates: Vec<Candidate> = args
         .candidates
@@ -232,14 +287,11 @@ pub fn prepare(args: &RunArgs) -> Result<Prepared, String> {
         })
         .collect::<Result<_, _>>()?;
 
-    let instructions = if args.instructions.is_empty() {
-        vec![load_instructions(None)?]
-    } else {
-        args.instructions
-            .iter()
-            .map(|path| load_instructions(Some(path)))
-            .collect::<Result<_, _>>()?
-    };
+    let instructions: Vec<JudgeInstructions> = args
+        .instructions
+        .iter()
+        .map(|path| load_instructions(path.as_deref()))
+        .collect::<Result<_, _>>()?;
     reject_duplicates(
         "instructions name",
         instructions.iter().map(|i| i.name.clone()),
@@ -370,7 +422,7 @@ impl Prepared {
             plural(settings.repetitions as usize, "repetition", "repetitions"),
             plural(planned, "trial", "trials"),
             plural(
-                planned * (1 + settings.retries as usize),
+                run::request_count(planned, settings.retries),
                 "request",
                 "requests"
             ),
@@ -573,20 +625,19 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 
-    /// A write error mid-run (the evidence file is /dev/full, which refuses every write) fails the
-    /// Run, and every Trial from the failing one on is handed to the caller as unsaved.
-    #[test]
-    fn a_failed_evidence_write_fails_the_run_and_flags_every_trial_unsaved() {
-        let dir = std::env::temp_dir().join(format!("decisionbench-batch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("config.toml"),
-            "[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n",
-        )
-        .unwrap();
-        let mut prepared = prepare(&RunArgs {
+    const CONFIG: &str =
+        "# my config\n\n[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\" # pinned\n";
+
+    fn write_config_file(dir: &Path, text: &str) -> PathBuf {
+        let config = dir.join("config.toml");
+        std::fs::write(&config, text).unwrap();
+        config
+    }
+
+    fn run_args(dir: &Path, instructions: Vec<Option<PathBuf>>) -> RunArgs {
+        RunArgs {
             candidates: vec!["a".into()],
-            instructions: Vec::new(),
+            instructions,
             cases: ["c001", "c002", "c003"].map(String::from).to_vec(),
             targets: vec![Target::Sonnet],
             settings: Settings {
@@ -596,11 +647,46 @@ mod tests {
                 retries: 0,
                 include_unscored: true,
             },
-            config: Some(dir.join("config.toml")),
+            config: Some(write_config_file(dir, CONFIG)),
             dataset: None,
             out: Some(dir.join("runs")),
-        })
-        .unwrap();
+        }
+    }
+
+    /// A prompt file named `name` that holds the bundled instructions.
+    fn prompt_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, BUNDLED_TEXT).unwrap();
+        path
+    }
+
+    #[test]
+    fn prepare_mixes_the_bundled_instructions_with_files() {
+        let dir = fresh_dir();
+        let file = prompt_file(&dir, "mine.md");
+        let prepared = prepare(&run_args(&dir, vec![None, Some(file)])).unwrap();
+        let names: Vec<_> = prepared.instructions.iter().map(|i| &i.name[..]).collect();
+        assert_eq!(names, ["neutral", "mine"]);
+        assert_eq!(prepared.planned(), 2 * 3);
+    }
+
+    #[test]
+    fn a_file_named_like_the_bundled_instructions_is_a_duplicate() {
+        let dir = fresh_dir();
+        let file = prompt_file(&dir, "neutral.md");
+        let err = prepare(&run_args(&dir, vec![None, Some(file)]))
+            .err()
+            .unwrap();
+        assert_eq!(err, "duplicate instructions name `neutral`");
+        assert!(!dir.join("runs").exists(), "no evidence file was created");
+    }
+
+    /// A write error mid-run (the evidence file is /dev/full, which refuses every write) fails the
+    /// Run, and every Trial from the failing one on is handed to the caller as unsaved.
+    #[test]
+    fn a_failed_evidence_write_fails_the_run_and_flags_every_trial_unsaved() {
+        let dir = fresh_dir();
+        let mut prepared = prepare(&run_args(&dir, vec![None])).unwrap();
         // A server that holds all three requests until every Trial is in flight, then hangs up, so
         // the first write failure finds the other two Trials already started.
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -622,5 +708,94 @@ mod tests {
         assert_eq!(outcome.state, RunState::Failed);
         assert!(outcome.write_error.is_some());
         assert_eq!(unsaved, [true, true, true]);
+    }
+
+    #[test]
+    fn set_prompts_dir_sets_replaces_and_clears_only_that_key() {
+        let dir = fresh_dir();
+        let config = write_config_file(&dir, CONFIG);
+        let read = || std::fs::read_to_string(&config).unwrap();
+        let folder = || load_config(&config).unwrap().prompts_dir;
+
+        set_prompts_dir(&config, Some("  mine ")).unwrap();
+        assert_eq!(folder().as_deref(), Some("mine"));
+        assert!(read().contains("prompts_dir = \"mine\""), "{}", read());
+        for kept in ["# my config", "model = \"m\" # pinned", "name = \"a\""] {
+            assert!(read().contains(kept), "{kept} missing from:\n{}", read());
+        }
+        assert_eq!(load_config(&config).unwrap().candidates.len(), 1);
+
+        set_prompts_dir(&config, Some("other")).unwrap();
+        assert_eq!(folder().as_deref(), Some("other"));
+        assert_eq!(read().matches("prompts_dir").count(), 1);
+
+        // Blank clears like `None`, and the file is what it was before the key came.
+        set_prompts_dir(&config, Some("   ")).unwrap();
+        assert_eq!(folder(), None);
+        assert_eq!(read(), CONFIG);
+        set_prompts_dir(&config, None).unwrap();
+        assert_eq!(read(), CONFIG);
+        assert_eq!(temp_files_in(&dir), Vec::<String>::new());
+    }
+
+    #[test]
+    fn set_prompts_dir_creates_a_missing_config_privately_and_keeps_an_existing_mode() {
+        let dir = fresh_dir();
+        let created = dir.join("deeper/config.toml");
+        set_prompts_dir(&created, Some("p")).unwrap();
+        assert_eq!(
+            load_config(&created).unwrap().prompts_dir.as_deref(),
+            Some("p")
+        );
+        assert_eq!(mode(&created), 0o600);
+
+        let shared = write_config_file(&dir, CONFIG);
+        std::fs::set_permissions(&shared, Permissions::from_mode(0o640)).unwrap();
+        set_prompts_dir(&shared, Some("p")).unwrap();
+        assert_eq!(mode(&shared), 0o640);
+    }
+
+    #[test]
+    fn set_prompts_dir_writes_through_a_symlinked_config() {
+        let dir = fresh_dir();
+        std::fs::create_dir(dir.join("real")).unwrap();
+        let target = write_config_file(&dir.join("real"), CONFIG);
+        let link = dir.join("link.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        set_prompts_dir(&link, Some("p")).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(
+            load_config(&target).unwrap().prompts_dir.as_deref(),
+            Some("p")
+        );
+    }
+
+    #[test]
+    fn set_prompts_dir_refuses_an_invalid_config_and_leaves_it_alone() {
+        let dir = fresh_dir();
+        for bad in ["not [toml", "stray = 1\n"] {
+            let config = write_config_file(&dir, bad);
+            let err = set_prompts_dir(&config, Some("p")).unwrap_err();
+            assert!(!err.is_empty());
+            assert_eq!(std::fs::read_to_string(&config).unwrap(), bad);
+            assert_eq!(temp_files_in(&dir), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn prompts_dir_path_resolves_a_relative_folder_beside_the_config() {
+        let config = Path::new("/etc/bench/config.toml");
+        assert_eq!(
+            prompts_dir_path(config, "prompts"),
+            Path::new("/etc/bench/prompts")
+        );
+        assert_eq!(
+            prompts_dir_path(config, "/srv/prompts"),
+            Path::new("/srv/prompts")
+        );
+        assert_eq!(
+            prompts_dir_path(Path::new("config.toml"), "p"),
+            Path::new("p")
+        );
     }
 }

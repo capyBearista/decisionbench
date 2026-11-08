@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Tabs};
 
 use crate::batch;
+use crate::provider::ConfigFile;
 
 pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 16;
@@ -64,6 +65,8 @@ pub struct App {
     pub screen: Screen,
     pub config: PathBuf,
     pub out: PathBuf,
+    /// The config's `prompts_dir` as written; see `batch::prompts_dir_path`.
+    pub prompts_dir: Option<String>,
     pub candidates: candidates::State,
     pub dataset: dataset::State,
     pub setup: setup::State,
@@ -86,14 +89,15 @@ impl App {
     pub fn new(config: Option<PathBuf>, out: Option<PathBuf>) -> Result<Self, String> {
         let config = batch::config_path(config.as_deref())?;
         let out = batch::runs_dir(out.as_deref())?;
-        let items = if config.exists() {
+        let loaded = if config.exists() {
             batch::load_config(&config)?
         } else {
-            Vec::new()
+            ConfigFile::default()
         };
         let mut app = Self {
             screen: Screen::Candidates,
-            candidates: candidates::State::new(items),
+            candidates: candidates::State::new(loaded.candidates),
+            prompts_dir: loaded.prompts_dir,
             dataset: dataset::State::new()?,
             setup: setup::State::default(),
             run: progress::State::default(),
@@ -103,6 +107,7 @@ impl App {
             config,
             out,
         };
+        setup::rescan(&mut app);
         app.refresh_results();
         Ok(app)
     }
@@ -174,6 +179,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Effect {
         };
         if let Some(screen) = screen {
             app.screen = screen;
+            if screen == Screen::Setup {
+                setup::rescan(app);
+            }
             return Effect::None;
         }
     }

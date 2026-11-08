@@ -1,12 +1,14 @@
-//! Results and history: the saved Runs in the evidence directory. A Run is shown with exactly the
-//! text `show` prints, and marked Runs with the text `compare` prints, so CLI and TUI agree.
+//! Results and history: the saved Runs in the evidence directory. A Run opens on a summary built
+//! from the report engine's matrix, and a second panel shows exactly the text `show` prints; marked
+//! Runs do the same with the text `compare` prints, so CLI and TUI agree.
 
-use std::collections::BTreeSet;
+use std::cell::Cell;
 use std::path::Path;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -15,55 +17,403 @@ use crate::batch::{load_run, read_runs};
 use crate::evidence::{RunFile, RunState, RunSummary};
 use crate::report;
 
-pub const HINTS: &str =
-    "j/k move · Space mark · Enter report (2+ marked: compare) · m compare · Esc back · q quit";
+pub const HINTS: &str = "j/k move · Space mark · Enter open · m compare · [ ] panel · c columns · t targets · Esc back · q quit";
 
 struct Entry {
     name: String,
     run: Result<RunSummary, String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Summary,
+    Full,
+}
+
+/// A line of a panel. Prose wraps to the pane's width; a table line keeps its columns and is read
+/// by scrolling sideways, as is every line of the full report.
+struct Row {
+    line: Line<'static>,
+    prose: bool,
+}
+
+impl Row {
+    fn table(line: Line<'static>) -> Self {
+        Self { line, prose: false }
+    }
+
+    fn prose(line: Line<'static>) -> Self {
+        Self { line, prose: true }
+    }
+}
+
 struct View {
     title: String,
-    text: String,
+    panel: Panel,
+    /// The matrix, styled, and the prose around it.
+    summary: Vec<Row>,
+    /// The text `show` or `compare` prints.
+    full: Vec<Row>,
+    /// The Runs the panels are built from, and the axis their columns are on (never `Auto`); the
+    /// axis is `None` for a view of text that is not a report, which has no columns to toggle.
+    runs: Vec<RunFile>,
+    axis: Option<report::Axis>,
+    /// Whether the summary shows one row per candidate or prompt, its targets pooled, rather than
+    /// one per target. The full report is the text `show` prints and ignores it.
+    collapsed: bool,
     scroll: usize,
-    /// Columns cut off the left of every line, so wide lines can be read to their end.
+    /// Columns cut off the left of every table line, so wide lines can be read to their end.
     hscroll: usize,
+    /// Columns inside the pane when it was last drawn, which prose wraps to; the key handler has
+    /// no other way to count the rows it scrolls over. Nothing wraps before the first draw.
+    width: Cell<usize>,
 }
 
 const HSTEP: usize = 8;
 
+fn plain_rows(text: &str, prose: bool) -> Vec<Row> {
+    text.lines()
+        .map(|l| {
+            let line = Line::from(l.to_string());
+            if prose {
+                Row::prose(line)
+            } else {
+                Row::table(line)
+            }
+        })
+        .collect()
+}
+
+fn columns(line: &Line) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// `line` broken into rows of at most `width` columns, each keeping the styles of its text. Breaks
+/// fall on spaces; a word longer than a row is cut. A bullet (`  - text`) continues under its text.
+fn wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    type Cells = Vec<(char, Style)>;
+    let width = width.max(1);
+    let cells: Cells = line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(|c| (c, s.style)))
+        .collect();
+    let lead = cells.iter().take_while(|(c, _)| *c == ' ').count();
+    let bullet = matches!(cells.get(lead..lead + 2), Some([('-', _), (' ', _)]));
+    let indent = lead + if bullet { 2 } else { 0 };
+    // An indent that leaves no room for text is dropped.
+    let (head, mut rest) = if indent < width {
+        cells.split_at(indent)
+    } else {
+        cells[lead..].split_at(0)
+    };
+    let hang = if bullet && indent < width { indent } else { 0 };
+    let fresh = || -> Cells { vec![(' ', Style::default()); hang] };
+    let (mut rows, mut row, mut filled) = (Vec::<Cells>::new(), head.to_vec(), false);
+    while let Some(&(first, _)) = rest.first() {
+        let space = first == ' ';
+        let len = rest
+            .iter()
+            .take_while(|(c, _)| (*c == ' ') == space)
+            .count();
+        let (token, tail) = rest.split_at(len);
+        rest = tail;
+        if space {
+            // Spaces at the start of a row are indent, not text.
+            if filled {
+                row.extend_from_slice(token);
+            }
+            continue;
+        }
+        let mut word = token;
+        while row.len() + word.len() > width {
+            if !filled {
+                // Nothing to move to the next row: the word itself is longer than a row.
+                let (now, later) = word.split_at(width - row.len());
+                row.extend_from_slice(now);
+                word = later;
+            }
+            rows.push(std::mem::replace(&mut row, fresh()));
+            filled = false;
+        }
+        row.extend_from_slice(word);
+        filled = true;
+    }
+    rows.push(row);
+    rows.into_iter()
+        .map(|mut cells| {
+            while cells.last().is_some_and(|(c, _)| *c == ' ') {
+                cells.pop();
+            }
+            let mut runs: Vec<(String, Style)> = Vec::new();
+            for (c, style) in cells {
+                match runs.last_mut() {
+                    Some((text, last)) if *last == style => text.push(c),
+                    _ => runs.push((c.to_string(), style)),
+                }
+            }
+            runs.into_iter()
+                .map(|(text, style)| Span::styled(text, style))
+                .collect()
+        })
+        .collect()
+}
+
+/// `line` without its first `n` columns; the rest keeps its styles.
+fn skip_cols(line: &Line<'static>, mut n: usize) -> Line<'static> {
+    line.spans
+        .iter()
+        .filter_map(|span| {
+            let len = span.content.chars().count();
+            let dropped = n.min(len);
+            n -= dropped;
+            (dropped < len).then(|| {
+                Span::styled(
+                    span.content.chars().skip(dropped).collect::<String>(),
+                    span.style,
+                )
+            })
+        })
+        .collect()
+}
+
 impl View {
-    fn new(title: String, text: String) -> Self {
+    /// Opens on the summary.
+    fn new(title: String, summary: Vec<Row>, full: &str) -> Self {
         Self {
             title,
-            text,
+            panel: Panel::Summary,
+            summary,
+            full: plain_rows(full, false),
+            runs: Vec::new(),
+            axis: None,
+            collapsed: true,
             scroll: 0,
             hscroll: 0,
+            width: Cell::new(usize::MAX),
         }
     }
 
-    /// Moves the view: vertical keys scroll lines, Left/Right shift by `HSTEP` columns, kept
-    /// between 0 and the widest line.
+    /// Opens on the summary of `runs`, with the columns `Auto` picks.
+    fn of_runs(title: String, runs: Vec<RunFile>) -> Self {
+        let mut view = Self::new(title, Vec::new(), "");
+        view.runs = runs;
+        view.show_columns(report::Axis::Auto);
+        view
+    }
+
+    /// Builds both panels from `self.runs` with the columns on `axis`.
+    fn show_columns(&mut self, axis: report::Axis) {
+        let matrix = report::Matrix::from_runs(&self.runs, axis);
+        let full = match self.runs.as_slice() {
+            [run] => report::report(run, matrix.axis).to_string(),
+            runs => report::Comparison(runs, matrix.axis).to_string(),
+        };
+        self.summary = summary(&self.runs, &matrix, self.collapsed);
+        self.full = plain_rows(&full, false);
+        self.axis = Some(matrix.axis);
+    }
+
+    /// Swaps prompts and candidates as the columns, keeping the scroll where the new text still has it.
+    fn toggle_columns(&mut self) {
+        let Some(axis) = self.axis else { return };
+        self.show_columns(axis.toggled());
+        self.clamp_scroll();
+    }
+
+    /// Swaps one summary row per target for one row per candidate or prompt, targets pooled.
+    fn toggle_targets(&mut self) {
+        let Some(axis) = self.axis else { return };
+        self.collapsed = !self.collapsed;
+        self.show_columns(axis);
+        self.clamp_scroll();
+    }
+
+    fn clamp_scroll(&mut self) {
+        let rows = self.display(self.width.get()).len();
+        self.scroll = self.scroll.min(rows.saturating_sub(1));
+        self.hscroll = self.hscroll.min(self.widest().saturating_sub(1));
+    }
+
+    fn lines(&self) -> &[Row] {
+        match self.panel {
+            Panel::Summary => &self.summary,
+            Panel::Full => &self.full,
+        }
+    }
+
+    fn title(&self) -> String {
+        let panel = match self.panel {
+            Panel::Summary => "summary",
+            Panel::Full => "full report",
+        };
+        match (self.panel, self.axis) {
+            (Panel::Summary, Some(axis)) => {
+                let pooled = if self.collapsed {
+                    ", targets pooled"
+                } else {
+                    ""
+                };
+                format!(
+                    "{} · {panel} (columns: {}{pooled})",
+                    self.title,
+                    axis.name()
+                )
+            }
+            _ => format!("{} · {panel}", self.title),
+        }
+    }
+
+    /// Shows `panel` from its top left; the panel already shown stays where it is.
+    fn select(&mut self, panel: Panel) {
+        if self.panel != panel {
+            (self.panel, self.scroll, self.hscroll) = (panel, 0, 0);
+        }
+    }
+
+    /// The rows shown at `width` columns, from the first: prose wrapped, table lines cut by `hscroll`.
+    fn display(&self, width: usize) -> Vec<Line<'static>> {
+        self.lines()
+            .iter()
+            .flat_map(|row| {
+                if row.prose {
+                    wrap(&row.line, width)
+                } else {
+                    vec![skip_cols(&row.line, self.hscroll)]
+                }
+            })
+            .collect()
+    }
+
+    /// The width of the widest table line of the panel shown; sideways scroll stops inside it.
+    fn widest(&self) -> usize {
+        self.lines()
+            .iter()
+            .filter(|r| !r.prose)
+            .map(|r| columns(&r.line))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Moves the view: vertical keys scroll rows (wrapped prose counts every row it takes),
+    /// Left/Right shift table lines by `HSTEP` columns, kept between 0 and the widest one.
     fn scroll(&mut self, nav: Nav) {
-        let lines = self.text.lines().count();
-        let widest = self.text.lines().map(|l| l.chars().count()).max();
+        let rows = self.display(self.width.get()).len();
         match nav {
             Nav::Left => self.hscroll = self.hscroll.saturating_sub(HSTEP),
             Nav::Right => {
-                self.hscroll = (self.hscroll + HSTEP).min(widest.unwrap_or(0).saturating_sub(1));
+                self.hscroll = (self.hscroll + HSTEP).min(self.widest().saturating_sub(1));
             }
-            _ => self.scroll = step(self.scroll, lines, nav),
+            // A resize can leave `scroll` past the last row: start from the last one.
+            _ => self.scroll = step(self.scroll.min(rows.saturating_sub(1)), rows, nav),
         }
     }
+}
+
+fn delta_style(kind: report::DeltaKind) -> Style {
+    match kind {
+        report::DeltaKind::Gained => theme::base().fg(theme::STATUS_OK),
+        report::DeltaKind::Lost => theme::base().fg(theme::STATUS_FAIL),
+        report::DeltaKind::Noise => theme::dim(),
+    }
+}
+
+/// The matrix as a table laid out like `Display for Matrix` (left aligned, two spaces between
+/// columns, no indent), each delta coloured by how it reads: the numbers stay in the text, so
+/// colour is never the only sign. The pooled row, when shown, follows a dim rule. `collapsed`: one
+/// row per candidate or prompt, its targets pooled (`all`), instead of one per target.
+fn matrix_lines(matrix: &report::Matrix, pooled: bool, collapsed: bool) -> Vec<Row> {
+    if matrix.columns.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = if collapsed {
+        matrix.grouped_table()
+    } else {
+        matrix.table()
+    };
+    let pooled_at = rows.len();
+    let pooled = pooled.then(|| matrix.pooled_row()).flatten();
+    let shown = pooled.is_some();
+    rows.extend(pooled);
+    let width = |cell: &report::CellText| cell.to_string().chars().count();
+    let widths: Vec<usize> = (0..rows[0].len())
+        .map(|c| rows.iter().map(|r| width(&r[c])).max().unwrap_or(0))
+        .collect();
+    let mut lines = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let is_pooled = shown && i == pooled_at;
+        if is_pooled {
+            let rule = widths.iter().sum::<usize>() + 2 * (widths.len() - 1);
+            lines.push(Row::table(Line::from(Span::styled(
+                "─".repeat(rule),
+                theme::dim(),
+            ))));
+        }
+        let mut spans = Vec::new();
+        for (c, cell) in row.iter().enumerate() {
+            let style = if i == 0 || (is_pooled && c < 2) {
+                theme::dim()
+            } else {
+                theme::base()
+            };
+            spans.push(Span::styled(cell.counts.clone(), style));
+            if let Some((delta, kind)) = &cell.delta {
+                spans.push(Span::styled("  ", style));
+                spans.push(Span::styled(delta.clone(), delta_style(*kind)));
+            }
+            if c + 1 < row.len() {
+                spans.push(Span::styled(" ".repeat(widths[c] - width(cell) + 2), style));
+            }
+        }
+        lines.push(Row::table(Line::from(spans)));
+    }
+    let notes = matrix.notes(shown);
+    lines.extend(
+        notes
+            .into_iter()
+            .map(|n| Row::prose(Line::from(Span::styled(n, theme::dim())))),
+    );
+    lines
+}
+
+/// What the summary panel shows for `runs`: for a comparison, first whether the Runs compare; for
+/// a single Run that is not complete, its state and recorded Trials; then the matrix built from them. A single Run pools its rows only when it has several, as its
+/// report does; the collapsed table pools when it shows several rows.
+fn summary(runs: &[RunFile], matrix: &report::Matrix, collapsed: bool) -> Vec<Row> {
+    let mut lines = Vec::new();
+    if runs.len() > 1 {
+        let (incomparable, head) = report::comparability(runs, matrix.axis);
+        let style = if incomparable {
+            theme::base().fg(theme::STATUS_WARN)
+        } else {
+            theme::dim()
+        };
+        lines.extend(
+            head.into_iter()
+                .map(|l| Row::prose(Line::from(Span::styled(l, style)))),
+        );
+        lines.push(Row::prose(Line::default()));
+    } else if let Some(note) = runs.first().and_then(report::incomplete_note) {
+        let warn = theme::base().fg(theme::STATUS_WARN);
+        lines.push(Row::prose(Line::from(Span::styled(note, warn))));
+        lines.push(Row::prose(Line::default()));
+    }
+    // Collapsed, the pooled row is a total only when there is more than one row to add up.
+    let pooled = if collapsed {
+        matrix.grouped().len() > 1
+    } else {
+        runs.len() > 1 || matrix.rows.len() > 1
+    };
+    lines.extend(matrix_lines(matrix, pooled, collapsed));
+    lines
 }
 
 #[derive(Default)]
 pub struct State {
     entries: Vec<Entry>,
     selected: usize,
-    /// File names marked for comparison.
-    marked: BTreeSet<String>,
+    /// File names marked for comparison, in the order they were marked: the first is the baseline.
+    marked: Vec<String>,
     view: Option<View>,
 }
 
@@ -88,6 +438,25 @@ impl State {
         Ok(())
     }
 
+    /// Marks `name` after the others, or unmarks it.
+    fn toggle_mark(&mut self, name: &str) {
+        match self.marked.iter().position(|m| m == name) {
+            Some(i) => {
+                self.marked.remove(i);
+            }
+            None => self.marked.push(name.to_string()),
+        }
+    }
+
+    /// `[ ]` unmarked, `[1]` the first marked (the baseline), and so on; `[+]` from the tenth.
+    fn mark_label(&self, name: &str) -> String {
+        match self.marked.iter().position(|m| m == name) {
+            None => "[ ]".into(),
+            Some(i) if i < 9 => format!("[{}]", i + 1),
+            Some(_) => "[+]".into(),
+        }
+    }
+
     /// Selects `name` and shows its report.
     pub fn open(&mut self, name: &str, dir: &Path) {
         if let Some(i) = self.entries.iter().position(|e| e.name == name) {
@@ -101,27 +470,23 @@ impl State {
             return;
         };
         // Read again so the text is what `show` prints for the file as it is now.
-        let text = load_run(&dir.join(&entry.name)).map(|run| report::report(&run).to_string());
-        self.view = Some(View::new(
-            format!("report {}", entry.name),
-            text.unwrap_or_else(|e| e),
-        ));
+        let title = format!("report {}", entry.name);
+        self.view = Some(match load_run(&dir.join(&entry.name)) {
+            Ok(run) => View::of_runs(title, vec![run]),
+            Err(e) => View::new(title, plain_rows(&e, true), &e),
+        });
     }
 
     fn compare_marked(&mut self, dir: &Path) -> Result<(), String> {
         let runs: Vec<RunFile> = self
-            .entries
+            .marked
             .iter()
-            .filter(|e| self.marked.contains(&e.name))
-            .map(|e| load_run(&dir.join(&e.name)))
+            .map(|name| load_run(&dir.join(name)))
             .collect::<Result<_, _>>()?;
         if runs.len() < 2 {
             return Err("mark two or more readable runs with Space to compare".into());
         }
-        self.view = Some(View::new(
-            format!("compare {} runs", runs.len()),
-            report::Comparison(&runs).to_string(),
-        ));
+        self.view = Some(View::of_runs(format!("compare {} runs", runs.len()), runs));
         Ok(())
     }
 }
@@ -132,6 +497,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     if let Some(view) = state.view.as_mut() {
         if key.code == KeyCode::Esc {
             state.view = None;
+        } else if key.code == KeyCode::Char('[') {
+            view.select(Panel::Summary);
+        } else if key.code == KeyCode::Char(']') {
+            view.select(Panel::Full);
+        } else if key.code == KeyCode::Char('c') {
+            view.toggle_columns();
+        } else if key.code == KeyCode::Char('t') {
+            view.toggle_targets();
         } else if let Some(n) = nav(key) {
             view.scroll(n);
         }
@@ -139,10 +512,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char(' ') => {
-            if let Some(Entry { name, run: Ok(_) }) = state.entries.get(state.selected)
-                && !state.marked.remove(name)
-            {
-                state.marked.insert(name.clone());
+            if let Some(Entry { name, run: Ok(_) }) = state.entries.get(state.selected) {
+                let name = name.clone();
+                state.toggle_mark(&name);
             }
         }
         KeyCode::Char('r') => app.refresh_results(),
@@ -180,25 +552,19 @@ fn state_status(run: &RunSummary) -> Span<'static> {
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let state = &app.results;
     if let Some(view) = &state.view {
-        // No wrapping: every report line is shown as `show` prints it, cut only by the terminal.
-        let lines: Vec<Line> = view
-            .text
-            .lines()
-            .skip(view.scroll)
-            .map(|l| Line::from(l.chars().skip(view.hscroll).collect::<String>()))
-            .collect();
-        frame.render_widget(Paragraph::new(lines).block(block(&view.title)), area);
+        let inner = area.width.saturating_sub(2) as usize;
+        view.width.set(inner);
+        let rows = view.display(inner);
+        let top = view.scroll.min(rows.len().saturating_sub(1));
+        let lines: Vec<Line> = rows.into_iter().skip(top).collect();
+        frame.render_widget(Paragraph::new(lines).block(block(&view.title())), area);
         return;
     }
     let rows: Vec<Line> = state
         .entries
         .iter()
         .map(|e| {
-            let mark = if state.marked.contains(&e.name) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
+            let mark = state.mark_label(&e.name);
             match &e.run {
                 Ok(run) => {
                     let m = &run.manifest;
@@ -246,11 +612,461 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::evidence::{EndRecord, read_run};
+
+    /// A Run of candidates c, d, e and prompts p (baseline) and q on target `sonnet`, label high.
+    /// Trials are (candidate, prompt index, case, effort).
+    fn run_of(id: &str, trials: &[(&str, usize, &str, &str)]) -> RunFile {
+        let candidates = ["c", "d", "e"]
+            .map(|c| json!({"name": c, "provider": "zen", "model": "m", "url": "u"}));
+        let mut lines = vec![json!({
+            "type": "run", "schema_version": crate::evidence::SCHEMA_VERSION, "id": id,
+            "created_unix_ms": 1, "dataset": {"name": "d", "sha256": "d"},
+            "instructions": [{"name": "p", "sha256": "a", "text": "t"},
+                {"name": "q", "sha256": "b", "text": "t"}],
+            "grading_revision": crate::evidence::GRADING_REVISION,
+            "candidates": candidates,
+            "cases": ["c1"], "targets": ["sonnet"],
+            "settings": {"repetitions": 1, "concurrency": 1, "timeout_secs": 60,
+                "retries": 0, "include_unscored": false},
+            "planned_trials": trials.len(),
+        })];
+        for (seq, (candidate, ins, case, effort)) in trials.iter().enumerate() {
+            let body = json!({"answers": {"effort_sonnet": {"type": "choice", "choice": effort}}});
+            let attempt = json!({"started_unix_ms": 0, "latency_ms": 1, "disposition": "answered",
+                "http_status": 200, "raw_response": body.to_string(), "error": null});
+            let (name, sha) = [("p", "a"), ("q", "b")][*ins];
+            lines.push(json!({
+                "type": "trial", "seq": seq, "candidate": candidate,
+                "instructions": {"name": name, "sha256": sha},
+                "case_id": case, "targets": ["sonnet"], "repetition": 1,
+                "labels": {"sonnet": "high"}, "request": {}, "attempts": [attempt],
+                "started_unix_ms": 0, "elapsed_ms": 1,
+            }));
+        }
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        read_run(text.as_bytes()).unwrap()
+    }
+
+    /// c gains six cases under q, d loses six (both significant), e gains one (not significant).
+    fn moving_run() -> RunFile {
+        let mut trials = Vec::new();
+        for case in ["c1", "c2", "c3", "c4", "c5", "c6"] {
+            trials.extend([
+                ("c", 0, case, "low"),
+                ("c", 1, case, "high"),
+                ("d", 0, case, "high"),
+                ("d", 1, case, "low"),
+            ]);
+        }
+        trials.extend([("e", 0, "c1", "low"), ("e", 1, "c1", "high")]);
+        // Complete, so a single run's summary opens on its table, not on a state note.
+        complete(run_of("X1", &trials))
+    }
+
+    fn complete(mut run: RunFile) -> RunFile {
+        run.end = Some(EndRecord {
+            state: RunState::Complete,
+            finished_unix_ms: 9,
+        });
+        run
+    }
+
+    fn plain(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The summary's lines, without whether each is prose.
+    fn summary_lines(runs: &[RunFile]) -> Vec<Line<'static>> {
+        summary_lines_with(runs, false)
+    }
+
+    fn summary_lines_with(runs: &[RunFile], collapsed: bool) -> Vec<Line<'static>> {
+        let matrix = report::Matrix::from_runs(runs, report::Axis::Auto);
+        summary(runs, &matrix, collapsed)
+            .into_iter()
+            .map(|r| r.line)
+            .collect()
+    }
+
+    #[test]
+    fn the_summary_rows_read_as_the_matrix_the_report_prints() {
+        let run = moving_run();
+        let shown =
+            report::Matrix::from_runs(std::slice::from_ref(&run), report::Axis::Auto).to_string();
+        // The engine's two lines before the table repeat the header row; its rows are indented.
+        let expected: Vec<&str> = shown
+            .lines()
+            .skip(2)
+            .map(|l| l.strip_prefix("  ").unwrap())
+            .collect();
+        let rows: Vec<String> = summary_lines(&[run]).iter().map(plain).collect();
+        // The separator before the pooled row is the only line the text does not have.
+        let rows: Vec<&str> = rows
+            .iter()
+            .map(String::as_str)
+            .filter(|l| !l.starts_with('─'))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn deltas_are_green_red_or_dim_and_the_rest_keeps_its_style() {
+        let lines = summary_lines(&[moving_run()]);
+        let delta_of = |row: &str| {
+            let line = lines.iter().find(|l| plain(l).starts_with(row)).unwrap();
+            line.spans
+                .iter()
+                .find(|s| s.content.starts_with('+'))
+                .unwrap_or_else(|| panic!("no delta in {}", plain(line)))
+                .clone()
+        };
+        let (gain, loss, noise) = (delta_of("c "), delta_of("d "), delta_of("e "));
+        assert_eq!(gain.content, "+6 -0");
+        assert_eq!(gain.style.fg, Some(theme::STATUS_OK));
+        assert_eq!(loss.content, "+0 -6");
+        assert_eq!(loss.style.fg, Some(theme::STATUS_FAIL));
+        assert_eq!(noise.content, "+1 -0 ~");
+        assert_eq!(noise.style, theme::dim());
+        // The header row, the separator and the pooled label are dim, the footnotes too.
+        assert!(lines[0].spans.iter().all(|s| s.style == theme::dim()));
+        assert!(plain(&lines[0]).contains("p (baseline)"));
+        let pooled = lines
+            .iter()
+            .position(|l| plain(l).starts_with("pooled"))
+            .unwrap();
+        assert_eq!(lines[pooled - 1].spans[0].style, theme::dim());
+        assert_eq!(lines[pooled].spans[0].style, theme::dim());
+        assert!(
+            lines[pooled + 1..]
+                .iter()
+                .all(|l| l.spans.iter().all(|s| s.style == theme::dim()))
+        );
+        // A counts text is the base style.
+        let counts = lines[1]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('%'))
+            .unwrap();
+        assert_eq!(counts.style, theme::base());
+    }
+
+    #[test]
+    fn collapsed_rows_colour_their_deltas_like_the_expanded_ones() {
+        let lines = summary_lines_with(&[moving_run()], true);
+        let delta_of = |row: &str| {
+            let line = lines.iter().find(|l| plain(l).starts_with(row)).unwrap();
+            assert_eq!(plain(line).split_whitespace().nth(1), Some("all"));
+            line.spans
+                .iter()
+                .find(|s| s.content.starts_with('+'))
+                .unwrap_or_else(|| panic!("no delta in {}", plain(line)))
+                .clone()
+        };
+        let (gain, loss, noise) = (delta_of("c "), delta_of("d "), delta_of("e "));
+        assert_eq!(
+            (gain.content.as_ref(), gain.style.fg),
+            ("+6 -0", Some(theme::STATUS_OK))
+        );
+        assert_eq!(
+            (loss.content.as_ref(), loss.style.fg),
+            ("+0 -6", Some(theme::STATUS_FAIL))
+        );
+        assert_eq!(
+            (noise.content.as_ref(), noise.style),
+            ("+1 -0 ~", theme::dim())
+        );
+        assert!(lines[0].spans.iter().all(|s| s.style == theme::dim()));
+    }
+
+    #[test]
+    fn a_single_incomplete_run_says_so_above_its_summary_and_a_complete_one_does_not() {
+        // No end record: the run was interrupted.
+        let mut run = moving_run();
+        run.end = None;
+        let lines = summary_lines(&[run]);
+        assert_eq!(
+            plain(&lines[0]),
+            "state: partial (interrupted: no end record; not comparable to a complete run); trials: 26 recorded of 26 planned"
+        );
+        assert_eq!(
+            lines[0].spans[0].style,
+            theme::base().fg(theme::STATUS_WARN)
+        );
+        assert_eq!(plain(&lines[1]), "");
+        let lines = summary_lines(&[moving_run()]);
+        assert!(
+            plain(&lines[0]).starts_with("candidate"),
+            "{}",
+            plain(&lines[0])
+        );
+        // A comparison already lists runs that are not complete among what differs.
+        let partial = || {
+            let mut run = moving_run();
+            run.end = None;
+            run
+        };
+        let lines = summary_lines(&[partial(), partial()]);
+        assert_eq!(plain(&lines[0]), "Not directly comparable:");
+    }
+
+    #[test]
+    fn the_collapsed_pooled_row_shows_only_over_several_displayed_rows() {
+        let has_pooled = |lines: &[Line]| lines.iter().any(|l| plain(l).starts_with("pooled "));
+        assert!(has_pooled(&summary_lines_with(&[moving_run()], true)));
+        // One candidate and one target: one row either way, and no total of one row.
+        let one = || {
+            let mut run = run_of("X1", &[("c", 0, "c1", "low"), ("c", 1, "c1", "high")]);
+            run.manifest.candidates.truncate(1);
+            complete(run)
+        };
+        assert!(!has_pooled(&summary_lines_with(&[one()], true)));
+        assert!(!has_pooled(&summary_lines_with(&[one()], false)));
+        // Two runs of it: the expanded table still pools, the collapsed one has one row to show.
+        assert!(has_pooled(&summary_lines_with(&[one(), one()], false)));
+        assert!(!has_pooled(&summary_lines_with(&[one(), one()], true)));
+    }
+
+    #[test]
+    fn a_compare_summary_opens_with_the_verdict_on_whether_the_runs_compare() {
+        let partial = || {
+            let mut run = moving_run();
+            run.end = None;
+            run
+        };
+        let (x, y) = (partial(), partial());
+        // Neither Run has an end record: both are partial.
+        let lines = summary_lines(&[x, y]);
+        assert_eq!(plain(&lines[0]), "Not directly comparable:");
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|s| s.style.fg == Some(theme::STATUS_WARN))
+        );
+        assert!(plain(&lines[1]).starts_with("  - X1: partial run"));
+        let blank = lines.iter().position(|l| plain(l).is_empty()).unwrap();
+        assert!(plain(&lines[blank + 1]).starts_with("candidate"));
+
+        let lines = summary_lines(&[complete(moving_run()), complete(moving_run())]);
+        assert!(plain(&lines[0]).starts_with("no differences found in: "));
+        assert_eq!(lines[0].spans[0].style, theme::dim());
+        assert_eq!(plain(&lines[1]), "");
+    }
+
+    #[test]
+    fn a_run_with_no_prompts_has_an_empty_summary() {
+        let mut run = moving_run();
+        run.manifest.instructions.clear();
+        run.trials.clear();
+        assert!(summary_lines(&[run]).is_empty());
+    }
+
+    /// The text of a panel's rows.
+    fn texts(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(|r| plain(&r.line)).collect()
+    }
+
+    /// The summary's header row without its padding.
+    fn header(view: &View) -> String {
+        let line = plain(&view.summary[0].line);
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn toggling_the_columns_rebuilds_both_panels_from_the_same_engine() {
+        let mut view = View::of_runs("report x".into(), vec![moving_run()]);
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts, targets pooled)"
+        );
+        assert_eq!(header(&view), "candidate target p (baseline) q");
+        view.select(Panel::Full);
+        // Only the summary panel names the columns.
+        assert_eq!(view.title(), "report x · full report");
+        assert_eq!(
+            view.full[0].line.spans[0].content, "== Run ==",
+            "the full report is the one `show` prints"
+        );
+
+        view.toggle_columns();
+        let expected = report::report(&moving_run(), report::Axis::Candidate).to_string();
+        assert_eq!(
+            texts(&view.full),
+            expected.lines().map(String::from).collect::<Vec<_>>()
+        );
+        view.select(Panel::Summary);
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: candidates, targets pooled)"
+        );
+        assert_eq!(header(&view), "prompt target c (baseline) d e");
+
+        view.toggle_columns();
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts, targets pooled)"
+        );
+        assert_eq!(
+            texts(&view.full),
+            report::report(&moving_run(), report::Axis::Auto)
+                .to_string()
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn toggling_the_columns_clamps_the_scroll_only_when_it_is_past_the_new_text() {
+        let mut view = View::of_runs("t".into(), vec![moving_run()]);
+        view.width.set(200);
+        view.select(Panel::Full);
+        view.scroll = 3;
+        view.hscroll = 2;
+        view.toggle_columns();
+        assert_eq!((view.scroll, view.hscroll), (3, 2));
+        view.scroll = 10_000;
+        view.hscroll = 10_000;
+        view.toggle_columns();
+        assert_eq!(view.scroll, view.display(200).len() - 1);
+        assert_eq!(view.hscroll, view.widest() - 1);
+    }
+
+    #[test]
+    fn a_view_without_runs_has_no_columns_to_toggle() {
+        let mut view = View::new("t".into(), plain_rows("a", false), "b");
+        view.toggle_columns();
+        assert_eq!(view.title(), "t · summary");
+        assert_eq!(texts(&view.summary), ["a"]);
+    }
+
+    /// The first two words of each summary row that has a target column: its label and target.
+    fn label_and_target(view: &View) -> Vec<(String, String)> {
+        texts(&view.summary)
+            .iter()
+            .skip(1) // the header
+            .map(|l| {
+                l.split_whitespace()
+                    .take(2)
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|w| w.len() == 2 && w[0] != "pooled" && !w[0].starts_with('─'))
+            .map(|w| (w[0].clone(), w[1].clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_view_opens_with_targets_pooled_and_t_swaps_them_for_one_row_per_target() {
+        let mut view = View::of_runs("report x".into(), vec![moving_run()]);
+        let all = |label: &str| (label.to_string(), "all".to_string());
+        assert_eq!(label_and_target(&view)[..3], [all("c"), all("d"), all("e")]);
+        assert_eq!(header(&view), "candidate target p (baseline) q");
+        let full = texts(&view.full);
+
+        view.toggle_targets();
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts)",
+            "the title names the state"
+        );
+        let target = |label: &str| (label.to_string(), "sonnet".to_string());
+        assert_eq!(
+            label_and_target(&view)[..3],
+            [target("c"), target("d"), target("e")]
+        );
+        assert_eq!(header(&view), "candidate target p (baseline) q");
+
+        view.toggle_targets();
+        assert_eq!(
+            view.title(),
+            "report x · summary (columns: prompts, targets pooled)"
+        );
+        assert_eq!(label_and_target(&view)[0], all("c"));
+        // The full report is what `show` prints, whichever way the targets are shown.
+        assert_eq!(texts(&view.full), full);
+    }
+
+    #[test]
+    fn t_keeps_the_axis_and_c_keeps_the_targets_state() {
+        let mut view = View::of_runs("t".into(), vec![moving_run()]);
+        view.toggle_targets();
+        view.toggle_columns();
+        assert_eq!(view.title(), "t · summary (columns: candidates)");
+        view.toggle_targets();
+        assert_eq!(
+            view.title(),
+            "t · summary (columns: candidates, targets pooled)"
+        );
+        view.toggle_columns();
+        assert_eq!(
+            view.title(),
+            "t · summary (columns: prompts, targets pooled)"
+        );
+    }
+
+    #[test]
+    fn toggling_the_targets_clamps_the_scroll_to_the_new_text() {
+        let mut view = View::of_runs("t".into(), vec![moving_run()]);
+        view.width.set(200);
+        view.scroll = 10_000;
+        view.hscroll = 10_000;
+        view.toggle_targets();
+        assert_eq!(view.scroll, view.display(200).len() - 1);
+        assert_eq!(view.hscroll, view.widest() - 1);
+    }
+
+    #[test]
+    fn a_view_without_runs_has_no_targets_to_toggle() {
+        let mut view = View::new("t".into(), plain_rows("a", false), "b");
+        view.toggle_targets();
+        assert_eq!(
+            (view.title(), texts(&view.summary)),
+            ("t · summary".into(), vec!["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn panels_are_picked_not_cycled_and_each_starts_at_the_top() {
+        let mut view = View::new(
+            "report x".into(),
+            plain_rows("a\nb\nc", false),
+            "1\n2\n3\n4",
+        );
+        assert_eq!(view.title(), "report x · summary");
+        view.scroll(Nav::Down);
+        view.scroll(Nav::Right);
+        assert_eq!(view.scroll, 1);
+        view.select(Panel::Full);
+        assert_eq!(
+            (view.title(), view.scroll, view.hscroll),
+            ("report x · full report".into(), 0, 0)
+        );
+        view.scroll(Nav::Bottom);
+        assert_eq!(view.scroll, 3); // the full report has four lines
+        view.select(Panel::Full);
+        assert_eq!(view.scroll, 3); // picking the panel already shown changes nothing
+        view.select(Panel::Summary);
+        assert_eq!(
+            (view.title(), view.scroll),
+            ("report x · summary".into(), 0)
+        );
+        view.scroll(Nav::Bottom);
+        assert_eq!(view.scroll, 2);
+    }
 
     #[test]
     fn sideways_scroll_steps_by_columns_and_stays_inside_the_widest_line() {
-        let mut view = View::new("t".into(), format!("short\n{}", "x".repeat(20)));
+        let mut view = View::new(
+            "t".into(),
+            Vec::new(),
+            &format!("short\n{}", "x".repeat(20)),
+        );
+        view.select(Panel::Full);
         view.scroll(Nav::Left);
         assert_eq!(view.hscroll, 0);
         view.scroll(Nav::Right);
@@ -264,8 +1080,186 @@ mod tests {
         view.scroll(Nav::Down);
         assert_eq!((view.scroll, view.hscroll), (1, 11));
         // An empty text has nothing to scroll to.
-        let mut empty = View::new("t".into(), String::new());
+        let mut empty = View::new("t".into(), Vec::new(), "");
         empty.scroll(Nav::Right);
         assert_eq!(empty.hscroll, 0);
+    }
+
+    #[test]
+    fn cutting_columns_keeps_the_style_of_what_is_left() {
+        let line = Line::from(vec![
+            Span::styled("abc", theme::dim()),
+            Span::styled("def", theme::base()),
+        ]);
+        let cut = skip_cols(&line, 4);
+        assert_eq!(cut.spans.len(), 1);
+        assert_eq!(
+            (cut.spans[0].content.as_ref(), cut.spans[0].style),
+            ("ef", theme::base())
+        );
+        assert_eq!(plain(&skip_cols(&line, 1)), "bcdef");
+        assert_eq!(plain(&skip_cols(&line, 9)), "");
+    }
+
+    fn wrapped(text: &str, width: usize) -> Vec<String> {
+        wrap(&Line::from(text.to_string()), width)
+            .iter()
+            .map(plain)
+            .collect()
+    }
+
+    #[test]
+    fn wrapping_breaks_greedily_on_spaces() {
+        assert_eq!(wrapped("aaa bbb ccc", 7), ["aaa bbb", "ccc"]);
+        assert_eq!(wrapped("aaa bbb ccc", 6), ["aaa", "bbb", "ccc"]);
+        assert_eq!(wrapped("aaa bbb ccc", 11), ["aaa bbb ccc"]);
+        // The space a break falls on is dropped, not carried to the next row.
+        assert_eq!(wrapped("aaa  bbb", 4), ["aaa", "bbb"]);
+        assert_eq!(wrapped("", 5), [""]);
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_is_cut() {
+        assert_eq!(wrapped("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrapped("xx abcdefghij", 4), ["xx", "abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn a_wrapped_bullet_continues_under_its_text() {
+        assert_eq!(
+            wrapped("  - one two three", 10),
+            ["  - one", "    two", "    three"]
+        );
+        // Prose without a bullet has nothing to hang under.
+        assert_eq!(wrapped("one two three", 7), ["one two", "three"]);
+        // A bullet too deep for the width is wrapped plainly.
+        assert_eq!(wrapped("  - abc", 3), ["-", "abc"]);
+    }
+
+    #[test]
+    fn wrapped_pieces_keep_the_style_of_their_text() {
+        let (dim, warn) = (theme::dim(), theme::base().fg(theme::STATUS_WARN));
+        let line = Line::from(vec![
+            Span::styled("aaa b", dim),
+            Span::styled("bb ccc", warn),
+        ]);
+        let rows = wrap(&line, 5);
+        let parts: Vec<Vec<(&str, Style)>> = rows
+            .iter()
+            .map(|r| {
+                r.spans
+                    .iter()
+                    .map(|s| (s.content.as_ref(), s.style))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                vec![("aaa", dim)],
+                vec![("b", dim), ("bb", warn)],
+                vec![("ccc", warn)]
+            ]
+        );
+    }
+
+    #[test]
+    fn wrapping_never_panics_or_loses_text_at_tiny_widths() {
+        let text = "  - not directly comparable: dataset differs";
+        for width in 0..=6 {
+            let rows = wrapped(text, width);
+            assert!(
+                rows.iter().all(|r| r.chars().count() <= width.max(1)),
+                "{rows:?}"
+            );
+            let kept: String = rows.concat().split_whitespace().collect();
+            assert_eq!(
+                kept,
+                text.split_whitespace().collect::<String>(),
+                "width {width}"
+            );
+        }
+    }
+
+    /// A summary with one long prose line and a table row wider than any pane below.
+    fn prose_and_table() -> View {
+        let prose = "word ".repeat(30);
+        let table = Line::from(format!("{}|", "x".repeat(100)));
+        View::new(
+            "t".into(),
+            vec![Row::prose(Line::from(prose)), Row::table(table)],
+            "",
+        )
+    }
+
+    #[test]
+    fn prose_wraps_and_table_lines_do_not() {
+        let mut view = prose_and_table();
+        let rows = view.display(20);
+        // 30 five-letter words, four to a row of at most 20 columns, then the table row alone.
+        assert_eq!(rows.len(), 8 + 1);
+        assert!(rows[..8].iter().all(|r| columns(r) <= 20));
+        assert_eq!(columns(&rows[8]), 101);
+        // Sideways scroll cuts the table row and leaves the prose where it is.
+        view.scroll(Nav::Right);
+        let shifted = view.display(20);
+        assert_eq!(columns(&shifted[8]), 101 - HSTEP);
+        assert_eq!(shifted[..8], rows[..8]);
+        // The widest line to scroll to is the table row, not the prose.
+        for _ in 0..30 {
+            view.scroll(Nav::Right);
+        }
+        assert_eq!(view.hscroll, 100);
+    }
+
+    #[test]
+    fn vertical_scrolling_counts_wrapped_rows_and_survives_a_resize() {
+        let mut view = prose_and_table();
+        view.width.set(20);
+        view.scroll(Nav::Bottom);
+        assert_eq!(view.scroll, 8); // 8 wrapped rows and the table row: the last is index 8
+        view.scroll(Nav::Down);
+        assert_eq!(view.scroll, 8);
+        view.scroll(Nav::Top);
+        for _ in 0..30 {
+            view.scroll(Nav::Down);
+        }
+        assert_eq!(view.scroll, 8);
+        // Widen the pane: the prose takes fewer rows, and Up starts from the new last row.
+        view.width.set(200);
+        assert_eq!(view.display(200).len(), 2);
+        view.scroll(Nav::Up);
+        assert_eq!(view.scroll, 0);
+        view.scroll = 8;
+        view.scroll(Nav::Down);
+        assert_eq!(view.scroll, 1);
+        view.scroll = 8;
+        view.scroll(Nav::PageDown);
+        assert_eq!(view.scroll, 1);
+    }
+
+    #[test]
+    fn marks_keep_their_order_and_show_it_as_a_number() {
+        let mut state = State::default();
+        for name in ["b", "a", "c"] {
+            state.toggle_mark(name);
+        }
+        let labels: Vec<String> = ["a", "b", "c", "d"].map(|n| state.mark_label(n)).into();
+        assert_eq!(labels, ["[2]", "[1]", "[3]", "[ ]"]);
+        // Unmarking renumbers the rest; marking again goes to the end.
+        state.toggle_mark("b");
+        assert_eq!(state.marked, ["a", "c"]);
+        assert_eq!(
+            (state.mark_label("a"), state.mark_label("c")),
+            ("[1]".into(), "[2]".into())
+        );
+        state.toggle_mark("b");
+        assert_eq!(state.mark_label("b"), "[3]");
+        // From the tenth the number no longer fits.
+        for i in 0..7 {
+            state.toggle_mark(&format!("n{i}"));
+        }
+        assert_eq!(state.mark_label("n5"), "[9]");
+        assert_eq!(state.mark_label("n6"), "[+]");
     }
 }

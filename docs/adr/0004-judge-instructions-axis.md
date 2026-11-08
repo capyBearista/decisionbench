@@ -25,4 +25,4 @@ Every Decisions request carries instructions and a description of each effort le
 
 ## Consequences
 
-The number of Trials in a Run grows by one factor per selected instruction set (#8). Reports break out accuracy by Candidate × Judge Instructions and warn when one name has several hashes (#9). Prompt experiments are reproducible from the repository and from evidence alone.
+The number of Trials in a Run grows by one factor per selected instruction set (#8). Reports break out accuracy by Candidate × Judge Instructions and warn when one name has several hashes (#9). Prompt experiments are reproducible from the repository and from evidence alone. [ADR-0006](0006-prompts-as-a-comparison-axis.md) extends the side-by-side comparison from sets inside one Run to sets across Runs.

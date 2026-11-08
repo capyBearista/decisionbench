@@ -1,7 +1,5 @@
 //! Candidate management: the config's `[[candidate]]` tables, with their manual prices.
 
-use std::os::unix::fs::PermissionsExt;
-
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -9,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::{App, block, cut, edit, list_lines, nav, step, theme};
-use crate::batch::{resolve_links, write_atomic};
+use crate::batch::edit_config;
 use crate::cost::{Price, fmt_usd};
 use crate::credentials;
 use crate::provider::{Candidate, KeySource, Provider, candidates_toml};
@@ -187,24 +185,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn save(app: &mut App) -> Result<(), String> {
-    // A symlinked config is written through, so the link survives the rename.
-    let config = resolve_links(&app.config)?;
-    let existing = match std::fs::read_to_string(&config) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("cannot read {}: {e}", config.display())),
-    };
-    let text = candidates_toml(existing.as_deref(), &app.candidates.items)?;
-    if let Some(dir) = config.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    }
-    // An existing config keeps its mode; a new one is private.
-    let permissions = std::fs::metadata(&config)
-        .map(|m| m.permissions())
-        .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
-    write_atomic(&config, &text, permissions)
-        .map_err(|e| format!("cannot write {}: {e}", app.config.display()))?;
+    edit_config(&app.config, |existing| {
+        candidates_toml(existing, &app.candidates.items)
+    })?;
     app.candidates.dirty = false;
     Ok(())
 }
@@ -394,13 +377,26 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let height = area.height.saturating_sub(2) as usize;
-    // Name, provider, price and key status keep their widths (the longest price text is 14, the
-    // key status 19 in the long wording, 12 in the short); the model takes what is left. Below 80
-    // columns the provider column is dropped (the form still shows it) so the model stays readable.
+    // Provider, price and key status keep their widths (the longest price text is 14, the key
+    // status 19 in the long wording, 12 in the short). The name fits its longest value (8 to 24
+    // characters); the model takes what is left and the name gives up room so 8 model characters and the cut mark stay visible.
+    // Below 80 columns the provider column is dropped (the form still shows it) so the model stays
+    // readable.
     let wide = area.width >= 80;
     let (provider_width, key_width) = if wide { (11, 19) } else { (0, 12) };
+    let fixed_width = 2 + 2 + 1 + provider_width + 1 + 14 + 2 + key_width;
+    let longest_name = state
+        .items
+        .iter()
+        .map(|c| c.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let name_width = longest_name
+        .clamp(8, 24)
+        .min((area.width as usize).saturating_sub(fixed_width + 9))
+        .max(1);
     let model_width = (area.width as usize)
-        .saturating_sub(2 + 2 + 12 + 1 + provider_width + 1 + 14 + 2 + key_width)
+        .saturating_sub(fixed_width + name_width)
         .max(1);
     let credentials = credentials::path_for(&app.config);
     let rows: Vec<Line> = if state.items.is_empty() {
@@ -415,8 +411,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .map(|c| {
                 Line::from(vec![
                     Span::raw(format!(
-                        "{:<12} {}{:<model_width$} ",
-                        cut(&c.name, 12),
+                        "{:<name_width$} {}{:<model_width$} ",
+                        cut(&c.name, name_width),
                         if wide {
                             format!("{:<10} ", c.provider.name())
                         } else {

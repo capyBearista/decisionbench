@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::Terminal;
@@ -97,7 +97,7 @@ fn a_candidate_without_prices_is_added_with_unknown_cost_and_saved() {
     assert!(!app.candidates.dirty);
     let saved = std::fs::read_to_string(dir.join("config.toml")).unwrap();
     assert_eq!(
-        crate::provider::parse_candidates(&saved).unwrap(),
+        crate::provider::parse_config(&saved).unwrap().candidates,
         app.candidates.items
     );
     // A fresh App reads it back.
@@ -160,8 +160,8 @@ fn setup_toggles_and_validates_numbers() {
     press(&mut app, KeyCode::Char('j'));
     press(&mut app, KeyCode::Char(' ')); // haiku off
     assert_eq!(app.setup.targets.len(), 3);
-    // Move to repetitions (past 3 more targets and the instructions row) and type 0, then 5.
-    for _ in 0..5 {
+    // Move to repetitions (past 3 more targets, the bundled prompt and the prompt folder) and type 0, then 5.
+    for _ in 0..6 {
         press(&mut app, KeyCode::Char('j'));
     }
     press(&mut app, KeyCode::Enter);
@@ -432,6 +432,420 @@ fn draw(app: &App, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
+/// An App with one saved, chosen Candidate.
+fn ready_app() -> (App, PathBuf) {
+    let (mut app, dir) = app();
+    add_candidate(&mut app, "alpha", "m", ["", ""]);
+    press(&mut app, KeyCode::Char('s'));
+    app.setup.chosen.insert("alpha".into());
+    app.screen = Screen::Setup;
+    (app, dir)
+}
+
+/// A copy of the bundled prompt at `dir/file`, so the prompt is named after `file`.
+fn prompt_file(dir: &Path, file: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(file);
+    std::fs::copy("prompts/neutral.md", &path).unwrap();
+    path
+}
+
+/// Moves the Setup cursor onto the row whose text contains `text`.
+fn focus(app: &mut App, text: &str) {
+    app.screen = Screen::Setup;
+    press(app, KeyCode::Char('g'));
+    for _ in 0..60 {
+        if draw(app, 100, 40)
+            .iter()
+            .any(|row| row.contains("▸ ") && row.contains(text))
+        {
+            return;
+        }
+        press(app, KeyCode::Char('j'));
+    }
+    panic!("no Setup row {text:?}:\n{}", draw(app, 100, 40).join("\n"));
+}
+
+/// Types `path` into the add-prompt entry; a rejected path leaves the entry open.
+fn add_prompt(app: &mut App, path: &Path) {
+    focus(app, "prompt neutral");
+    press(app, KeyCode::Char('a'));
+    type_text(app, &path.display().to_string());
+    press(app, KeyCode::Enter);
+}
+
+/// Sets the prompt folder through the UI; `Esc` is not pressed, so a rejected value stays open.
+fn set_folder(app: &mut App, folder: &str) {
+    focus(app, "prompt folder");
+    press(app, KeyCode::Enter);
+    type_text(app, folder);
+    press(app, KeyCode::Enter);
+}
+
+fn screen(app: &App) -> String {
+    draw(app, 100, 40).join("\n")
+}
+
+#[test]
+fn the_bundled_prompt_is_listed_first_chosen_and_the_default() {
+    let (mut app, _) = ready_app();
+    assert_eq!(setup::args(&app).unwrap().instructions, [None]);
+    assert!(screen(&app).contains("[x] prompt neutral (bundled)"));
+    focus(&mut app, "prompt neutral");
+    press(&mut app, KeyCode::Char(' '));
+    let err = setup::args(&app).err().unwrap();
+    assert!(err.contains("choose at least one prompt"), "{err}");
+}
+
+#[test]
+fn a_adds_a_prompt_file_as_chosen() {
+    let (mut app, dir) = ready_app();
+    let path = prompt_file(&dir.join("mine"), "second.md");
+    add_prompt(&mut app, &path);
+    assert!(!app.editing(), "{}", app.message);
+    assert_eq!(setup::args(&app).unwrap().instructions, [None, Some(path)]);
+    assert!(screen(&app).contains("[x] prompt second"));
+}
+
+#[test]
+fn a_prompt_that_cannot_be_loaded_or_is_listed_already_is_rejected_with_a_message() {
+    let (mut app, dir) = ready_app();
+    let good = prompt_file(&dir, "good.md");
+    add_prompt(&mut app, &good);
+    let malformed = dir.join("malformed.md");
+    std::fs::write(&malformed, "not a prompt").unwrap();
+    let same_name = prompt_file(&dir.join("other"), "neutral.md");
+    for (path, reason) in [
+        (malformed, "invalid instructions"),
+        (dir.join("missing.md"), "cannot read"),
+        (good, "already added"),
+        (same_name, "a prompt named `neutral` is already listed"),
+    ] {
+        add_prompt(&mut app, &path);
+        assert!(app.message.contains(reason), "{reason}: {}", app.message);
+        assert!(app.editing());
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.setup.prompts.len(), 2);
+    }
+}
+
+#[test]
+fn d_removes_a_typed_prompt_and_explains_why_others_stay() {
+    let (mut app, dir) = ready_app();
+    add_prompt(&mut app, &prompt_file(&dir, "good.md"));
+    focus(&mut app, "prompt good");
+    press(&mut app, KeyCode::Char('d'));
+    assert_eq!(app.setup.prompts.len(), 1);
+    assert!(!screen(&app).contains("[x] prompt good"));
+    focus(&mut app, "prompt neutral");
+    press(&mut app, KeyCode::Char('d'));
+    assert_eq!(app.setup.prompts.len(), 1);
+    assert!(
+        app.message.contains("neutral is built in"),
+        "{}",
+        app.message
+    );
+}
+
+/// A config with a comment and a Candidate, and an App over it.
+fn app_over_config(dir: &Path) -> (App, PathBuf) {
+    std::fs::create_dir_all(dir).unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        "# mine\n[[candidate]]\nname = \"a\"\nprovider = \"zen\"\nmodel = \"m\"\n",
+    )
+    .unwrap();
+    let mut app = App::new(Some(config.clone()), Some(dir.join("runs"))).unwrap();
+    app.screen = Screen::Setup;
+    (app, config)
+}
+
+#[test]
+fn the_prompt_folder_is_saved_and_its_markdown_files_are_listed() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    let alpha = prompt_file(&folder, "alpha.md");
+    prompt_file(&folder, "neutral.md");
+    std::fs::write(folder.join("broken.md"), "nope").unwrap();
+    std::fs::write(folder.join("notes.txt"), "not markdown").unwrap();
+    let (mut app, config) = app_over_config(&dir);
+    assert_eq!(app.prompts_dir, None);
+    assert!(screen(&app).contains("prompt folder") && screen(&app).contains("(none)"));
+
+    set_folder(&mut app, &folder.display().to_string());
+    assert!(!app.editing(), "{}", app.message);
+    assert_eq!(app.prompts_dir, Some(folder.display().to_string()));
+    let saved = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        saved.contains("# mine") && saved.contains("name = \"a\"") && saved.contains("prompts_dir"),
+        "{saved}"
+    );
+    // File-name order; a new file is not chosen; a broken file and a repeated name are not choosable.
+    let rows = screen(&app);
+    assert!(rows.contains("[ ] prompt alpha"), "{rows}");
+    assert!(rows.contains("prompt broken ·"), "{rows}");
+    assert!(rows.contains("prompt neutral · duplicate name"), "{rows}");
+    assert!(!rows.contains("notes"), "{rows}");
+    for broken in ["prompt broken", "prompt neutral · duplicate"] {
+        focus(&mut app, broken);
+        press(&mut app, KeyCode::Char(' '));
+        assert!(screen(&app).contains(&format!("[ ] {broken}")));
+    }
+    focus(&mut app, "prompt alpha");
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(
+        setup::args(&app).err().unwrap(),
+        "choose at least one candidate"
+    );
+    app.setup.chosen.insert("a".into());
+    assert_eq!(setup::args(&app).unwrap().instructions, [None, Some(alpha)]);
+
+    // d does not drop folder prompts.
+    press(&mut app, KeyCode::Char('d'));
+    assert!(
+        app.message.contains("clear the prompt folder"),
+        "{}",
+        app.message
+    );
+    assert!(screen(&app).contains("prompt alpha"));
+
+    // r finds a new file and keeps what was chosen.
+    prompt_file(&folder, "zeta.md");
+    assert!(!screen(&app).contains("prompt zeta"));
+    press(&mut app, KeyCode::Char('r'));
+    let rows = screen(&app);
+    assert!(
+        rows.contains("[ ] prompt zeta") && rows.contains("[x] prompt alpha"),
+        "{rows}"
+    );
+
+    // A blank folder removes the setting and the folder's prompts.
+    focus(&mut app, "prompt folder");
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..folder.display().to_string().len() {
+        press(&mut app, KeyCode::Backspace);
+    }
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.prompts_dir, None);
+    assert_eq!(app.setup.prompts.len(), 1);
+    let saved = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        !saved.contains("prompts_dir") && saved.contains("# mine"),
+        "{saved}"
+    );
+}
+
+#[test]
+fn a_relative_prompt_folder_is_beside_the_config_and_a_new_app_reads_it_back() {
+    let (_, dir) = app();
+    prompt_file(&dir.join("prompts"), "alpha.md");
+    let (mut app, config) = app_over_config(&dir);
+    set_folder(&mut app, "prompts");
+    assert_eq!(app.prompts_dir.as_deref(), Some("prompts"));
+    assert!(screen(&app).contains("[ ] prompt alpha"));
+    let again = App::new(Some(config), Some(dir.join("runs"))).unwrap();
+    assert_eq!(again.prompts_dir.as_deref(), Some("prompts"));
+    assert_eq!(again.setup.prompts.len(), 2);
+}
+
+#[test]
+fn a_missing_prompt_folder_is_noted_without_a_panic_and_a_failed_save_keeps_the_old_one() {
+    let (_, dir) = app();
+    let (mut app, config) = app_over_config(&dir);
+    set_folder(&mut app, "nowhere");
+    assert_eq!(app.prompts_dir.as_deref(), Some("nowhere"));
+    assert!(app.message.contains("nowhere"), "{}", app.message);
+    assert!(screen(&app).contains("cannot read"));
+    assert_eq!(app.setup.prompts.len(), 1);
+
+    std::fs::write(&config, "not = [valid").unwrap();
+    focus(&mut app, "prompt folder");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Backspace);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.prompts_dir.as_deref(), Some("nowhere"));
+    assert!(app.message.contains("TOML parse error"), "{}", app.message);
+    assert!(app.editing());
+}
+
+#[test]
+fn the_plan_line_counts_candidates_prompts_cases_and_repetitions() {
+    let (mut app, dir) = ready_app();
+    add_prompt(&mut app, &prompt_file(&dir, "second.md"));
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char(' '));
+    app.setup.repetitions = 1;
+    app.screen = Screen::Setup;
+    let rows = screen(&app);
+    assert!(
+        rows.contains(
+            "plan: 1 candidate × 2 prompts × 1 case × 1 repetition = 2 trials, up to 4 requests"
+        ),
+        "{rows}"
+    );
+    // The plan line is not a row: Start is the last one.
+    focus(&mut app, "start run");
+    press(&mut app, KeyCode::Char('j'));
+    assert!(screen(&app).contains("▸ ▶ start run"));
+}
+
+/// The text of the Setup row under the cursor.
+fn focused_row(app: &App) -> String {
+    draw(app, 100, 40)
+        .into_iter()
+        .find(|row| row.contains("▸ "))
+        .expect("a focused row")
+}
+
+#[test]
+fn clearing_a_folder_of_files_leaves_the_cursor_on_the_folder_row() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    for i in 0..6 {
+        prompt_file(&folder, &format!("p{i}.md"));
+    }
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    assert_eq!(app.setup.prompts.len(), 7);
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+    press(&mut app, KeyCode::Enter);
+    for _ in 0..folder.display().to_string().len() {
+        press(&mut app, KeyCode::Backspace);
+    }
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.setup.prompts.len(), 1);
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+    // Enter here edits the folder; it does not start a run.
+    press(&mut app, KeyCode::Enter);
+    assert!(app.editing() && app.screen == Screen::Setup);
+}
+
+#[test]
+fn a_rescan_keeps_the_cursor_on_the_same_row_or_falls_back_to_the_folder_row() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    let first = prompt_file(&folder, "a.md");
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    focus(&mut app, "repetitions");
+    // Rows appear above the cursor, by `r` and by entering the screen again.
+    prompt_file(&folder, "b.md");
+    press(&mut app, KeyCode::Char('r'));
+    assert_eq!(app.setup.prompts.len(), 3);
+    assert!(
+        focused_row(&app).contains("repetitions"),
+        "{}",
+        screen(&app)
+    );
+    prompt_file(&folder, "c.md");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::BackTab);
+    assert_eq!(app.screen, Screen::Setup);
+    assert_eq!(app.setup.prompts.len(), 4);
+    assert!(
+        focused_row(&app).contains("repetitions"),
+        "{}",
+        screen(&app)
+    );
+    // A prompt row stays focused when rows above it come and go.
+    focus(&mut app, "prompt c");
+    std::fs::remove_file(&first).unwrap();
+    press(&mut app, KeyCode::Char('r'));
+    assert!(focused_row(&app).contains("prompt c"), "{}", screen(&app));
+    // Its own file gone: the folder row, never Start or a number.
+    std::fs::remove_file(folder.join("c.md")).unwrap();
+    press(&mut app, KeyCode::Char('r'));
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+}
+
+#[test]
+fn d_leaves_the_cursor_on_the_folder_row() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    for i in 0..3 {
+        prompt_file(&folder, &format!("p{i}.md"));
+    }
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    add_prompt(&mut app, &prompt_file(&dir.join("mine"), "typed.md"));
+    focus(&mut app, "prompt typed");
+    press(&mut app, KeyCode::Char('d'));
+    assert_eq!(app.setup.prompts.len(), 4);
+    assert!(
+        focused_row(&app).contains("prompt folder"),
+        "{}",
+        screen(&app)
+    );
+}
+
+#[test]
+fn a_large_prompt_file_is_not_read_and_a_big_folder_is_capped() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    prompt_file(&folder, "ok.md");
+    std::fs::File::create(folder.join("huge.md"))
+        .unwrap()
+        .set_len(300 * 1024)
+        .unwrap();
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    let rows = screen(&app);
+    assert!(
+        rows.contains("[ ] prompt huge · too large (over 256 KiB)"),
+        "{rows}"
+    );
+    focus(&mut app, "prompt huge");
+    press(&mut app, KeyCode::Char(' '));
+    assert!(screen(&app).contains("[ ] prompt huge"));
+
+    for i in 0..205 {
+        std::fs::write(folder.join(format!("f{i:03}.md")), "x").unwrap();
+    }
+    press(&mut app, KeyCode::Char('r'));
+    // Bundled plus the first 200 files by name.
+    assert_eq!(app.setup.prompts.len(), 201);
+    let tall = draw(&app, 100, 250).join("\n");
+    assert!(
+        tall.contains("showing the first 200 of 207 .md files"),
+        "{tall}"
+    );
+}
+
+#[test]
+fn a_typed_prompt_may_reuse_the_name_of_a_folder_file_that_can_never_be_chosen() {
+    let (_, dir) = app();
+    let folder = dir.join("folder");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("dup.md"), "nope").unwrap();
+    let (mut app, _) = app_over_config(&dir);
+    set_folder(&mut app, &folder.display().to_string());
+    let typed = prompt_file(&dir.join("mine"), "dup.md");
+    add_prompt(&mut app, &typed);
+    assert!(!app.editing(), "{}", app.message);
+    // The folder file stays listed, with its own problem.
+    let dups: Vec<_> = app
+        .setup
+        .prompts
+        .iter()
+        .filter(|p| p.name == "dup")
+        .collect();
+    assert_eq!(dups.len(), 2);
+    assert!(dups[0].chosen && dups[1].problem.is_some());
+}
+
 const SECRET: &str = "sk-test-secret-9876";
 
 /// The Zen candidate `add_candidate` makes, selected, and its (not yet written) credentials file.
@@ -632,6 +1046,92 @@ fn each_row_ends_with_its_key_status_without_being_clipped() {
             );
         }
     }
+}
+
+/// The Dataset screen on case c024 (haiku xhigh-max, sonnet high-xhigh, opus medium-xhigh, fable
+/// low-high), drawn at `width`x`height`.
+fn c024_detail_rows(width: u16, height: u16) -> Vec<String> {
+    let (mut app, _) = app();
+    let (_, _, cases) = crate::batch::load_dataset(None).unwrap();
+    let at = cases.iter().position(|c| c.id == "c024").unwrap();
+    press(&mut app, KeyCode::Char('2'));
+    for _ in 0..at {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    draw(&app, width, height)
+}
+
+#[test]
+fn the_case_pane_draws_an_effort_bar_per_labelled_target() {
+    for (w, h) in [(60, 16), (80, 24), (120, 40)] {
+        let rows = c024_detail_rows(w, h);
+        for target in ["haiku", "sonnet", "opus", "fable"] {
+            let row = rows
+                .iter()
+                .find(|r| r.contains(&format!("✓ {target}")))
+                .unwrap_or_else(|| panic!("{w}x{h}: no {target} row:\n{}", rows.join("\n")));
+            assert!(row.contains('━'), "{w}x{h}: {row:?}");
+        }
+    }
+}
+
+#[test]
+fn the_case_pane_shows_the_range_text_and_level_names_only_when_they_fit() {
+    let wide = c024_detail_rows(140, 40).join("\n");
+    assert!(
+        wide.contains("xhigh-max") && wide.contains("medium-xhigh"),
+        "{wide}"
+    );
+    assert!(wide.contains("low    medium high   xhigh  max"), "{wide}");
+    let medium = c024_detail_rows(120, 40).join("\n");
+    assert!(
+        medium.contains("xhigh-max") && medium.contains("low  med  hi   xh   max"),
+        "{medium}"
+    );
+    let narrow = c024_detail_rows(60, 16).join("\n");
+    assert!(!narrow.contains("xhigh-max"), "{narrow}");
+    assert!(narrow.contains("lo md hi xh mx"), "{narrow}");
+}
+
+/// The row of the one Candidate `add_candidate` makes, drawn at `width`x`height`.
+fn candidate_row(name: &str, width: u16, height: u16) -> String {
+    let (mut app, _) = app();
+    add_candidate(&mut app, name, "a-rather-long-model-identifier", ["", ""]);
+    let rows = draw(&app, width, height);
+    let head: String = name.chars().take(8).collect();
+    rows.into_iter()
+        .find(|r| r.contains(&head))
+        .unwrap_or_else(|| panic!("no row for {name} at {width}x{height}"))
+}
+
+#[test]
+fn a_long_candidate_name_is_not_cut_at_twelve_characters() {
+    for (w, h) in [(120, 40), (80, 24)] {
+        let row = candidate_row("decider-flash-v.1.2", w, h);
+        assert!(row.contains("decider-flash-v.1.2 "), "{w}x{h}: {row:?}");
+    }
+}
+
+#[test]
+fn a_long_candidate_name_leaves_the_model_and_key_status_readable_at_60_columns() {
+    use crate::provider::Provider;
+    let row = candidate_row("decider-flash-v.1.2", 60, 16);
+    // `add_candidate` makes a Zen candidate; its key status depends on the host's environment.
+    let key = Provider::Zen.key_source(&std::env::temp_dir().join("no-such-credentials.toml"));
+    let key = super::candidates::key_text(Provider::Zen, key, false);
+    assert!(
+        row.contains("a-rather")
+            && row.contains("cost unknown")
+            && row.contains(key.content.as_ref()),
+        "{row:?}"
+    );
+}
+
+#[test]
+fn a_candidate_name_over_24_characters_is_cut_with_an_ellipsis() {
+    let row = candidate_row("abcdefghijklmnopqrstuvwxyz0123", 120, 40);
+    assert!(row.contains("abcdefghijklmnopqrstuvw… "), "{row:?}");
+    assert!(!row.contains("abcdefghijklmnopqrstuvwx"), "{row:?}");
 }
 
 #[test]
