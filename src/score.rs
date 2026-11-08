@@ -119,7 +119,20 @@ pub fn score(
         }
     }
 
-    let mut groups = BTreeMap::new();
+    // Every selected variant gets a score, even one the run stopped before it started.
+    let mut groups: BTreeMap<_, Vec<&TrialRecord>> = BTreeMap::new();
+    for candidate in &run.manifest.candidates {
+        for set in &run.manifest.instructions {
+            groups.insert(
+                (
+                    candidate.candidate.name.as_str(),
+                    set.name.as_str(),
+                    set.sha256.as_str(),
+                ),
+                Vec::new(),
+            );
+        }
+    }
     for trial in &run.trials {
         groups
             .entry((
@@ -127,7 +140,7 @@ pub fn score(
                 trial.instructions.name.as_str(),
                 trial.instructions.sha256.as_str(),
             ))
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(trial);
     }
     let scores = groups
@@ -137,10 +150,11 @@ pub fn score(
             instructions: name.to_string(),
             instructions_sha256: sha.to_string(),
             pooled: pooled(&trials),
-            targets: Target::ALL
-                .into_iter()
-                .filter(|t| trials.iter().any(|tr| tr.targets.contains(t)))
-                .map(|t| (t, rates(&trials, t)))
+            targets: run
+                .manifest
+                .targets
+                .iter()
+                .map(|t| (*t, rates(&trials, *t)))
                 .collect(),
         })
         .collect();

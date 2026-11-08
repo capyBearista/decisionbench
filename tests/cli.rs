@@ -4374,3 +4374,63 @@ fn score_refuses_a_trial_whose_case_is_not_in_the_dataset() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).contains("case zz"), "{}", stderr(&out));
 }
+
+#[test]
+fn score_lists_a_selected_variant_that_has_no_recorded_trials() {
+    let dataset = temp_file(
+        "score-empty-variant-dataset.json",
+        &dataset(r#"{"id":"s","message":"first","split":"train","ok":{"sonnet":"low"}}"#),
+    );
+    let dir = fresh_dir("score-empty-variant-prompts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (dir.join("alpha.md"), dir.join("beta.md"));
+    std::fs::write(&a, custom()).unwrap();
+    std::fs::write(&b, custom().replace("low desc", "other desc")).unwrap();
+    let stub = scripted(vec![
+        Reply::new(200, &reply_for(&[("sonnet", r#""low""#)]));
+        2
+    ]);
+    let eval = Eval::new(
+        "score-empty-variant",
+        &candidate_toml("a", "openrouter", "m"),
+        &stub.url,
+    );
+    let mut args = vec![
+        "--candidate",
+        "a",
+        "--repetitions",
+        "1",
+        "--target",
+        "sonnet",
+    ];
+    args.extend(["--dataset", dataset.to_str().unwrap()]);
+    args.extend([
+        "--instructions",
+        a.to_str().unwrap(),
+        "--instructions",
+        b.to_str().unwrap(),
+    ]);
+    eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    // As if the run had stopped before `beta` started.
+    let file = eval.file();
+    let kept: Vec<String> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .filter(|l| !(l.contains(r#""type":"trial""#) && l.contains(r#""name":"beta""#)))
+        .map(String::from)
+        .collect();
+    std::fs::write(&file, kept.join("\n") + "\n").unwrap();
+    let out = scored(&score(&eval, &dataset, &[]));
+    let scores = out["scores"].as_array().unwrap();
+    let names: Vec<&str> = scores
+        .iter()
+        .map(|s| s["instructions"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "beta"]);
+    let beta = &scores[1]["targets"]["sonnet"];
+    assert_eq!(
+        (&beta["hit"], &beta["hit_rate"], &beta["coverage"]),
+        (&json!(0), &json!(null), &json!(null))
+    );
+    assert_eq!(out["recorded_trials"], 1);
+}
