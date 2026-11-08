@@ -201,6 +201,8 @@ class Cli(unittest.TestCase):
             run = write_run(d, "run.jsonl")
             baseline, best = os.path.join(d, "baseline.json"), os.path.join(d, "best.json")
             self.assertEqual(self.run_cli("baseline", paths["a"], paths["b"], "--runs", run, run, "-o", baseline).returncode, 0)
+            with open(baseline) as f:
+                self.assertEqual(json.load(f)["retries"], 3, "read from the calibration run's manifest")
             self.assertEqual(self.run_cli("baseline", paths["weak"], paths["weak"], "--runs", run, run, "-o", baseline + "2").returncode, 12)
             judge = ["judge", "--baseline", baseline, "--best", best, "--commit", "c0ffee"]
             self.assertEqual(self.run_cli(*judge, "--run", run, paths["bad"]).returncode, 10)
@@ -250,20 +252,18 @@ class Cli(unittest.TestCase):
                 f.write("\n".join(['{"type": "run"}', *[trial(1)] * 4, trial(3), '{"type": "end"}']) + "\n")
             with open(os.path.join(d, "2-1.jsonl"), "w") as f:  # a probe; a stop cut its last line
                 f.write('{"type": "run"}\n' + trial(1) + '\n{"type": "tri')
-            none = ["--baseline", os.path.join(d, "no-baseline.json")]
-            ok = self.run_cli("spent", d, "--budget", "100", *none)
-            self.assertEqual(ok.returncode, 0, ok.stderr)
-            self.assertEqual(json.loads(ok.stdout), {"requests": 8, "budget": 100, "remaining": 92, "next_run": 7})
-            # Before calibration, the next run is sized as the largest so far.
-            self.assertEqual(self.run_cli("spent", d, "--budget", "14", *none).returncode, 13, "6 left, the next run may need 7")
-            self.assertEqual(self.run_cli("spent", d, "--budget", "15", *none).returncode, 0)
-            # After it, as the eligible models (a and b, not x) × Cases × repetitions: 2 × 2 × 1.
+            missing = self.run_cli("spent", d, "--budget", "100", "--baseline", os.path.join(d, "none.json"))
+            self.assertEqual(missing.returncode, 1, "no baseline yet: calibration is checked with the user")
+            self.assertIn("calibrate first", missing.stderr)
+            # The next experiment's ceiling: eligible models (a and b, not x) × Cases × repetitions × (1 + retries) = 2 × 2 × 1 × 4.
             baseline = os.path.join(d, "baseline.json")
             with open(baseline, "w") as f:
-                json.dump(base(), f)
-            with_base = self.run_cli("spent", d, "--budget", "12", "--baseline", baseline)
-            self.assertEqual((with_base.returncode, json.loads(with_base.stdout)["next_run"]), (0, 4))
-            self.assertEqual(self.run_cli("spent", d, "--budget", "11", "--baseline", baseline).returncode, 13)
+                json.dump({**base(), "retries": 3}, f)
+            ok = self.run_cli("spent", d, "--budget", "24", "--baseline", baseline)
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertEqual(json.loads(ok.stdout), {"requests": 8, "budget": 24, "remaining": 16, "next_run": 16})
+            self.assertEqual(self.run_cli("spent", d, "--budget", "23", "--baseline", baseline).returncode, 13,
+                             "15 left covers the 4 first attempts but not their retries")
 
     def test_other_cases_or_another_run_file_are_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -289,7 +289,7 @@ def write_run(directory, name, cases=("c1", "c2"), run_id="r1", repetitions=1):
     path = os.path.join(directory, name)
     with open(path, "w") as f:
         f.write(json.dumps({"type": "run", "id": run_id, "cases": list(cases), "targets": ["opus"],
-                            "settings": {"repetitions": repetitions}}) + "\n")
+                            "settings": {"repetitions": repetitions, "retries": 3}}) + "\n")
     return path
 
 

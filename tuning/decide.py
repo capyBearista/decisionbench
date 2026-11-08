@@ -9,7 +9,8 @@
 SCORE_* is the JSON printed by `decisionbench score`; RUN_* is the evidence file it scored. `score` does not say
 which Cases it covered, so the evidence manifest is read to make sure that runs compare the same Cases. `judge` exits 0 on keep, 10 on discard,
 11 on rerun (the run is not usable), 1 on bad input. `baseline` exits 0, or 12 when fewer than
-two models are eligible. `spent` exits 13 when what is left of the budget cannot cover one more run. See tuning/program.md.
+two models are eligible. `spent` exits 13 when what is left of the budget cannot cover the most the
+next experiment can send. See tuning/program.md.
 """
 import argparse
 import glob
@@ -84,6 +85,12 @@ def selection(path, score):
         "targets": sorted(manifest["targets"]),
         "repetitions": manifest["settings"]["repetitions"],
     }
+
+
+def retries(path):
+    """The retries a run allowed per Trial, from its evidence manifest; `spent` sizes the next run with it."""
+    with open(path) as f:
+        return json.loads(f.readline())["settings"]["retries"]
 
 
 def baseline(a, b, sel_a, sel_b):
@@ -232,10 +239,10 @@ def misses(path, limit):
     return {"counts": {f"{k[0]} {k[1]}": v for k, v in sorted(counts.items())}, "misses": rows[::step][:limit]}
 
 
-def spent(directory, budget, base=None):
-    """Requests sent so far (every Attempt in every evidence file in `directory`), and the size of the
-    next run: one request per eligible model, Case and repetition once there is a baseline, else the
-    largest run so far."""
+def spent(directory, budget, base):
+    """Requests sent so far (every Attempt in every evidence file in `directory`), and the most the next
+    experiment can send: one request per eligible model, Case and repetition, each retried up to the
+    calibration's `retries`, as `run` counts its "up to N requests"."""
     if not os.path.isdir(directory):
         fail(f"{directory} is not a folder")
     runs = []
@@ -251,11 +258,8 @@ def spent(directory, budget, base=None):
                     attempts += len(t["attempts"])
         runs.append(attempts)
     total = sum(runs)
-    if base is None:
-        next_run = max(runs, default=0)
-    else:
-        sel = base["selection"]
-        next_run = len(derived(base)["eligible_models"]) * len(sel["cases"]) * sel["repetitions"]
+    sel = base["selection"]
+    next_run = len(derived(base)["eligible_models"]) * len(sel["cases"]) * sel["repetitions"] * (1 + base["retries"])
     return {"requests": total, "budget": budget, "remaining": budget - total, "next_run": next_run}
 
 
@@ -293,6 +297,7 @@ def command(args):
     if args.cmd == "baseline":
         a, b = load(args.score_a), load(args.score_b)
         result = baseline(a, b, selection(args.runs[0], a), selection(args.runs[1], b))
+        result["retries"] = retries(args.runs[0])
         save(args.out, result)
         print(json.dumps(result, indent=2))
         sys.exit(0 if len(result["eligible_models"]) >= 2 else 12)
@@ -310,8 +315,9 @@ def command(args):
         print(json.dumps(result, indent=2))
         sys.exit({"keep": 0, "discard": 10, "rerun": 11}[result["verdict"]])
     if args.cmd == "spent":
-        base = load(args.baseline) if os.path.exists(args.baseline) else None
-        result = spent(args.dir, args.budget, base)
+        if not os.path.exists(args.baseline):
+            fail(f"no {args.baseline}: calibrate first (Setup checks the calibration cost with the user)")
+        result = spent(args.dir, args.budget, load(args.baseline))
         print(json.dumps(result))
         sys.exit(13 if result["remaining"] < result["next_run"] else 0)
     print(json.dumps(misses(args.run, args.limit), indent=2))
