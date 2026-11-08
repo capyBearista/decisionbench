@@ -4077,7 +4077,9 @@ fn scored_run(test: &str, replies: Vec<Reply>, extra: &[&str]) -> (Eval, PathBuf
     args.extend(["--target", "sonnet", "--target", "opus"]);
     args.extend(["--dataset", dataset.to_str().unwrap()]);
     args.extend(extra);
-    eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    let out = eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    // 3: some Trial failed, which the failure tests want.
+    assert!(matches!(out.status.code(), Some(0 | 3)), "{}", stderr(&out));
     (eval, dataset)
 }
 
@@ -4140,6 +4142,14 @@ fn score_reports_hit_rate_floor_and_lift_per_target_and_pooled() {
         (&json!(0.25), &json!(0.5), &json!(-0.25))
     );
     assert_eq!(pooled["coverage"], 1.0);
+    assert_eq!(
+        (
+            &out["state"],
+            &out["planned_trials"],
+            &out["recorded_trials"]
+        ),
+        (&json!("complete"), &json!(2), &json!(2))
+    );
     assert!(s["targets"].get("haiku").is_none(), "only asked targets");
 }
 
@@ -4234,4 +4244,133 @@ fn score_refuses_instructions_that_quote_a_case_message() {
         "{}",
         stderr(&out)
     );
+}
+
+#[test]
+fn score_pools_by_rows_not_by_averaging_target_rates() {
+    // a: sonnet and opus labelled low; b: sonnet only. Sonnet hits 1 of 2, opus 0 of 1.
+    let dataset = temp_file(
+        "score-unequal-dataset.json",
+        &dataset(
+            r#"{"id":"a","message":"first","split":"train","ok":{"sonnet":"low","opus":"low"}},
+               {"id":"b","message":"second","split":"train","ok":{"sonnet":"low"}}"#,
+        ),
+    );
+    let stub = scripted(vec![
+        Reply::new(
+            200,
+            &reply_for(&[("sonnet", r#""low""#), ("opus", r#""high""#)]),
+        ),
+        Reply::new(
+            200,
+            &reply_for(&[("sonnet", r#""high""#), ("opus", r#""high""#)]),
+        ),
+    ]);
+    let eval = Eval::new(
+        "score-unequal",
+        &candidate_toml("a", "openrouter", "m"),
+        &stub.url,
+    );
+    let args = [
+        "--candidate",
+        "a",
+        "--repetitions",
+        "1",
+        "--target",
+        "sonnet",
+        "--target",
+        "opus",
+    ];
+    let mut args = args.to_vec();
+    args.extend(["--dataset", dataset.to_str().unwrap()]);
+    eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+    let pooled = scored(&score(&eval, &dataset, &[]))["scores"][0]["pooled"].clone();
+    // 1 hit of 3 rows (a mean of the two rates would give 0.25); the best constant, low, hits all 3.
+    assert_eq!(pooled["hit"], 1);
+    assert!((pooled["hit_rate"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9);
+    assert_eq!(pooled["floor"], 1.0);
+}
+
+#[test]
+fn score_keeps_variants_apart_and_quotes_only_messages_of_twenty_characters() {
+    // 19 and 20 characters; only the second may be quoted.
+    let dataset = temp_file(
+        "score-boundary-dataset.json",
+        &dataset(
+            r#"{"id":"s","message":"abcdefghij klmnopqr","split":"train","ok":{"sonnet":"low"}},
+               {"id":"l","message":"abcdefghij klmnopqrs","split":"train","ok":{"sonnet":"low"}}"#,
+        ),
+    );
+    let dir = fresh_dir("score-boundary-prompts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (short, long) = (dir.join("short.md"), dir.join("long.md"));
+    std::fs::write(
+        &short,
+        custom().replace("low desc", "e.g. abcdefghij klmnopqr"),
+    )
+    .unwrap();
+    std::fs::write(
+        &long,
+        custom().replace("low desc", "e.g. abcdefghij klmnopqrs"),
+    )
+    .unwrap();
+    let run_with = |test: &str, prompts: &[&PathBuf]| {
+        let stub = scripted(vec![
+            Reply::new(200, &reply_for(&[("sonnet", r#""low""#)]));
+            4
+        ]);
+        let eval = Eval::new(test, &candidate_toml("a", "openrouter", "m"), &stub.url);
+        let mut args = vec![
+            "--candidate",
+            "a",
+            "--repetitions",
+            "1",
+            "--target",
+            "sonnet",
+        ];
+        args.extend(["--dataset", dataset.to_str().unwrap()]);
+        for p in prompts {
+            args.extend(["--instructions", p.to_str().unwrap()]);
+        }
+        eval.run(&args, &[("OPENROUTER_API_KEY", TEST_KEY)]);
+        eval
+    };
+    let eval = run_with("score-boundary-ok", &[&short]);
+    scored(&score(&eval, &dataset, &[]));
+    let eval = run_with("score-boundary-leak", &[&long]);
+    let out = score(&eval, &dataset, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("message of case l"),
+        "{}",
+        stderr(&out)
+    );
+
+    // One run with two prompts gives one score per prompt, ordered by name.
+    let (a, b) = (dir.join("alpha.md"), dir.join("beta.md"));
+    std::fs::write(&a, custom()).unwrap();
+    std::fs::write(&b, custom().replace("low desc", "other desc")).unwrap();
+    let eval = run_with("score-two-variants", &[&b, &a]);
+    let out = scored(&score(&eval, &dataset, &[]));
+    let names: Vec<&str> = out["scores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["instructions"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "beta"]);
+}
+
+#[test]
+fn score_refuses_a_trial_whose_case_is_not_in_the_dataset() {
+    let replies = two_cases([(r#""low""#, r#""high""#), (r#""low""#, r#""high""#)]);
+    let (eval, dataset) = scored_run("score-unknown-case", replies, &["--split", "train"]);
+    let file = eval.file();
+    let edited = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace(r#""case_id":"t1""#, r#""case_id":"zz""#);
+    std::fs::write(&file, edited).unwrap();
+    let out = score(&eval, &dataset, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("case zz"), "{}", stderr(&out));
 }

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::Serialize;
 
 use crate::dataset::{Case, Effort, Split};
-use crate::evidence::{RunFile, TrialRecord};
+use crate::evidence::{RunFile, RunState, TrialRecord};
 use crate::grade::{Grade, Target};
 
 /// Messages shorter than this are too generic to count as a quote.
@@ -19,6 +19,10 @@ const MIN_QUOTE_CHARS: usize = 20;
 #[derive(Debug, Serialize)]
 pub struct Score {
     pub run: String,
+    /// `partial` or `failed` means fewer Trials than planned, which `coverage` does not show.
+    pub state: RunState,
+    pub planned_trials: usize,
+    pub recorded_trials: usize,
     pub dataset_sha256: String,
     pub scores: Vec<VariantScore>,
 }
@@ -87,13 +91,14 @@ pub fn score(
         ));
     }
     let by_id: HashMap<&str, &Case> = cases.iter().map(|c| (c.id.as_str(), c)).collect();
-    if !allow_holdout {
-        let holdout = run.trials.iter().find_map(|t| {
-            by_id
-                .get(t.case_id.as_str())
-                .filter(|c| c.split == Split::Holdout)
-        });
-        if let Some(case) = holdout {
+    for trial in &run.trials {
+        let case = by_id.get(trial.case_id.as_str()).ok_or_else(|| {
+            format!(
+                "the run has a trial for case {}, not in the dataset",
+                trial.case_id
+            )
+        })?;
+        if case.split == Split::Holdout && !allow_holdout {
             return Err(format!(
                 "the run includes holdout case {}; pass --allow-holdout to score it (once, at the end of tuning)",
                 case.id
@@ -141,6 +146,9 @@ pub fn score(
         .collect();
     Ok(Score {
         run: run.manifest.id.clone(),
+        state: run.end.as_ref().map_or(RunState::Partial, |e| e.state),
+        planned_trials: run.manifest.planned_trials,
+        recorded_trials: run.trials.len(),
         dataset_sha256: dataset_sha256.to_string(),
         scores,
     })

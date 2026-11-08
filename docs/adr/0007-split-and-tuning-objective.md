@@ -33,5 +33,5 @@ We now want to tune Judge Instructions against the dataset with an automated loo
 
 - Every dataset file, including test fixtures, needs a `split`.
 - The holdout protects nothing against an agent that opens the dataset file. The tuning instructions must forbid that; the `score` refusals only catch a Run, not a read.
-- On a fixed set of Cases the floor does not depend on the prompt, so maximising lift is the same as maximising hit rate. Lift is what makes a model's skill visible: a model at the floor is not choosing efforts better than a constant.
+- The floor is computed over the rows that got a valid reply, so two runs with the same coverage have the same floor and maximising lift is the same as maximising hit rate. A run that lost more Trials to provider failures has a different row set; compare lift only between runs of similar coverage (`score` also prints the run state and Trial counts, because a cancelled run reports full coverage over fewer rows). Lift is what makes a model's skill visible: a model at the floor is not choosing efforts better than a constant.
 - Dropping `Retry-After` handling for HTTP dates keeps the parser trivial; a provider that sends dates gets plain backoff.
