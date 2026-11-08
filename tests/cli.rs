@@ -3914,12 +3914,12 @@ fn a_priced_candidate_whose_reply_has_no_usage_counts_cost_as_unknown() {
 fn a_sonnet_and_opus_run_asks_only_those_and_grades_each_from_its_own_label() {
     let stub = stub(
         200,
-        &reply_for(&[("sonnet", r#""low""#), ("opus", r#""max""#)]),
+        &reply_for(&[("sonnet", r#""low""#), ("opus", r#""high""#)]),
     );
     let dataset = temp_file(
         "sonnet-opus-dataset.json",
         &dataset(
-            r#"{"id":"p1","message":"m","ok":{"haiku":"low","sonnet":"low","opus":"low","fable":"low"}}"#,
+            r#"{"id":"p1","message":"m","ok":{"haiku":"low","sonnet":"low","opus":"medium","fable":"max"}}"#,
         ),
     );
     let eval = openrouter_eval("sonnet-opus", &stub);
