@@ -80,7 +80,7 @@ One column of a comparison: a Judge Instructions set as run in one Run. A Run wi
 The first Variant of a comparison. Every other Variant is measured against it with a paired delta (`+g -l`): the paired Trials (Case × repetition) the Variant gained and lost relative to the Baseline. A delta is marked `~` (not significant) unless an exact two-sided sign test on the Cases that changed gives p < 0.05.
 
 **Pooled Row**  
-The row of a comparison matrix that sums valid scored predictions over all Candidates and Targets for each Variant. It exists only to compare Variants at a glance, is always labelled, and is not a score.
+The row of a comparison matrix that sums valid scored predictions, for each Variant, over the rows that are present in every column (so all columns cover the same rows: the same Candidates and Targets on the prompt axis, the same prompts and Targets on the candidate axis). It exists only to compare Variants at a glance, is always labelled, and is not a score.
 
 **Consistency**  
 For one Candidate × Judge Instructions × Case × Target Model with at least two valid efforts across repetitions: all of them are the same effort.

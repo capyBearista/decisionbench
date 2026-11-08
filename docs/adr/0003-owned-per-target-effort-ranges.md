@@ -23,4 +23,4 @@ The first dataset plan kept the effortless fixture as an untouched source, with 
 
 ## Consequences
 
-Coverage is sparse: of 142 Case–Target slots, 75 are labelled (67 Sonnet, 8 Opus) and the rest are unscored until reviewed by hand. Results can no longer report a holdout estimate. Old Case IDs from effortless are gone, so results cannot be traced to individual effortless records.
+Coverage is sparse: of 142 Case–Target slots, 75 are labelled (67 Sonnet, 8 Opus) and the rest are unscored until reviewed by hand (since superseded: [ADR-0005](0005-one-request-per-case-four-targets.md) added approved labels for all four targets on 66 Cases). Results can no longer report a holdout estimate. Old Case IDs from effortless are gone, so results cannot be traced to individual effortless records.
