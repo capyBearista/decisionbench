@@ -130,10 +130,11 @@ def grades(t):
 
 
 def spread(paths, repetitions):
-    """{candidate: expected run-to-run difference of its accuracy}, from how each of its predictions
-    (Case and target) varies over every repetition of every run. The difference of two pooled lifts
-    misses answers that change but cancel out; this does not. A model that always gives the same
-    answer gets 0. Its standard deviation stands in for the difference two runs would show."""
+    """{candidate: expected run-to-run difference of its accuracy}, from how often each of its predictions
+    (Case and target) is a hit over every repetition of every run. The difference of two pooled lifts
+    misses hits and misses that change but cancel out; this does not. An answer that changes from one
+    miss to another (under to over) does not move the lift, so it is not noise. A model whose hits never
+    change gets 0. Its standard deviation stands in for the difference two runs would show."""
     hits = {}
     for path in paths:
         for t in trials(path):
