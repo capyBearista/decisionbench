@@ -10,12 +10,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 const EXPECTED_COUNTS: &str = "\
-cases: 66
-split: 45 train, 21 holdout
-haiku labels: 66 (0 unscored)
-sonnet labels: 66 (0 unscored)
-opus labels: 66 (0 unscored)
-fable labels: 66 (0 unscored)
+cases: 197
+split: 138 train, 59 holdout
+haiku labels: 197 (0 unscored)
+sonnet labels: 197 (0 unscored)
+opus labels: 197 (0 unscored)
+fable labels: 197 (0 unscored)
 ";
 
 fn run(args: &[&str]) -> Output {

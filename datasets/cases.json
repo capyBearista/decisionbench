@@ -128,7 +128,7 @@
     "ok": {
       "haiku": "high-xhigh",
       "sonnet": "medium-high",
-      "opus": "low-high",
+      "opus": "medium-high",
       "fable": "low-medium"
     }
   },
@@ -151,7 +151,7 @@
     "ok": {
       "haiku": "high-xhigh",
       "sonnet": "medium-high",
-      "opus": "low-high",
+      "opus": "medium-high",
       "fable": "low-medium"
     }
   },
@@ -160,7 +160,7 @@
     "message": "convert this component from a class to hooks",
     "split": "train",
     "ok": {
-      "haiku": "medium-xhigh",
+      "haiku": "medium-high",
       "sonnet": "medium-high",
       "opus": "low-medium",
       "fable": "low"
@@ -262,7 +262,7 @@
       "haiku": "xhigh-max",
       "sonnet": "high-xhigh",
       "opus": "medium-xhigh",
-      "fable": "low-high"
+      "fable": "medium-high"
     }
   },
   {
@@ -282,7 +282,7 @@
     "split": "train",
     "ok": {
       "haiku": "xhigh-max",
-      "sonnet": "high-max",
+      "sonnet": "high-xhigh",
       "opus": "high-xhigh",
       "fable": "medium-xhigh"
     }
@@ -307,7 +307,7 @@
       "haiku": "xhigh-max",
       "sonnet": "high-xhigh",
       "opus": "medium-high",
-      "fable": "low-high"
+      "fable": "low-medium"
     }
   },
   {
@@ -330,7 +330,7 @@
       "haiku": "high-max",
       "sonnet": "medium-xhigh",
       "opus": "medium-high",
-      "fable": "low-high"
+      "fable": "low-medium"
     }
   },
   {
@@ -351,7 +351,7 @@
     "context": "user: the importer is slow\nassistant: Two options: 1) add an index on orders.created_at (one migration), or 2) rewrite the importer as a streaming pipeline with batching, retries and a progress bar. Which do you want?",
     "split": "train",
     "ok": {
-      "haiku": "high-max",
+      "haiku": "high-xhigh",
       "sonnet": "medium-high",
       "opus": "medium-high",
       "fable": "low-medium"
@@ -398,10 +398,10 @@
     "context": "user: the dashboard is slow\nassistant: I found the cause: every widget refetches all data on each render. Should I rewrite the data layer to a shared cache with subscriptions? It touches about 25 components.",
     "split": "train",
     "ok": {
-      "haiku": "high-max",
+      "haiku": "high-xhigh",
       "sonnet": "medium-xhigh",
       "opus": "medium-high",
-      "fable": "low-high"
+      "fable": "medium-high"
     }
   },
   {
@@ -577,7 +577,7 @@
     "message": "add input validation to the signup form: email format, password min 8 chars, show errors inline",
     "split": "holdout",
     "ok": {
-      "haiku": "medium-xhigh",
+      "haiku": "medium-high",
       "sonnet": "medium-high",
       "opus": "low",
       "fable": "low-medium"
@@ -705,7 +705,7 @@
     "ok": {
       "haiku": "high-max",
       "sonnet": "high-xhigh",
-      "opus": "low-high",
+      "opus": "medium-high",
       "fable": "medium-high"
     }
   },
@@ -740,6 +740,1469 @@
       "sonnet": "medium-high",
       "opus": "low-medium",
       "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c067",
+    "message": "implement CSV import for the contacts page with validation and per-row error reporting",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c068",
+    "message": "design the permissions model for a document-sharing app with teams, guests and link sharing",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c069",
+    "message": "Merge the PR, sync to main, delete the local branch, and then proceed with the rest of the plan.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c070",
+    "message": "1. Won't fix, it's a non-issue\n2. Go ahead with the fix for comment 2\n3. Update the PR description accordingly.\n\nAfter pushing, reply to each comment.\n\nContinue, step-by-step. Do not mark any comments resolved yourself; Devin will do it.",
+    "context": "user: Review the comments left by Devin. Evaluate each one and propose a fix (or lack thereof). No edits yet.\nassistant: - Two \"known gaps\" look stale: that the TUI save drops comments, and that quitting needs three presses. The recent commits say comments are kept and quitting takes two presses. I would confirm both before removing them.\n- **Proposed fix:**\n  - Rewrite those parts with `gh pr edit 18`.\n  - Add short lines for the credentials file and the removed `per_request` fee.\n  - Keep the Fable draft-section caveat and the Devin badge.\n  - Editing the description is outward-facing, so I won't do it without your go-ahead.\n\n## Replies\nAfter the fixes are pushed, I would reply under each Devin comment with what changed and the commit. I would not resolve any thread. For comment 3, I would reply once the description is updated.\n\n## Your decisions\n- Should I do the lock for comment 1, or just document the limit?\n- Is the unique-temp-name change for comment 2 OK, including rewriting the stale-temp tests?\n- May I edit the PR description?\n\n**Not checked:** I haven't reproduced the race or the symlink case. The risk ratings come from reading the code. I also haven't confirmed that CI and Devin have finished on `ce9bd64`. `check` and `Devin Review` both show pass.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c071",
+    "message": "plan a zero-downtime upgrade of our primary Postgres from 12 to 16: 2 TB of data, one replica, no maintenance window",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c072",
+    "message": "Walk me through the full uninstall and reinstall process and how I can test it.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c073",
+    "message": "Push and reply. Merge after all CI passes.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c074",
+    "message": "add multi-tenant support to our API: every table needs an org_id, every query must be scoped, and existing data needs a backfill",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-xhigh"
+    }
+  },
+  {
+    "id": "c075",
+    "message": "Proceed with the fix now. Keep it limited, but make sure it's right. Commit and push to main when done.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c076",
+    "message": "all of them",
+    "context": "user: audit our cron jobs\nassistant: I found 23 cron jobs across 4 servers. 9 have no logging and 5 run as root. Should I fix the logging, drop root, or both?",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c077",
+    "message": "Let's quickly plan a fix for the last three gaps you noticed (event handling lacking a test, config key naming inconsistency, version mismatch). For the version mismatch, we're requiring a 2.2.5+ host. Ask clarifying questions.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c078",
+    "message": "Would it help to merge work on #5 and #6?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c079",
+    "message": "set \"attribution\": false in sttings.json",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c080",
+    "message": "Please brieflt explain the Zod issue. And why can't we get the check and coverage CIs to be green?",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c081",
+    "message": "we need to choose between Kafka and SQS for our event pipeline. compare cost, ops burden and failure modes at ~5k events/s",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c082",
+    "message": "Make sense. Go ahead with the short record and help close 5 and 7.",
+    "context": "user: Merge PR and sync locally. How are we on the progress on #12? Also, what's the point of the release record?\nassistant: - A truly fresh machine has not been tried.\n\n**The point of the release record**\n\nIt's one comment on #12 that says what \"verified\" means. Boxes 5 and 7 are the two where that matters, because #12 itself asks to document \"any test not performed\". The record states, for the commit being released:\n- the exact commit and Rust version;\n- what was run and passed, with the counts;\n- which providers were tested live and when;\n- what was only checked on stubs;\n- what was not checked: a fresh machine, Rust 1.89, and the spec reviewer's inability to run code.\n\nWithout it, ticking those two boxes would be assertion. Later, someone who sees \"release verified\" can't tell stub-only from live-tested. It also protects you from overstating things, such as the saved runs being from early November.\n\nI'd keep it short, about ten lines. If you'd rather not have the comment, the alternative is to tick 5 and 7 with a one-sentence caveat each and no record. That keeps the issue tidy but loses the commit pin and the \"not done\" list.\n\nDo you want the short record, and a fresh Zen smoke request first? The Zen request is free, uses one bundled Case, and would let box 5 cite a run from today.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c083",
+    "message": "create a Dockerfile and a docker-compose file for this Flask app with Postgres",
+    "split": "holdout",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c084",
+    "message": "Now, evaluate the actual repo artifact files itself (not the code), including docs, agent skills/commands/rules, GIt files, Dockerfile, deploy-playbook. Be thorough, but keep your response brief. What should we update, remove, add, etc.?",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c085",
+    "message": "Implement the changes to all the discussed surfaces and files. No commits. Also remove the 'agent' and 'subagent' fields from the skills.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c086",
+    "message": "Good job, please now plan out the implementation for issues #5 and #6. One resulting PR.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c087",
+    "message": "Install tsc (if it's not too much) and proceed with type-checks. Also, if I run `claude plugin update` after I close *this* session, will it pick up this local copy and update to fork.8?\n\nCommit, one per issue, and then open one PR if everything looks good.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c088",
+    "message": "replace our hand-rolled auth with OAuth, keep existing sessions valid and don't lock anyone out",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-xhigh"
+    }
+  },
+  {
+    "id": "c089",
+    "message": "Assess each skill and command in greater detail to see what we can remove and what needs updating.\n\nNo LICENSE; it's a personal project. We can add a .gitattributes if helpful. We'll need to add a README. No edits yet.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c090",
+    "message": "Remember that I prefer to merge without squashing (I'm not sure what \"regular\" merging is called)\nRemember that I prefer to, after merging branches, I prefer to delete the local branch but not the remote one.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c091",
+    "message": "ship it",
+    "context": "user: is the release ready?\nassistant: All 214 tests pass, the migration ran cleanly on staging, and the changelog is updated. Deploy to production now?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c092",
+    "message": "go through our 200 open issues and close the ones that are obviously stale, then list what you closed",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c093",
+    "message": "Just go with option 1 as a direct commit to main.",
+    "context": "user: I see, I think option 1 would be best for now, but please detail a bit about option 2. Would this let users be able to essentially check for updates every so often and then install said updates?\nassistant: - Each release is a deliberate step: bump the version, run `cargo publish`, and tag it. It's an explicit decision rather than every merge to `main`.\n\n**Costs and risks of option 2**\n- You need a crates.io account and an API token, and the name `decisionbench` must be free. I haven't checked either.\n- A published version can be yanked, which stops new installs, but never deleted. So the packaged contents matter. Before publishing I'd run `cargo publish --dry-run` and `cargo package --list` to confirm that only the intended files go in (the bundled dataset and `neutral` prompt are compiled in, so they must be included) and that no local files do.\n- Version numbers become a promise. The evidence schema is 4 and only schema 4 is readable, so a future format change would need a deliberate major or minor bump and a note.\n\n**Suggestion:** for now, document option 1 in the README with both forms (the latest `main`, and `--tag` to pin a release). It's one line, free, and needs no account. Add crates.io later if you want users to get releases by name and update with `cargo install-update`.\n\nI haven't changed anything. Do you want me to add the README lines for option 1 now?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c094",
+    "message": "our test suite takes 40 minutes. get it under 10",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c095",
+    "message": "Just put it on main and push,",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c096",
+    "message": "Build an artifact so I can triage/handle each one in a prettier interface. Don't start yet, ask a couple clarifying questions, and make sure this is actually possible.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c097",
+    "message": "Devin, a reviewer agent, has flagged two items. Review, but do not edit; let's discuss.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c098",
+    "message": "build a three-year financial model for a small SaaS with churn, seasonality and two pricing tiers, in a spreadsheet",
+    "split": "holdout",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c099",
+    "message": "Got it. Please now diagnose the tests, target the collapsed view flaw, go through the smaller review items, and finish the rest of the work to get this branch ready for a PR /implement",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c100",
+    "message": "Push the 10 commits and update the PR description. Then watch the CI and assess red statuses. Also, we don't really care about release versions, so don't worry about that/",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c101",
+    "message": "Please now create a short description (<350 characters) for the GitHub repo and propose a few tags. This is for discoverability purposes.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c102",
+    "message": "Let's solidify a deep investigation plan. Keep involvement from me minimal; this should be as autonomous as possible. Ask clarifying questions using the quesiton tool; understand my vision and intent.",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c103",
+    "message": "Plan this change out now. Build according/in the UI as though we're not building some hack workaround. Ask clarifying question.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c104",
+    "message": "Check CI and reviewer comments on the PR. Don't worry abotu re-requesting Zen; it's rate-limited right now.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c105",
+    "message": "Investigate the fix further and implement it; latest versions on everything if possible. Push when done.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c106",
+    "message": "Okay hold on, we ARE all set on the other plugins right? We don't need a new npm release for them?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c107",
+    "message": "ok, delete them",
+    "context": "user: tidy up the repo branches\nassistant: These 18 branches are fully merged into main and haven't been touched in over 6 months. Delete them on the remote too?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c108",
+    "message": "Are we ready to merge?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c109",
+    "message": "What do you mean by SSH push failed? Can't you just use regular push (e.g., git push)?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c110",
+    "message": "review this 40-page vendor contract and list every clause that could hurt us if the vendor goes bankrupt",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-xhigh"
+    }
+  },
+  {
+    "id": "c111",
+    "message": "It's done. I merged and then I ran the given commands. Double-check. And switch to main and sync locally.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c112",
+    "message": "I agree with your recommendations here, with the toggle switching the Sum",
+    "context": "user: One small note, the text on the Results page after a run should wrap if the window is too narrow.\nassistant: - **Column labels:** a candidate column is the candidate's name, with `in <run id>` added only when two columns collide, as for prompts.\n\nPoints I'd like your view on before writing a spec:\n\n1. **Full report panel.** I propose the toggle also switches the Summary section inside it, so it still equals what the CLI prints with the same flag. The alternative is to leave it fixed on Auto, which breaks that equality.\n2. **Different routes.** The same candidate name run on different routes is already flagged as a mismatch. In candidate view that stays a warning and the columns remain separate.\n3. **A third view, by run.** I don't think it's needed. Running the same prompt or candidate twice already gives columns labelled with the run id.\n4. **Scope.** This touches the engine, the CLI, the TUI, tests, the docs and an ADR-0006 addendum. It's roughly the size of the Results work.\n\nDo you want changes to any of those, and should this go in this PR or a follow-up?\n\n**Not verified:** the wrap fix hasn't been checked by me or in a real terminal, and the Summary and Full report panels do not yet use a shared axis.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c113",
+    "message": "what's the difference between git merge and git rebase?",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c114",
+    "message": "Soudns good, we can reject it. And it can be the first step of #5. Update whatever related docs as needed.",
+    "context": "user: Delete the remote branch. Tick #4 in #2's ticket list. What is your recommendation on the \"sonnet\": null thing?\nassistant: - **#4 ticked in #2's ticket list.** I also removed \"original effortless\" from that line, since the dataset is no longer the original file.\n\n**On `\"sonnet\": null`, I recommend rejecting it.**\n- **One way to say \"no label\".** Right now there are two: leave the key out, or write `null`. One form is easier to read and check.\n- **`null` in a hand-edited file usually means something is unfinished.** Someone probably meant \"fill this in later\" or made a mistake. Silently counting it as unscored hides that, and an unscored label lowers coverage without anyone noticing.\n- **It fits the rest of the validation.** The file already rejects unknown fields, duplicate keys and cases with no labels, so rejecting `null` is consistent.\n- **Small cost and no downside.** It's a few lines plus one test, and the bundled dataset has no `null`s, so nothing breaks.\n\nThe work is small, but it changes the dataset rules, so it needs one line in SPEC §3 too. I'd do it either as a tiny PR of its own, or as the first step of #5. Tell me which you prefer and I'll do it; I haven't changed anything yet.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c115",
+    "message": "reverse engineer how this minified JS bundle builds its request signatures so we can call the API from a script",
+    "split": "holdout",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-xhigh"
+    }
+  },
+  {
+    "id": "c116",
+    "message": "rewrite our CLI argument parsing to use a proper library, keep every flag working and add tests",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c117",
+    "message": "write a function that returns the nth Fibonacci number",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c118",
+    "message": "Remind me what the point of this branch is and what we have achieved so far.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c119",
+    "message": "The Updated to X card never even shows for me; remove it.\n\nImplement -> Test -> Verify -> Commit -> Push -> Open the PR",
+    "split": "holdout",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c120",
+    "message": "I removed, added, and reinstalled the plugin. This ended up deleting all the stored settings. Restore them.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c121",
+    "message": "Are we finally all done with the decision bench project (aside from the #1 issue of course)?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c122",
+    "message": "I use the widgets currently on the iPad. I'd also rather not turn off Health. I also want to retain the transparency and motion. Have you considered other optimizations as well?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c123",
+    "message": "implement rate limiting for the public API: per-key limits, burst handling, a Redis backend and tests",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c124",
+    "message": "What is the function of the \"judge\"? Explain, briefly, why \"Haiku + decision models\" is an option and not just \"decision models\".",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c125",
+    "message": "Run the repo-wide bun run test and build, everything *except restarting OpenCode*.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c126",
+    "message": "List all subagents currently available to you, including\nplugin-provided agents. Show their exact identifiers.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c127",
+    "message": "what does this stack trace mean?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c128",
+    "message": "migrate our Jenkins pipelines to GitHub Actions, there are about 30 jobs",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c129",
+    "message": "the Android app crashes on launch for about 2% of users and we can't reproduce it. here's the crash log",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c130",
+    "message": "I think the bug is in the cache, check there",
+    "context": "user: orders show the wrong total after a refund\nassistant: I couldn't reproduce it from the code alone. Do you have an order id that shows the wrong total?",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c131",
+    "message": "sure",
+    "context": "user: add the export button\nassistant: Done. Want me to also add a line to the changelog?",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c132",
+    "message": "Plan this out, from forking/cloning to testing the API to implementing. Note, I want support for both OpenCode Zen and OpenRouter. Can we implement a simple fallback system? Ask clarifying questions. I'll provide an OpenRouter API key if needed",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c133",
+    "message": "The Desktop app, from WSL (which you're in) can run mods. BTW, I added the API key to an env file in my config directory, but is there a better place to put it?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c134",
+    "message": "Don't be lazy, please. Don't claim \"not verifying something\" as an excuse to leave coverage gates failing. Actually investigate the cause. No pushing.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c135",
+    "message": "add a loading spinner to the submit button",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c136",
+    "message": "no, keep the old behaviour",
+    "context": "user: the parser test is failing\nassistant: It fails because the function now returns None for empty input instead of an empty list. Should I change the test or restore the old behaviour in the function?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c137",
+    "message": "do you know how much memory marksman takes up?",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c138",
+    "message": "The pooled row border thing was just a pasting thing, dont' worry about it.\n\nCould we maybe have a TUI-only \"simplified\" view that shows efficacies of candidates x prompts? Does that make sense? Either that, or we can make it so the different targets don't need to be showing all the time and we can just collapse/expand them so it's actually easier to compare model and prompt efficacies.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c139",
+    "message": "this SQL query scans 80M rows to return 20. make it fast",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c140",
+    "message": "write a regex that matches ISO 8601 dates",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c141",
+    "message": "write unit tests for the checkout total calculation, including discounts and tax edge cases",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c142",
+    "message": "write a bash script that backs up my notes folder to an external drive every night",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c143",
+    "message": "the first one",
+    "context": "user: the build is failing on the lodash import\nassistant: Two options: 1) bump lodash to 4.17.21 (one line in package.json), or 2) vendor the file and patch it. Which?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c144",
+    "message": "Commit the items and open the PR.\n\nAlso, I had the Advisor tool and, which the agent was running it, I hit escape to cancel it. Not sure what would happen for an auto-triggered advisor call. Please corroborate the ended tool call with telemetry; does it show up?",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c145",
+    "message": "I removed c040. Flag any other swedish language messages and context and etc.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c146",
+    "message": "write a literature review of the evidence on spaced repetition for adult language learners, with citations I can check",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c147",
+    "message": "figure out why our Docker image went from 200 MB to 1.4 GB last week",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c148",
+    "message": "Delete the remote branch. Tick #4 in #2's ticket list. What is your recommendation on the \"sonnet\": null thing?",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c149",
+    "message": "Does this close any existing issues? The CI check passed, btw.\n\nPlease list each of the TUI items I need to check.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c150",
+    "message": "write a post-mortem for last night's outage from these logs and the Slack thread",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c151",
+    "message": "Sounds good, we'll stick with our system instead of generate.decisions then. Flag this for later though, as an Issue.\n\nDon't switch to the inference URL.\n\nPlan our implementation, no edits yet.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c152",
+    "message": "set up monitoring and alerting for our three services, with sensible thresholds",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c153",
+    "message": "explain the difference between a mutex and a semaphore",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c154",
+    "message": "Go ahead with the updates to the two files, then /merge-pr",
+    "context": "user: Regarding the open decision, \"unscored\" is fine. The additional rule looks good too. Is there any documentation we may need to update?\nassistant: 2. **`GLOSSARY.md`, the \"Unscored\" entry (line 37).** It says predictions \"may still be recorded\" but doesn't say that an invalid reply is still unscored. The entry needs the same one-line clarification.\n\n**Already covered or not needed:**\n- **SPEC §3** (the `null` label rule) and the **README** (the command, the input format and the precedence rule) are already in the PR.\n- **SPEC §7** says the CLI syntax can be settled in an implementation ticket, so the README is the right place for `grade`.\n- **ADRs:** no new one is needed. This is a small grading rule inside the approved methodology, not a design change.\n- **GLOSSARY \"Normalized Prediction\":** strict matching is a valid normalization (none at all). #6 may change it once we see real provider output, so I'd leave the entry alone.\n- **The empty-file rule** is an input check for this command, not part of the spec. The PR records it.\n- **HANDOFF.md:** you said to leave it for later.\n\nShould I add those two sentences to PR #14 as one docs commit and push?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c155",
+    "message": "Does Issue #12 require a new PR to close it? And #2 as well?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c156",
+    "message": "our users say the password reset email never arrives. check why",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c157",
+    "message": "Let's say I send a message, which triggers a long running turn. At which points does the Decision model get to evaluate? And *what* \"chunks\" would it be evaluating? Would it be correct to say one turn is composed of steps, and these steps get evaluated? Be concise.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c158",
+    "message": "Merge PR and sync locally. How are we on the progress on #12?\n\nAlso, what's the point of the release record?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c159",
+    "message": "Apply option 1, reply to Devin, push, and merge once re-review is clean",
+    "context": "user: Proceed with the fixes for 2, 3, 4 as planned and reply to 1 accordingly (and mark resolved). Push when done. Then, watch CI + wait for the subsequent Devin review. If Devin flags additional issues, similarly evaulate and do not edit. If Devin says everything looks fine or doesn't flag anything else, /merge-pr\nassistant: - **Example:** one such attempt with a $0.003 fee. The outcomes line says `0 answered … 1 transport_error`, but the cost line says `0.003 USD over 1 answered attempt`. The two lines contradict each other.\n- It affects only the wording, not the numbers. It needs a reply that lost its body, plus a Candidate priced at zero per token with a nonzero request fee, so it is rare.\n\n**Fix options:**\n1. **Neutral label (recommended):** `0.003 USD over 1 priced attempt`. It is a one-word change in `src/cost.rs`, plus updating the expected string in that file's display test. It doesn't claim anything about outcomes, and the outcomes line already gives the answered and failed counts.\n2. **Separate count:** track known costs for lost-body replies apart from answered ones, giving `… over 1 answered attempt and 1 cut-off reply`. It is more precise but adds a field and a clause for a rare case.\n\n**Earlier threads:** comment 1 has a \"won't fix\" reply, comments 2–4 are fixed in `fa244ed` with replies, and all four threads are resolved.\n\nShould I apply option 1, reply to Devin, push, and merge once the re-review is clean?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c160",
+    "message": "Alright, merge to main and push directly. We'll wrap up the session afterward.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c161",
+    "message": "proofread this blog post for typos",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c162",
+    "message": "Commit when done.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c163",
+    "message": "Push.",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c164",
+    "message": "summarize the key risks in this 12-page security audit for a non-technical board",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c165",
+    "message": "Go with option 1 and open the PR. The gaps (and the draft labels) still need to be done by me.",
+    "context": "user: What do you mean by SSH push failed? Can't you just use regular push (e.g., git push)?\nassistant: `git push` is what I ran, and that's what failed. \"SSH push\" just describes how `git push` reaches GitHub for this repo: the `origin` remote is set to `git@github.com:owner/decisionbench.git`, which is an SSH address, so `git push` needs an SSH key. I just tried it again and got the same \"Permission denied (publickey)\" error. The cause is that no SSH agent is running in this shell, so git can't find your key.\n\nThe `gh` command still works because it signs in with a GitHub token, not SSH. That's how I deleted the old branch earlier.\n\nTwo ways forward:\n1. **Push once over HTTPS using your `gh` login** (recommended): `git push [link] feat/17-9-11-four-targets-reports-tui`. This doesn't change your remote settings.\n2. **Fix SSH in this shell**: run `! eval \"$(ssh-agent -s)\" && ssh-add`, then plain `git push` works.\n\nShould I go with option 1 and then open the PR?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c166",
+    "message": "rename the function getUser to fetchUser everywhere in the repo",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c167",
+    "message": "yes, do the migration",
+    "context": "user: our users table has duplicate emails, can we add a unique constraint?\nassistant: Yes, but 312 existing rows conflict. I'd (1) write a script that merges duplicate accounts keeping the newest login, (2) re-point their orders and sessions to the kept account, then (3) add the unique index. Merging touches 4 tables and can't be undone without a backup. Want me to go ahead with all three?",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c168",
+    "message": "draft a polite but firm email telling a client their invoice is 60 days overdue",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c169",
+    "message": "our nightly ETL job silently drops rows whenever the source adds a column. nobody noticed for a month. find every affected table and fix the pipeline",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "high-xhigh"
+    }
+  },
+  {
+    "id": "c170",
+    "message": "Commit, bunp, and push to main now. I'll run the commands and restart after myself.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c171",
+    "message": "Proceed with the full audit for #12. We've implemented a little more beyond #2's initial state so things need updating. No edits yet.\n\nAlso, we should have the hint line wrap so it doesn't get cut off.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c172",
+    "message": "I meant OpenRouter. Proceed. You may use this model for evaluations freely since it is free.",
+    "context": "user: Test a live run with a real provider, but confirm the details with me first. And also, how many requests will be made? Use respan/span-01-lite:free\nassistant: ```\n- **Evidence:** saved in the scratchpad folder, not your real data folder.\n\n**Command**\n```\ndecisionbench run --candidate span-lite-free --case c002 --repetitions 1\n```\nThis uses the bundled `neutral` instructions. Case c002 has labels for both Sonnet and Opus, so it runs 2 Trials: c002 for Sonnet and c002 for Opus.\n\n**Requests:** 2 if both answer. The limit is 4, because each Trial may retry once on a network error or a temporary HTTP error (408, 429, 5xx). The tool prints this limit before sending: `= 2 trials, up to 4 requests`.\n\n**Cost:** $0 if the model is free, as the name says. I haven't checked OpenRouter's price list. If this model isn't actually free, the requests would be charged at its real rate, and the cost line would still show 0, because it uses only the price we enter.\n\n**What it checks**\n- the request is accepted;\n- the reply shape matches what `normalize` expects;\n- the grade;\n- `usage` is present;\n- the cost line;\n- `show` reads the file back.\n\nIf the model replies in a different shape, the grade will be \"invalid\", and the raw reply is still saved.\n\nShall I go ahead? You can also change the case, the targets or the repetitions.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c173",
+    "message": "do both",
+    "context": "user: clean up the API\nassistant: I can fix the failing test now (small) and, separately, remove the 6 deprecated endpoints, which three partner apps may still call. Which do you want?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c174",
+    "message": "my build fails with 'module not found: lodash' after pulling main",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c175",
+    "message": "Take a look at my agents directory and my opencode config directory. Familiarize yourself with my workflow.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c176",
+    "message": "Address these two gaps now, actually.",
+    "context": "user: Regarding the two \"wont fix\" items, why would we want to override the URLs? Be brief.\nassistant: Mostly for the tests. The CLI tests run the real program, so each test Candidate needs its `url` pointed at a fake server on `127.0.0.1`. That's the only real use today.\n\nThe other reasons I gave are hypothetical:\n- **A local proxy or logging gateway:** nobody has asked for this.\n- **A provider moving its URL:** this happened once already, with Zen's old and new URLs. But changing the URL in the code is a one-line fix.\n\nSo, by your own rules against unneeded features, the user-facing override is weak. That weakens my \"won't fix\" replies too. The override exists because I needed a hook for the tests, not because users need it.\n\nA smaller option: remove `url` from the documented config. The tests would use a hidden environment variable instead, such as `DECISIONBENCH_TEST_URL`, or a `url` field that serde accepts but the README doesn't mention.\n\nThat doesn't fully remove the risk. Anyone who sets that variable or field can still send the key to another host. It just means it's no longer something users are told to use.\n\nShould I open a small ticket for that? Or leave the override as it is, since it's harmless in a config only you control?",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c177",
+    "message": "swap our logging library for structured logging across the app",
+    "split": "holdout",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c178",
+    "message": "switch to main and git pull, and then delete the local judge-timining-... branch",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c179",
+    "message": "Test a live run with a real provider, but confirm the details with me first. And also, how many requests will be made? Use respan/span-01-lite:free",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c180",
+    "message": "Look at the pane again. The descriptions get kinda cut off. How can we deal with that? No edits yet. Also please explain what the reflect plugin actually does and how I use it.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c181",
+    "message": "Look at the `attribution` setting in the Claude Code settings reference. Help me understand how to customize settings.json to remove the annoying \"Co-Authored-By\" line from commits.",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c182",
+    "message": "Review the comments left by Devin and assess each one; no edits yet. Let's discuss. Keep your output to me concise.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c183",
+    "message": "Do we *need* override URLs?",
+    "split": "train",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c184",
+    "message": "Sign test can be in this change, all on this same branch.\n\n/implement \n\nWhen you are fully done, commit and push all changes and open the PR. I will build and test the TUI afterward and let you know of any potential issues.",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c185",
+    "message": "is there a point to using Serena for markdown",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c186",
+    "message": "upgrade React from 17 to 18 and fix whatever breaks",
+    "split": "train",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c187",
+    "message": "Check CI + Devin review comments. Don't edit edit; evaluate and discuss.",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c188",
+    "message": "fix 1, 2, 4, and 5. For 3, I would like the case choice now. Reply on all five threads after pushing the fixes.",
+    "context": "user: Review the comments left by Devin and assess each one; no edits yet. Let's discuss. Keep your output to me concise.\nassistant: | 4 | 🔍 `compare` ignores timeout, concurrency and retries (`report.rs:505`) | **Partly valid.** These settings don't change accuracy, but they do change reliability and latency, which the report also shows. My reviewer called this acceptable. | **Fix:** show a \"differs: … (affects reliability and latency, not accuracy)\" line, and don't let it count towards the no-differences line. A small change. |\n| 5 | 🟥 (security) TUI save can make the config readable by every user (`candidates.rs:183`) | **Overstated.** The config holds no secrets: keys only come from the environment, and there's no URL field. Your config is already readable by all users (644). The mechanism is real, though: the temporary file plus rename replaces whatever permissions the file had with the defaults. | **Fix:** copy the old file's permissions onto the new one before the rename (one line). Reply that it is not a secrets exposure. |\n\nWhat I suggest: fix 1, 2, 4 and 5, decide 3 (my preference is a follow-up), then reply on all five threads and resolve them.\n\nWhich way do you want to go on 3, and should I go ahead with the rest?",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c189",
+    "message": "Have all plugins been rebuilt with the new dev pins? Also, the sessions are currently still running; no restart or anything; check the telemetry again to see if things are getting called. I *did* update the auto-advisor.json with the right DeepSeek model id and changed \"model\" to \"models\".",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c190",
+    "message": "use postgres",
+    "context": "user: we need an analytics store for the new events\nassistant: SQLite is simpler to run, but Postgres handles your expected 50 GB a month and concurrent writers. I'd use Postgres with a partitioned events table and a nightly rollup. Which do you want?",
+    "split": "train",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium-high",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c191",
+    "message": "Opt for option A as proposed. Proceed.",
+    "context": "user: Would it help to merge work on #5 and #6?\nassistant: - **The `null`-label step has nothing to do with #6.**\n\n**If what bothers you is building code that #6 will replace,** a better fix is to make #5 smaller rather than merge it:\n- #5 keeps rejecting `null` labels and adds the pure `grade()` function, tested in the library. It would have no new command.\n- #6 then adds the first command that grades predictions, using its own saved results.\n- The cost: you'd have to change #5's criterion about grading from a local fixture through the command line. #5 would then have no command a user can run, which goes against \"independently demonstrable\" slices.\n\n**My recommendation:** keep #5 as written with option A. It's the smallest change that meets #5's acceptance criteria as they stand, and it keeps the higher-risk provider work in a separate PR.\n\nSo there are three choices:\n1. Option A as proposed.\n2. A smaller #5 with no new command, after you edit the ticket.\n3. Merge #5 and #6, which I advise against.\n\nWhich do you want? Option A also still needs your answer on strict effort matching and the JSON array.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "medium-high"
+    }
+  },
+  {
+    "id": "c192",
+    "message": "convert this CSV to JSON",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c193",
+    "message": "Give me the file path for the scratch file.",
+    "split": "train",
+    "ok": {
+      "haiku": "low",
+      "sonnet": "low",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c194",
+    "message": "Ok, hold on. Where are we now? Is the PR ready to merge and the issue be closed?",
+    "split": "holdout",
+    "ok": {
+      "haiku": "low-medium",
+      "sonnet": "low-medium",
+      "opus": "low",
+      "fable": "low"
+    }
+  },
+  {
+    "id": "c195",
+    "message": "plan a three-day offsite for 25 people, budget 8k, two dietary restrictions, within 2 hours of Berlin",
+    "split": "train",
+    "ok": {
+      "haiku": "high-xhigh",
+      "sonnet": "medium-high",
+      "opus": "medium-high",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c196",
+    "message": "Resigning the commits shouldn't be needed since this was done locally. Double-check the signature state of the commits.\n\nRegardless, proceed with the pushing and opening of the PR. You may keep upstream authors as they are.",
+    "split": "holdout",
+    "ok": {
+      "haiku": "medium-high",
+      "sonnet": "medium",
+      "opus": "low-medium",
+      "fable": "low-medium"
+    }
+  },
+  {
+    "id": "c197",
+    "message": "p99 latency doubled after Tuesday's deploy but the CPU and error graphs look normal. find out why",
+    "split": "holdout",
+    "ok": {
+      "haiku": "xhigh-max",
+      "sonnet": "high-xhigh",
+      "opus": "high-xhigh",
+      "fable": "medium-high"
     }
   }
 ]

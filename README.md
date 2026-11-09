@@ -1,6 +1,6 @@
 # decisionbench
 
-A terminal-first benchmark for **Decisions models**: specialised models that are asked which reasoning effort (`low`, `medium`, `high`, `xhigh` or `max`) a target assistant should use for the next message. It scores **Claude Haiku, Sonnet, Opus and Fable** separately, against human-reviewed acceptable ranges on 66 bundled Cases. It measures effort selection only, not whether a model finishes the task at that effort.
+A terminal-first benchmark for **Decisions models**: specialised models that are asked which reasoning effort (`low`, `medium`, `high`, `xhigh` or `max`) a target assistant should use for the next message. It scores **Claude Haiku, Sonnet, Opus and Fable** separately, against human-reviewed acceptable ranges on 197 bundled Cases. It measures effort selection only, not whether a model finishes the task at that effort.
 
 - A Rust engine shared by a headless CLI and a Ratatui terminal UI.
 - Providers: OpenRouter and OpenCode Zen. The same model on two routes is two separate Candidates.
@@ -51,7 +51,7 @@ cargo run -- tui                                                    # terminal U
 
 A first session:
 
-1. `dataset inspect` shows the 66 Cases, their split and their label counts without a network or a key.
+1. `dataset inspect` shows the 197 Cases, their split and their label counts without a network or a key.
 2. Create `~/.config/decisionbench/config.toml` with a Candidate (see below) and set its key (`OPENROUTER_API_KEY`, or `K` in the TUI). Zen free models need no key.
 3. Send one request as a smoke test: `run --candidate NAME --case c002 --target opus --repetitions 1`.
 4. Run the full set, then `history` and `show` the file it prints.
@@ -195,7 +195,7 @@ Never set `DECISIONBENCH_TEST_BASE_URL` outside tests: it sends every request, k
 
 - **Linux only.** No Windows or macOS builds, CI or support.
 - **Prices are manual.** There is no price fetching, and cost is an estimate from the usage counters in the reply. Unknown usage or price shows as unknown, never zero.
-- **Dataset.** The 66 Cases were converted once from effortless, but effortless labelled only 75 of its 142 Case–Target slots (67 Sonnet, 8 Opus), so most of the 264 labels now in the file, including every Haiku and Fable label, were drafted case by case and approved by the maintainer ([ADR-0003](docs/adr/0003-owned-per-target-effort-ranges.md), [ADR-0005](docs/adr/0005-one-request-per-case-four-targets.md)). They are reviewed judgements, not measurements and not independently adjudicated. Ranges are acceptable levels, not measured task success; a target left without a label stays unscored. Any change to the file is a new dataset revision.
+- **Dataset.** The first 66 Cases were converted once from effortless, but effortless labelled only 75 of its 142 Case–Target slots (67 Sonnet, 8 Opus). The other 131 Cases (80 adapted from real maintainer messages, 51 synthetic) were added later. Most of the 788 labels now in the file, including every Haiku and Fable label, were drafted case by case and approved by the maintainer ([ADR-0003](docs/adr/0003-owned-per-target-effort-ranges.md), [ADR-0005](docs/adr/0005-one-request-per-case-four-targets.md)). They are reviewed judgements, not measurements and not independently adjudicated. Ranges are acceptable levels, not measured task success; a target left without a label stays unscored. Any change to the file is a new dataset revision.
 - **Fable instructions are drafted.** `prompts/effortless.md` has a Fable section that has not been measured against effortless.
 - **`effortless` is in-sample.** Its task text quotes examples that match Cases in the dataset (see Judge Instructions), so compare it with `neutral` knowing that.
 - **Key redaction is exact-text.** A provider reply that echoes the key in another form (encoded, split) is not caught. Evidence also holds the full prompt, the Case text and the raw reply, so review it before sharing.
