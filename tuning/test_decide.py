@@ -44,9 +44,9 @@ class Baseline(unittest.TestCase):
         self.assertFalse(m["d"]["eligible"], "no lift over the fixed answer")
         self.assertAlmostEqual(base["objective"], (0.10 + 0.03) / 2)
 
-    def test_delta_is_one_point_or_twice_the_mean_noise_of_eligible_models(self):
+    def test_delta_is_half_a_point_or_twice_the_mean_noise_of_eligible_models(self):
         quiet = decide.baseline(score({"a": 0.10, "b": 0.10}), score({"a": 0.10, "b": 0.10}), SEL, SEL)
-        self.assertAlmostEqual(quiet["delta"], 0.01)
+        self.assertAlmostEqual(quiet["delta"], 0.005)
         noisy = decide.baseline(score({"a": 0.20, "b": 0.20}), score({"a": 0.16, "b": 0.14}), SEL, SEL)
         self.assertAlmostEqual(noisy["delta"], 2 * (0.04 + 0.06) / 2)
 
@@ -55,6 +55,15 @@ class Baseline(unittest.TestCase):
         b = score({"a": 0.10, "b": 0.10})
         b["scores"][1]["pooled"]["coverage"] = 0.89
         self.assertFalse(decide.baseline(a, b, SEL, SEL)["models"]["b"]["eligible"])
+
+    def test_noise_is_the_spread_of_repeated_answers_when_that_is_larger(self):
+        same = score({"a": 0.10, "b": 0.10})
+        base_ = decide.baseline(same, same, SEL, SEL, {"a": 0.03})
+        self.assertAlmostEqual(base_["models"]["a"]["noise"], 0.03, msg="equal totals, but answers changed")
+        self.assertAlmostEqual(base_["models"]["b"]["noise"], 0.0)
+        self.assertAlmostEqual(base_["delta"], 2 * 0.03 / 2)
+        noisy = decide.baseline(score({"a": 0.20}), score({"a": 0.16}), SEL, SEL, {"a": 0.01})
+        self.assertAlmostEqual(noisy["models"]["a"]["noise"], 0.04, msg="the observed difference is larger")
 
     def test_refuses_runs_that_cannot_be_paired(self):
         with self.assertRaises(SystemExit):
@@ -90,8 +99,8 @@ class Judge(unittest.TestCase):
         self.assertAlmostEqual(r["gain"], 0.025)
 
     def test_a_gain_of_exactly_delta_is_kept_and_less_is_not(self):
-        self.assertEqual(decide.judge(score({"a": 0.11, "b": 0.11}), base(), None, SEL)["verdict"], "keep")
-        self.assertEqual(decide.judge(score({"a": 0.109, "b": 0.109}), base(), None, SEL)["verdict"], "discard")
+        self.assertEqual(decide.judge(score({"a": 0.105, "b": 0.105}), base(), None, SEL)["verdict"], "keep")
+        self.assertEqual(decide.judge(score({"a": 0.104, "b": 0.104}), base(), None, SEL)["verdict"], "discard")
 
     def test_the_comparison_is_against_the_best_kept_state_not_the_baseline(self):
         b = base()
@@ -136,7 +145,7 @@ class Judge(unittest.TestCase):
         b = base({"a": 0.10, "b": 0.20, "c": 0.10})
         b["models"]["c"]["eligible"] = True
         b["models"]["b"]["eligible"] = False  # the user dropped b: mean of a and c is 0.10, not 0.133
-        r = decide.judge(score({"a": 0.105, "c": 0.105}), b, None, SEL)
+        r = decide.judge(score({"a": 0.104, "c": 0.104}), b, None, SEL)
         self.assertEqual(r["verdict"], "discard")
         self.assertAlmostEqual(r["previous_objective"], 0.10)
         self.assertEqual(decide.judge(score({"a": 0.12, "c": 0.12}), b, None, SEL)["verdict"], "keep")
@@ -204,6 +213,12 @@ class Cli(unittest.TestCase):
             with open(baseline) as f:
                 self.assertEqual(json.load(f)["selection"]["retries"], 3, "read from the calibration run's manifest")
             self.assertEqual(self.run_cli("baseline", paths["weak"], paths["weak"], "--runs", run, run, "-o", baseline + "2").returncode, 12)
+            # The noise comes from the evidence too: model a changed its answer between the runs.
+            changed = [write_run(d, f"changed{i}.jsonl", trials=[trial("c1", c, "a")]) for i, c in enumerate(["low", "high"])]
+            r = self.run_cli("baseline", paths["a"], paths["b"], "--runs", *changed, "-o", baseline + "3")
+            self.assertEqual(r.returncode, 12, "one changed answer out of one: a's noise now exceeds its lift")
+            self.assertGreater(json.loads(r.stdout)["models"]["a"]["noise"], 0, "equal totals, changed answers")
+            self.assertEqual(json.loads(r.stdout)["models"]["b"]["noise"], 0)
             judge = ["judge", "--baseline", baseline, "--best", best, "--commit", "c0ffee"]
             self.assertEqual(self.run_cli(*judge, "--run", run, paths["bad"]).returncode, 10)
             self.assertFalse(os.path.exists(best), "a discard must not write the best file")
@@ -288,13 +303,50 @@ class Cli(unittest.TestCase):
             self.assertEqual(self.run_cli(*judge).returncode, 2, "--run is required")
 
 
-def write_run(directory, name, cases=("c1", "c2"), run_id="r1", repetitions=1, retries=3):
-    """An evidence file with only the manifest line `decide.py` reads."""
+def write_run(directory, name, cases=("c1", "c2"), run_id="r1", repetitions=1, retries=3, trials=()):
+    """An evidence file with the manifest line `decide.py` reads, and any Trial lines."""
     path = os.path.join(directory, name)
     with open(path, "w") as f:
         f.write(json.dumps({"type": "run", "id": run_id, "cases": list(cases), "targets": ["opus"],
                             "settings": {"repetitions": repetitions, "retries": retries}}) + "\n")
+        for t in trials:
+            f.write(json.dumps(t) + "\n")
     return path
+
+
+def trial(case, choice, candidate="m", label="low", repetition=1):
+    """An answered Trial on the opus target."""
+    reply = {"answers": {"effort_opus": {"type": "choice", "choice": choice}}}
+    return {"type": "trial", "candidate": candidate, "case_id": case, "targets": ["opus"], "labels": {"opus": label},
+            "repetition": repetition, "attempts": [{"disposition": "answered", "raw_response": json.dumps(reply)}]}
+
+
+class Spread(unittest.TestCase):
+    def test_answers_that_change_but_cancel_out_still_count_as_noise(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Both runs score 1 of 2, so their totals match; each Case's answer changed between them.
+            a = write_run(d, "a.jsonl", trials=[trial("c1", "low"), trial("c2", "high"), trial("c1", "low", "fixed")])
+            b = write_run(d, "b.jsonl", trials=[trial("c1", "high"), trial("c2", "low"), trial("c1", "low", "fixed")])
+            s = decide.spread([a, b], 1)
+            # Each Case has observations [1, 0]: sample variance 0.5; sqrt(2 * 1.0 / (1 * 2 ** 2)).
+            self.assertAlmostEqual(s["m"], 0.5 ** 0.5)
+            self.assertEqual(s["fixed"], 0.0, "a model that always gives the same answer has no noise")
+
+    def test_more_repetitions_make_a_run_less_noisy(self):
+        with tempfile.TemporaryDirectory() as d:
+            ts = [trial("c1", c, repetition=r) for r, c in enumerate(["low", "high", "low"], 1)]
+            once = decide.spread([write_run(d, "a.jsonl", trials=ts[:2])], 1)["m"]
+            thrice = decide.spread([write_run(d, "b.jsonl", trials=ts * 2)], 3)["m"]
+            self.assertLess(thrice, once)
+
+    def test_failed_and_unlabelled_targets(self):
+        with tempfile.TemporaryDirectory() as d:
+            failed = {**trial("c1", "low"), "attempts": [{"disposition": "transport_error"}]}
+            unlabelled = {**trial("c2", "low"), "labels": {}}
+            s = decide.spread([write_run(d, "a.jsonl", trials=[trial("c1", "low"), failed, unlabelled])], 1)
+            # One labelled prediction, observed as [hit, miss]: sqrt(2 * 0.5 / (1 * 1 ** 2)). Counting the
+            # unlabelled target would make it two predictions; skipping the failure would make it no noise.
+            self.assertAlmostEqual(s["m"], 1.0, msg="a failed Trial is a miss; an unlabelled target is not counted")
 
 
 class Misses(unittest.TestCase):
