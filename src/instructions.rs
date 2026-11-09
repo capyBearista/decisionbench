@@ -149,11 +149,15 @@ mod tests {
     }
 
     #[test]
-    fn the_effortless_file_parses_with_all_four_targets() {
-        let text = include_str!("../prompts/effortless.md");
-        let set = parse_instructions("effortless", text).unwrap();
-        let order: Vec<Target> = set.targets.iter().map(|(t, _)| *t).collect();
-        assert_eq!(order, Target::ALL);
+    fn the_shipped_files_parse_with_all_four_targets() {
+        for (name, text) in [
+            ("effortless", include_str!("../prompts/effortless.md")),
+            ("tuned", include_str!("../prompts/tuned.md")),
+        ] {
+            let set = parse_instructions(name, text).unwrap();
+            let order: Vec<Target> = set.targets.iter().map(|(t, _)| *t).collect();
+            assert_eq!(order, Target::ALL, "{name}");
+        }
     }
 
     #[test]
