@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use clap::{Parser, Subcommand};
 use decisionbench::batch::{self, Control, RunArgs, load_dataset, load_run, read};
 use decisionbench::cost::plural;
-use decisionbench::dataset::summarize;
+use decisionbench::dataset::{Split, summarize};
 use decisionbench::evidence::{self, Line, RunFile, RunState};
 use decisionbench::grade::{Tally, Target, grade_all, parse_predictions};
 use decisionbench::report::{self, Axis};
@@ -47,6 +47,9 @@ enum Command {
         /// Case id in the dataset; repeatable. Defaults to every Case.
         #[arg(long = "case")]
         cases: Vec<String>,
+        /// Run only the Cases in this part of the dataset; combines with --case.
+        #[arg(long, value_enum)]
+        split: Option<Split>,
         /// Target Model to ask about; repeatable. Defaults to all four.
         #[arg(long = "target", value_enum)]
         targets: Vec<Target>,
@@ -74,6 +77,19 @@ enum Command {
         /// Evidence directory; defaults to $XDG_DATA_HOME/decisionbench/runs.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Score a saved run for prompt tuning: hit rate, fixed-answer floor and lift, as JSON (offline).
+    ///
+    /// Refuses a run that includes holdout Cases unless --allow-holdout is given, and a run whose
+    /// instructions quote a Case message.
+    Score {
+        file: PathBuf,
+        /// The dataset the run used; defaults to the bundled dataset.
+        #[arg(long)]
+        dataset: Option<PathBuf>,
+        /// Score a run that includes holdout Cases.
+        #[arg(long)]
+        allow_holdout: bool,
     },
     /// Print the full report of a saved run file (offline).
     Show {
@@ -131,6 +147,7 @@ fn main() -> ExitCode {
             candidates,
             instructions,
             cases,
+            split,
             targets,
             repetitions,
             concurrency,
@@ -148,6 +165,7 @@ fn main() -> ExitCode {
                 instructions.into_iter().map(Some).collect()
             },
             cases,
+            split,
             targets,
             settings: Settings {
                 repetitions,
@@ -160,6 +178,11 @@ fn main() -> ExitCode {
             dataset,
             out,
         }),
+        Command::Score {
+            file,
+            dataset,
+            allow_holdout,
+        } => score(&file, dataset.as_deref(), allow_holdout).map(|()| ExitCode::SUCCESS),
         Command::Show { file, columns } => show(&file, columns).map(|()| ExitCode::SUCCESS),
         Command::Compare { files, columns } => compare(&files, columns).map(|()| ExitCode::SUCCESS),
         Command::Tui { config, out } => {
@@ -235,6 +258,21 @@ fn run_batch(args: &RunArgs) -> Result<ExitCode, String> {
         RunState::Partial => ExitCode::from(130),
         RunState::Failed => ExitCode::FAILURE,
     })
+}
+
+fn score(path: &Path, dataset: Option<&Path>, allow_holdout: bool) -> Result<(), String> {
+    let run = load_run(path)?;
+    // stderr, so stdout stays the JSON that tools read.
+    for warning in &run.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let (_, sha256, cases) = load_dataset(dataset)?;
+    let scored = decisionbench::score::score(&run, &sha256, &cases, allow_holdout)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&scored).map_err(|e| e.to_string())?
+    );
+    Ok(())
 }
 
 fn show(path: &Path, columns: Axis) -> Result<(), String> {

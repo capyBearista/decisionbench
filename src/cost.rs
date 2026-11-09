@@ -180,6 +180,7 @@ mod tests {
             http_status: status,
             raw_response: raw.map(|v| v.to_string()),
             error: None,
+            retry_after_secs: None,
         }
     }
 

@@ -13,7 +13,7 @@ use toml_edit::{DocumentMut, TomlError, value};
 
 use crate::cost::plural;
 use crate::credentials;
-use crate::dataset::{BUNDLED_CASES, Case, parse_cases};
+use crate::dataset::{BUNDLED_CASES, Case, Split, parse_cases};
 use crate::evidence::{
     self, CandidateRecord, EndRecord, GRADING_REVISION, Hashed, InstructionsRecord, Line, Manifest,
     RunFile, RunState, RunSummary, TrialRecord,
@@ -230,6 +230,8 @@ pub struct RunArgs {
     /// `None` is the bundled `neutral`, `Some` an instructions file.
     pub instructions: Vec<Option<PathBuf>>,
     pub cases: Vec<String>,
+    /// Keep only the Cases in this part of the dataset.
+    pub split: Option<Split>,
     pub targets: Vec<Target>,
     pub settings: Settings,
     pub config: Option<PathBuf>,
@@ -298,13 +300,25 @@ pub fn prepare(args: &RunArgs) -> Result<Prepared, String> {
     )?;
 
     let (dataset_name, dataset_sha256, mut cases) = load_dataset(args.dataset.as_deref())?;
+    if let Some(split) = args.split {
+        cases.retain(|c| c.split == split);
+        if cases.is_empty() {
+            return Err(format!(
+                "{dataset_name} has no Case in split {}",
+                split.name()
+            ));
+        }
+    }
     reject_duplicates("case", args.cases.iter().cloned())?;
     if let Some(id) = args
         .cases
         .iter()
         .find(|id| !cases.iter().any(|c| &c.id == *id))
     {
-        return Err(format!("unknown case {id} in {dataset_name}"));
+        let part = args
+            .split
+            .map_or(String::new(), |s| format!(" (split {})", s.name()));
+        return Err(format!("unknown case {id} in {dataset_name}{part}"));
     }
     if !args.cases.is_empty() {
         cases.retain(|c| args.cases.contains(&c.id));
@@ -639,6 +653,7 @@ mod tests {
             candidates: vec!["a".into()],
             instructions,
             cases: ["c001", "c002", "c003"].map(String::from).to_vec(),
+            split: None,
             targets: vec![Target::Sonnet],
             settings: Settings {
                 repetitions: 1,

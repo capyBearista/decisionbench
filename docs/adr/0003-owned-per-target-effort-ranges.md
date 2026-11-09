@@ -1,6 +1,6 @@
 # ADR-0003: One owned dataset with per-target effort ranges
 
-**Status:** Accepted (2026-11-03). Supersedes the dataset-provenance, holdout and label-format parts of [ADR-0002](0002-raw-model-relative-evaluation.md). Superseded in part by [ADR-0005](0005-one-request-per-case-four-targets.md): the Target Models are now Haiku, Sonnet, Opus and Fable, not only Sonnet and Opus. Ranges and the effort scale are unchanged.
+**Status:** Accepted (2026-11-03). Supersedes the dataset-provenance, holdout and label-format parts of [ADR-0002](0002-raw-model-relative-evaluation.md). Its no-holdout rule is reversed by [ADR-0007](0007-split-and-tuning-objective.md), which adds a `split` field. Superseded in part by [ADR-0005](0005-one-request-per-case-four-targets.md): the Target Models are now Haiku, Sonnet, Opus and Fable, not only Sonnet and Opus. Ranges and the effort scale are unchanged.
 
 ## Context
 

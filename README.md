@@ -51,7 +51,7 @@ cargo run -- tui                                                    # terminal U
 
 A first session:
 
-1. `dataset inspect` shows the 66 Cases and their label counts without a network or a key.
+1. `dataset inspect` shows the 66 Cases, their split and their label counts without a network or a key.
 2. Create `~/.config/decisionbench/config.toml` with a Candidate (see below) and set its key (`OPENROUTER_API_KEY`, or `K` in the TUI). Zen free models need no key.
 3. Send one request as a smoke test: `run --candidate NAME --case c002 --target opus --repetitions 1`.
 4. Run the full set, then `history` and `show` the file it prints.
@@ -94,17 +94,18 @@ API keys come from the environment variables `OPENROUTER_API_KEY` (required for 
 | `--candidate NAME` | required | Candidate from the config; repeatable |
 | `--instructions PATH` | bundled `neutral` | Judge Instructions file; repeatable, with distinct names. Any given path replaces the bundled set |
 | `--case ID` | every Case | repeatable |
+| `--split train\|holdout` | both | only the Cases in that part of the dataset; combines with `--case` |
 | `--target haiku\|sonnet\|opus\|fable` | all four | which questions to ask; repeatable. The instructions file must have a section for each |
 | `--repetitions N` | 3 | independent Trials per combination |
 | `--concurrency N` | 1 | Trials in flight at once |
 | `--timeout SECS` | 60 | per request |
-| `--retries N` | 1 | extra Attempts after a transport error or HTTP 408, 429, 500, 502, 503, 504, 524 or 529, after a 1 s pause |
+| `--retries N` | 1 | extra Attempts after a transport error or HTTP 408, 429, 500, 502, 503, 504, 524 or 529, after a pause of 1 s that doubles up to 30 s (a `Retry-After` of up to 60 s can lengthen it) |
 | `--include-unscored` | off | also run Cases that none of the selected targets labels (they can only grade as unscored) |
 | `--config`, `--dataset`, `--out` | see above | |
 
 A reply that arrives in full (2xx) is never retried, even when its effort is invalid; a 2xx whose body is cut off counts as a transport error and is retried. A Trial's outcome is its last Attempt, and every Attempt is kept. Before sending, `run` prints the planned Trial count and the maximum number of requests, then one progress line per finished Trial on stderr, and a summary on stdout.
 
-**Cancelling:** press Ctrl-C (or send SIGTERM or SIGHUP) once to stop starting new Trials; Trials already in flight finish, retries included, and the run is saved as `partial`. If every planned Trial had already started, nothing is dropped and the run still ends `complete`. Press Ctrl-C again to stop at once; the file then has no end record and reads back as partial (interrupted).
+**Cancelling:** press Ctrl-C (or send SIGTERM or SIGHUP) once to stop starting new Trials; Trials already in flight finish, retries included, and the run is saved as `partial`. If every planned Trial had already started, nothing is dropped and the run still ends `complete`. A Trial waiting between retries (up to 30 s per pause, 60 s with `Retry-After`) finishes its retries first, so with a large `--retries` the first Ctrl-C can take minutes to take effect. Press Ctrl-C again to stop at once; the file then has no end record and reads back as partial (interrupted).
 
 **Exit codes:** `0` complete and every Trial answered (an effort may still grade as invalid); `3` complete, but some Trial ended in a provider or transport failure; `130` cancelled (partial); `1` bad config, input or missing key (nothing sent or saved), or the run failed on an internal error such as an evidence write; `2` usage error.
 
@@ -114,6 +115,7 @@ A reply that arrives in full (2xx) is never retried, even when its effort is inv
 
 - `show FILE [--columns auto|prompt|candidate]` prints the full report of one run. After the run header comes a summary: the table described under `compare`, for this run alone, with one column per prompt (or per candidate, see `--columns` there). The rest is accuracy (hit, under, over, invalid and unscored counts per Candidate × Judge Instructions × target, with the denominator), cross-model metrics, consistency, coverage and validity, reliability, latency (median and p95), cost and warnings. A ratio with nothing to divide by prints as `n/a`, not 0%.
 - `compare FILE… [--columns auto|prompt|candidate]` (two or more) first lists everything that makes the runs not directly comparable: dataset, grading revision, schema, targets, provider route, case selection, repetitions, unscored inclusion, candidates, or a run that is not complete. Timeout, concurrency and retries are listed apart as `settings differ`. Different prompts are not a difference on the prompt axis, where they are the columns; likewise candidates present in only some runs are not a difference when candidates are the columns (see `--columns` below). It then prints one table with a row per candidate × target and a column per prompt in each run; the first column is the baseline. A column is named after its prompt, with the first 12 characters of its hash added when two prompts share a name but not content, and ` in <run id>` when the same prompt appears in two runs. Each cell after the first shows its hit count and `+g -l`: the trials (case × repetition) that the baseline missed and this prompt hit, and the reverse. The change is marked `~` (not significant) unless an exact two-sided sign test on the cases that changed gives p < 0.05: each case counts once, up if its repetitions gained more trials than they lost and down if fewer, and cases that stayed the same are ignored. The 5% line is a convention, and with many cells some will look significant by chance. A `pooled` row adds up the rows present in every column (so all columns cover the same candidates and targets) over valid scored predictions, counting a case once per candidate (once per prompt with `--columns candidate`) for the sign test however many targets it covers; it is not a score, and it is left out when no row is present in every column. `--columns candidate` swaps the axes: a column per candidate in each run (named after the candidate, plus ` in <run id>` when two columns share a name; the first is the baseline), and a row per prompt × target (the prompt name, plus its 12-character hash when two prompts share a name but not content). Each delta then compares a candidate with the baseline candidate on the same prompt and target, paired the same way. `--columns prompt` keeps prompts as columns. The default, `auto`, uses prompts when the runs between them hold more than one distinct prompt, otherwise candidates when they hold more than one candidate, otherwise prompts. The table says which it used on its `columns:` line.
+- `score FILE [--dataset PATH] [--allow-holdout]` prints JSON for prompt tuning, per Candidate × prompt and target and pooled: hit, under, over, invalid, failed, coverage, hit rate, **floor** (the hit rate of the best single fixed effort on the same rows) and **lift** (hit rate minus floor). Invalid answers count as misses; Trials with no valid reply are left out and lower coverage. Every Case has a `split` (`train` or `holdout`); `score` refuses a run that includes holdout Cases unless `--allow-holdout` is given, a different dataset than the run used, and prompts that quote a whole Case message of 20 or more characters (case and spacing ignored). That check catches copying, not paraphrase: `prompts/effortless.md` quotes only fragments of c021 and c026, so `score` accepts it, and its scores are in-sample ([ADR-0007](docs/adr/0007-split-and-tuning-objective.md)).
 - `history [DIR]` lists saved runs by creation time (default: the evidence folder above) with state, recorded and planned Trials, Candidates and dataset hash. Unreadable files are listed as such.
 
 The two cross-model metrics sit next to the per-target numbers and never replace them. **Joint hit** is the share of Trials, among those with at least two labelled targets that all gave a valid effort, where every labelled target hit. **Gap agreement** is the share of eligible target pairs that keep the expected order: when two labels do not overlap, the target with the higher range must get a strictly higher effort.
@@ -180,7 +182,7 @@ Grades and costs are **derived when a file is read** and never stored, so a late
 | The Candidates row says `key: missing` or `file error` | No key for that provider, or `credentials.toml` does not parse. A broken credentials file stops runs even when an environment key is set. Fix or delete the file. |
 | Exit code 3 | The run finished but some Trial ended in a provider or transport failure. `show FILE` has the Reliability section; the raw body is kept in the evidence. |
 | Exit code 130, or `partial` in `history` | The run was cancelled or interrupted. The evidence holds the Trials that finished; compare treats partial runs as not comparable. |
-| HTTP 429 or a free-quota error from Zen | The free quota is used up. Retries pause 1 s and do not honour `Retry-After`; wait, lower `--concurrency`, or use a paid model. |
+| HTTP 429 or a free-quota error from Zen | The free quota is used up. Retries pause 1 s, doubling to 30 s, and honour a `Retry-After` in seconds up to 60 s; if they still fail, wait, lower `--concurrency`, or use a paid model. |
 | Timeouts | Raise `--timeout` (default 60 s). Requests honour `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY`. |
 | `unsupported schema_version` | The file was written by another version of the tool. Only schema 4 is read. |
 | `terminal too small` | The TUI needs at least 60x16. |
@@ -197,7 +199,7 @@ Never set `DECISIONBENCH_TEST_BASE_URL` outside tests: it sends every request, k
 - **Fable instructions are drafted.** `prompts/effortless.md` has a Fable section that has not been measured against effortless.
 - **`effortless` is in-sample.** Its task text quotes examples that match Cases in the dataset (see Judge Instructions), so compare it with `neutral` knowing that.
 - **Key redaction is exact-text.** A provider reply that echoes the key in another form (encoded, split) is not caught. Evidence also holds the full prompt, the Case text and the raw reply, so review it before sharing.
-- **Retries are simple.** A fixed 1 s pause, no `Retry-After`, and a complete 2xx reply is never retried (a 2xx cut off mid-body is).
+- **Retries are simple.** Exponential backoff with a `Retry-After` in seconds (not an HTTP-date); concurrency is global, not per provider; a complete 2xx reply is never retried (a 2xx cut off mid-body is).
 - **One request covers all targets**, so the answers within a Trial are not independent; the sign test accounts for this by counting each Case once. The 5% line is a convention, and a table with many cells will show some significant deltas by chance.
 - **TUI.** Terminals narrower than 60 columns or shorter than 16 rows show a size message. The Candidates form hint is not wrapped.
 - **Deferred.** An export contract for other tools, HTTP API, Docker packaging, a label-editing UI, other providers (SubQ, direct TypeSafe), and price scraping. See [issue #1](https://github.com/capyBearista/decisionbench/issues/1).
@@ -207,7 +209,7 @@ Never set `DECISIONBENCH_TEST_BASE_URL` outside tests: it sends every request, k
 
 - [Product and engineering specification](docs/SPEC.md): behaviour, evidence, scoring, scope and testing decisions.
 - [Domain glossary](GLOSSARY.md): the terms used throughout (Candidate, Trial, Attempt, Target Model, Judge Instructions, Prediction).
-- [Architecture decisions](docs/adr/): [0001](docs/adr/0001-standalone-engine.md) standalone engine, [0002](docs/adr/0002-raw-model-relative-evaluation.md) raw model-relative grading, [0003](docs/adr/0003-owned-per-target-effort-ranges.md) per-target ranges, [0004](docs/adr/0004-judge-instructions-axis.md) Judge Instructions, [0005](docs/adr/0005-one-request-per-case-four-targets.md) one request per Case for four targets, [0006](docs/adr/0006-prompts-as-a-comparison-axis.md) prompts as a comparison axis.
+- [Architecture decisions](docs/adr/): [0001](docs/adr/0001-standalone-engine.md) standalone engine, [0002](docs/adr/0002-raw-model-relative-evaluation.md) raw model-relative grading, [0003](docs/adr/0003-owned-per-target-effort-ranges.md) per-target ranges, [0004](docs/adr/0004-judge-instructions-axis.md) Judge Instructions, [0005](docs/adr/0005-one-request-per-case-four-targets.md) one request per Case for four targets, [0006](docs/adr/0006-prompts-as-a-comparison-axis.md) prompts as a comparison axis, [0007](docs/adr/0007-split-and-tuning-objective.md) train/holdout split, tuning score and retry backoff.
 - [Issue tracker convention](docs/agents/issue-tracker.md) and [domain-documentation map](docs/agents/domain.md).
 
 ## Source attribution

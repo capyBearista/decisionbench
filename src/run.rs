@@ -13,8 +13,18 @@ use crate::grade::Target;
 use crate::instructions::JudgeInstructions;
 use crate::provider::{Candidate, agent, now_unix_ms, request_body, retryable, send};
 
-// shortcut: fixed 1 s retry pause, no Retry-After; make it configurable if providers need backoff
-const RETRY_PAUSE: Duration = Duration::from_secs(1);
+const BACKOFF_CAP_SECS: u64 = 30;
+const RETRY_AFTER_CAP_SECS: u64 = 60;
+
+/// The pause before the next Attempt after `failures` failed ones: 1 s, doubling, capped; a longer
+/// `Retry-After` from the provider wins, up to its own cap.
+fn retry_pause(failures: usize, retry_after_secs: Option<u64>) -> Duration {
+    let backoff = 1u64
+        .checked_shl(failures.saturating_sub(1) as u32)
+        .map_or(BACKOFF_CAP_SECS, |s| s.min(BACKOFF_CAP_SECS));
+    let hint = retry_after_secs.map_or(0, |s| s.min(RETRY_AFTER_CAP_SECS));
+    Duration::from_secs(backoff.max(hint))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -136,11 +146,12 @@ fn run_trial(spec: &TrialSpec, job: &Job, settings: &Settings, agent: &ureq::Age
             &request,
         );
         let retry = retryable(&attempt) && attempts.len() < settings.retries as usize;
+        let retry_after = attempt.retry_after_secs;
         attempts.push(attempt);
         if !retry {
             break;
         }
-        thread::sleep(RETRY_PAUSE);
+        thread::sleep(retry_pause(attempts.len(), retry_after));
     }
     TrialRecord {
         seq: spec.seq,
@@ -195,13 +206,32 @@ pub fn execute(
 
 #[cfg(test)]
 mod tests {
+    use super::retry_pause;
+
+    #[test]
+    fn the_retry_pause_doubles_from_one_second_up_to_a_cap() {
+        let secs = |failures| retry_pause(failures, None).as_secs();
+        assert_eq!([secs(1), secs(2), secs(3), secs(4)], [1, 2, 4, 8]);
+        assert_eq!([secs(6), secs(7), secs(50)], [30, 30, 30]);
+    }
+
+    #[test]
+    fn retry_after_lengthens_the_pause_but_never_past_its_cap() {
+        let pause = |failures, after| retry_pause(failures, after).as_secs();
+        assert_eq!(pause(1, Some(10)), 10);
+        assert_eq!(pause(1, Some(600)), 60);
+        // A short hint never shortens the backoff.
+        assert_eq!(pause(4, Some(2)), 8);
+        assert_eq!(pause(2, Some(0)), 2);
+    }
+
     use super::*;
     use crate::dataset::parse_cases;
 
     fn cases() -> Vec<Case> {
         parse_cases(
-            br#"[{"id":"a","message":"1","ok":{"sonnet":"low","opus":"low"}},
-                 {"id":"b","message":"2","ok":{"sonnet":"low"}}]"#,
+            br#"[{"id":"a","message":"1","split":"train","ok":{"sonnet":"low","opus":"low"}},
+                 {"id":"b","message":"2","split":"train","ok":{"sonnet":"low"}}]"#,
         )
         .unwrap()
     }

@@ -311,6 +311,9 @@ pub struct Attempt {
     pub raw_response: Option<String>,
     /// The transport failure text.
     pub error: Option<String>,
+    /// The reply's `Retry-After` in whole seconds, when it had one in that form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
 }
 
 pub fn now_unix_ms() -> u64 {
@@ -351,8 +354,15 @@ pub fn send(agent: &ureq::Agent, url: &str, key: Option<&str>, body: &Value) -> 
     }
     // Keep the status when the headers arrived but the body could not be read.
     let mut status = None;
+    let mut retry_after_secs = None;
     let result = request.send(body.to_string()).and_then(|mut response| {
         status = Some(response.status().as_u16());
+        // shortcut: only the seconds form; an HTTP-date is ignored, parse it if a provider sends one
+        retry_after_secs = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok());
         // shortcut: invalid UTF-8 bytes become U+FFFD; store raw bytes (e.g. base64) if a provider ever needs them
         response
             .body_mut()
@@ -384,6 +394,7 @@ pub fn send(agent: &ureq::Agent, url: &str, key: Option<&str>, body: &Value) -> 
         http_status,
         raw_response: raw_response.map(redact),
         error: error.map(redact),
+        retry_after_secs,
     }
 }
 
@@ -680,7 +691,7 @@ mod tests {
     fn case(context: Option<&str>) -> Case {
         let context = context.map_or(String::new(), |c| format!(r#","context":"{c}""#));
         parse_cases(
-            format!(r#"[{{"id":"c1","message":"do it"{context},"ok":{{"opus":"low"}}}}]"#)
+            format!(r#"[{{"id":"c1","message":"do it"{context},"split":"train","ok":{{"opus":"low"}}}}]"#)
                 .as_bytes(),
         )
         .unwrap()
@@ -744,6 +755,7 @@ mod tests {
             http_status,
             raw_response: None,
             error: None,
+            retry_after_secs: None,
         }
     }
 
