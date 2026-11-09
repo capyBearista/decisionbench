@@ -155,6 +155,12 @@ Which effort should Claude Haiku 5.5 use for the next message?
 
 A file may leave a model out, but asking about it with `--target` is then an input error (exit 1) before anything is sent. Evidence records the set's name, SHA-256 and full text.
 
+## Tuning Judge Instructions
+
+[`tuning/`](tuning/) holds a kit for improving a Judge Instructions file with a Claude Code agent, in the style of [autoresearch](https://github.com/karpathy/autoresearch). Point the agent at [`tuning/program.md`](tuning/program.md). It edits only [`tuning/prompt.md`](tuning/prompt.md) (a copy of `neutral`), runs the train part of the dataset against at least five Decision Models, and keeps a change only when the mean lift over the best fixed answer rises by at least 1 point or twice the run-to-run noise, whichever is larger, and no model's lift falls by more than 1 point or twice that model's noise, whichever is larger. The binary supplies `run --split train` and `score`; [`tuning/decide.py`](tuning/decide.py) does the arithmetic (eligible models, noise, keep or discard) so that the agent does not. `python3 -m unittest discover -s tuning` tests it.
+
+The agent never reads or runs the holdout. After the loop, you run the holdout once for the tuned prompt and for `neutral` and promote the tuned prompt only if it wins by more than the noise ([ADR-0007](docs/adr/0007-split-and-tuning-objective.md)). The Candidates are yours: name one per distinct Decision Model.
+
 ## Offline grading
 
 A predictions file is a JSON array such as `[{"case":"c001","target":"sonnet","effort":"high"}]`; `target` is `haiku`, `sonnet`, `opus` or `fable`. A Case with no label for that target grades as unscored, whatever the effort. Otherwise only an exact effort name (`low`, `medium`, `high`, `xhigh`, `max`) is valid; anything else, or a missing `effort`, grades as invalid. The raw effort is printed as re-serialized JSON. Accuracy counts hits among valid, scored predictions.
