@@ -20,10 +20,12 @@ import os
 import sys
 
 MIN_LIFT = 0.02  # a model must beat the best fixed answer by this much to be eligible
-MIN_DELTA = 0.01  # smallest objective gain that counts as a gain
+MIN_DELTA = 0.005  # smallest objective gain that counts, when twice the mean noise is less (deterministic models)
+MIN_DROP = 0.01  # the most one model may fall, when twice its noise is less
 MIN_COVERAGE = 0.90  # share of Trials that must have a valid reply
 EPS = 1e-9  # lifts are floats: a gain of exactly delta must not fail on rounding
 LEVELS = ["low", "medium", "high", "xhigh", "max"]
+LEVEL_INDEX = {name: i for i, name in enumerate(LEVELS)}
 
 
 def load(path):
@@ -89,7 +91,68 @@ def selection(path, score):
     }
 
 
-def baseline(a, b, sel_a, sel_b):
+def trials(path):
+    with open(path) as f:
+        for line in f:
+            t = json.loads(line)
+            if t.get("type") == "trial":
+                yield t
+
+
+def grades(t):
+    """{target: hit | under | over | invalid | failed} for each labelled target of a Trial."""
+    answered = bool(t["attempts"]) and t["attempts"][-1]["disposition"] == "answered"
+    try:  # `score` counts an answered reply that cannot be read as invalid for every labelled target.
+        answers = json.loads(t["attempts"][-1]["raw_response"])["answers"] if answered else {}
+    except (ValueError, KeyError, TypeError):
+        answers = {}
+    if not isinstance(answers, dict):
+        answers = {}
+    out = {}
+    for target in t["targets"]:
+        label = t["labels"].get(target)
+        if label is None:
+            continue
+        entry = answers.get(f"effort_{target}")
+        choice = entry.get("choice") if isinstance(entry, dict) else None
+        lo, _, hi = label.partition("-")
+        if not answered:
+            out[target] = "failed"
+        elif not isinstance(choice, str) or choice not in LEVEL_INDEX:
+            out[target] = "invalid"
+        elif LEVEL_INDEX[choice] < LEVEL_INDEX[lo]:
+            out[target] = "under"
+        elif LEVEL_INDEX[choice] > LEVEL_INDEX[hi or lo]:
+            out[target] = "over"
+        else:
+            out[target] = "hit"
+    return out
+
+
+def spread(paths, repetitions):
+    """{candidate: expected run-to-run difference of its accuracy}, from how often each of its predictions
+    (Case and target) is a hit over every repetition of every run. The difference of two pooled lifts
+    misses hits and misses that change but cancel out; this does not. An answer that changes from one
+    miss to another (under to over) does not move the lift, so it is not noise. A model whose hits never
+    change gets 0. Its standard deviation stands in for the difference two runs would show."""
+    hits = {}
+    for path in paths:
+        for t in trials(path):
+            for target, g in grades(t).items():
+                hits.setdefault(t["candidate"], {}).setdefault((t["case_id"], target), []).append(g == "hit")
+    out = {}
+    for name, items in hits.items():
+        var = 0.0  # sum of each prediction's sample variance over its observations
+        for xs in items.values():
+            if len(xs) > 1:
+                m = sum(xs) / len(xs)
+                var += sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
+        # One run averages `repetitions` observations of each of len(items) predictions.
+        out[name] = (2 * var / (repetitions * len(items) ** 2)) ** 0.5
+    return out
+
+
+def baseline(a, b, sel_a, sel_b, spreads=None):
     for name, s in (("A", a), ("B", b)):
         if (why := usable(s)):
             fail(f"score {name}: {why}")
@@ -108,7 +171,9 @@ def baseline(a, b, sel_a, sel_b):
         if la is None or lb is None:  # no answered row at all: nothing to tune against
             lift, noise, ok = 0.0, 0.0, False
         else:
-            lift, noise = (la + lb) / 2, abs(la - lb)
+            # The observed difference, or the spread of the repeated answers when that is larger: two
+            # totals can match while answers change underneath.
+            lift, noise = (la + lb) / 2, max(abs(la - lb), (spreads or {}).get(name, 0.0))
             ok = cover >= MIN_COVERAGE and lift > max(2 * noise, MIN_LIFT)
         models[name] = {"predictions": size(ma[name]), "lift": lift, "noise": noise, "coverage": cover, "eligible": ok}
     result = {"dataset_sha256": a["dataset_sha256"], "selection": sel_a, "models": models}
@@ -176,7 +241,7 @@ def judge(score, base, best, sel, commit=None):
     drops = {
         n: lifts[n] - prev["lifts"][n]
         for n in eligible
-        if lifts[n] - prev["lifts"][n] < -max(2 * base["models"][n]["noise"], MIN_DELTA) - EPS
+        if lifts[n] - prev["lifts"][n] < -max(2 * base["models"][n]["noise"], MIN_DROP) - EPS
     }
     keep = gain >= d["delta"] - EPS and not drops
     return {
@@ -190,46 +255,28 @@ def judge(score, base, best, sel, commit=None):
     }
 
 
-LEVEL_INDEX = {name: i for i, name in enumerate(LEVELS)}
-
-
 def misses(path, limit):
     """Missed train Trials from an evidence file, for finding what to change in the prompt."""
     rows, counts = [], {}
-    with open(path) as f:
-        for line in f:
-            t = json.loads(line)
-            if t.get("type") != "trial" or not t["attempts"] or t["attempts"][-1]["disposition"] != "answered":
+    for t in trials(path):
+        if not t["attempts"] or t["attempts"][-1]["disposition"] != "answered":
+            continue
+        try:
+            answers = json.loads(t["attempts"][-1]["raw_response"])["answers"]
+        except (ValueError, KeyError, TypeError):
+            answers = {}
+        for target, kind in grades(t).items():
+            if kind == "hit":
                 continue
-            # `score` counts an answered reply that cannot be read as invalid for every labelled target.
-            try:
-                answers = json.loads(t["attempts"][-1]["raw_response"])["answers"]
-            except (ValueError, KeyError, TypeError):
-                answers = {}
-            if not isinstance(answers, dict):
-                answers = {}
-            for target in t["targets"]:
-                label = t["labels"].get(target)
-                entry = answers.get(f"effort_{target}")
-                choice = entry.get("choice") if isinstance(entry, dict) else None
-                if label is None:
-                    continue
-                lo, _, hi = label.partition("-")
-                if not isinstance(choice, str) or choice not in LEVEL_INDEX:
-                    kind = "invalid"
-                elif LEVEL_INDEX[choice] < LEVEL_INDEX[lo]:
-                    kind = "under"
-                elif LEVEL_INDEX[choice] > LEVEL_INDEX[hi or lo]:
-                    kind = "over"
-                else:
-                    continue
-                counts[(target, kind)] = counts.get((target, kind), 0) + 1
-                rows.append({
-                    "candidate": t["candidate"], "case": t["case_id"], "target": target, "label": label,
-                    "predicted": choice if isinstance(choice, str) else None, "kind": kind,
-                    "message": t["request"]["state"]["next_message"][:300],
-                    "recent_conversation": (t["request"]["state"].get("recent_conversation") or "")[-300:],
-                })
+            entry = answers.get(f"effort_{target}") if isinstance(answers, dict) else None
+            choice = entry.get("choice") if isinstance(entry, dict) else None
+            counts[(target, kind)] = counts.get((target, kind), 0) + 1
+            rows.append({
+                "candidate": t["candidate"], "case": t["case_id"], "target": target, "label": t["labels"][target],
+                "predicted": choice if isinstance(choice, str) else None, "kind": kind,
+                "message": t["request"]["state"]["next_message"][:300],
+                "recent_conversation": (t["request"]["state"].get("recent_conversation") or "")[-300:],
+            })
     # Trials are written as they finish, so the first rows favour fast models: sample across the whole file.
     step = max(1, -(-len(rows) // limit)) if limit > 0 else 1
     return {"counts": {f"{k[0]} {k[1]}": v for k, v in sorted(counts.items())}, "misses": rows[::step][:limit]}
@@ -292,7 +339,8 @@ def main():
 def command(args):
     if args.cmd == "baseline":
         a, b = load(args.score_a), load(args.score_b)
-        result = baseline(a, b, selection(args.runs[0], a), selection(args.runs[1], b))
+        sel_a = selection(args.runs[0], a)
+        result = baseline(a, b, sel_a, selection(args.runs[1], b), spread(args.runs, sel_a["repetitions"]))
         save(args.out, result)
         print(json.dumps(result, indent=2))
         sys.exit(0 if len(result["eligible_models"]) >= 2 else 12)
